@@ -6,7 +6,9 @@ Input: a JSON file (or '-' for stdin) holding either the raw `{"topic":"diagnost
 capture the line with the usual device tooling first.
 
 Stages follow `pet_p4_touch_init()` in `pet_p4_touch.c`:
-  not_started -> i2c_init -> probe -> identify_register_touch -> panel_io -> controller -> queue -> task -> ready
+  not_started -> power_on_wait -> i2c_init -> probe
+  -> identify_cst328 / identify_register_touch -> panel_io -> controller
+  -> queue -> task -> interrupt -> ready
 
 Usage:
   python firmware/tools/touch_diagnose.py status.json [--json]
@@ -47,12 +49,14 @@ def classify(health: dict[str, Any]) -> dict[str, Any]:
     """Map stage + errors + counters to one category, the evidence used and the next step.
 
     The categories are deliberately coarse: they tell the person with the board which part to
-    look at (panel flex, shared I2C bus, driver identification, memory, polling) and nothing more.
+    look at (panel flex, shared I2C bus, driver identification, memory, interrupts or polling).
     """
     stage = str(health.get("stage", ""))
     error = str(health.get("error", ""))
-    probes = {key: str(health.get(key, "")) for key in ("primaryProbe", "backupProbe", "probe0x15", "probe0x38", "probe0x10", "probe0x18")}
-    evidence = {"stage": stage, "error": error, **probes, "controller": health.get("controller"), "chipId": health.get("chipId"), "address": health.get("address")}
+    probes = {key: str(health.get(key, "")) for key in ("primaryProbe", "backupProbe", "probe0x1a", "probe0x15", "probe0x38", "probe0x10", "probe0x18")}
+    interrupt_gpio = health.get("interruptGpio", -1)
+    interrupt_mode = type(interrupt_gpio) is int and interrupt_gpio >= 0
+    evidence = {"stage": stage, "error": error, **probes, "controller": health.get("controller"), "chipId": health.get("chipId"), "address": health.get("address"), "interruptGpio": interrupt_gpio}
 
     def result(category: str, verdict: str, next_step: str) -> dict[str, Any]:
         assert category in CATEGORIES
@@ -61,22 +65,27 @@ def classify(health: dict[str, Any]) -> dict[str, Any]:
     if stage in ("", "not_started"):
         return result("display", "触控初始化从未运行：主流程只在 LCD 初始化成功后才调用 pet_p4_touch_init()",
                       "先看同一份 diagnostics 里的显示/LCD 状态与启动日志；触控不是第一故障点")
+    if stage == "power_on_wait":
+        return result("runtime", "触控正在等待电源和 RC 复位稳定", "上电至少 1 秒后重新查询初始化阶段")
     if stage == "i2c_init":
         return result("bus", f"共享 I2C 总线初始化失败（{error}）；音频编解码器也走这条总线",
                       "检查 I2C 上拉与 SDA/SCL 是否被拉死；确认音频 I2C 是否同样报错（pet_p4_audio.c 的 bsp_i2c_init）")
     if stage == "probe":
-        if TIMEOUT in (probes["primaryProbe"], probes["backupProbe"], error):
-            return result("bus", "GT911 地址探测超时：总线上有设备把 SDA/SCL 拉住，或总线时钟异常",
+        if TIMEOUT in (probes["primaryProbe"], probes["backupProbe"], probes["probe0x1a"], error):
+            return result("bus", "触控地址探测超时，可能存在 SDA/SCL 被拉住或总线时钟异常",
                           "断开触控排线后重试探测；若仍超时是总线/其他器件问题，不是触控面板")
         codec_alive = OK in (probes["probe0x10"], probes["probe0x18"])
-        if probes["probe0x15"] != OK and probes["probe0x38"] != OK:
+        if OK not in (probes["probe0x1a"], probes["probe0x15"], probes["probe0x38"]):
             if codec_alive:
-                return result("hardware", "总线正常（0x10/0x18 有应答），但 0x5D/0x14/0x15/0x38 全无应答：触控控制器不在总线上",
+                return result("hardware", "音频地址 0x10/0x18 有应答，触控地址 0x1A/0x5D/0x14/0x15/0x38 的探测结果均为无应答",
                               "检查触控排线是否插反/未插、面板是否带触控层、触控供电；固件无需改动")
             return result("hardware", "所有探测地址都无应答，且音频编解码地址也无应答：整条总线上没有设备应答",
                           "优先怀疑总线供电或排线；确认音频是否同样不可用后再归类为触控硬件问题")
-        return result("driver", "0x15/0x38 有应答但停在 probe 阶段：地址应答后未进入识别",
+        return result("driver", "0x1A/0x15/0x38 中存在应答地址，初始化停在 probe 阶段",
                       "少见；对照 pet_p4_touch_init() 的 probe 分支与 g_touch_io 创建错误")
+    if stage == "identify_cst328":
+        return result("driver", f"CST328 协议或分辨率校验失败（{error}）",
+                      "核对启动日志中的 0xCACA 标识、480×640 分辨率及 I²C 读写结果")
     if stage == "identify_register_touch":
         if error == NOT_SUPPORTED:
             return result("driver", f"地址 0x{int(health.get('address') or 0):02x} 应答，但芯片 ID 0x{int(health.get('chipId') or 0):02x} 既不是 CST826(0x11) 也不是 FT6336U(0x64)",
@@ -89,18 +98,24 @@ def classify(health: dict[str, Any]) -> dict[str, Any]:
     if stage in ("queue", "task") or error == NO_MEM:
         return result("memory", "触控队列或任务创建失败（内存不足）",
                       "看启动时的堆/任务栈预算；不是触控硬件问题")
+    if stage == "interrupt":
+        return result("driver", f"触控 GPIO 中断配置失败（{error}）",
+                      "核对 GPIO22 输入配置、GPIO ISR 服务及中断处理函数注册结果")
     if stage == "ready":
         samples = int(health.get("samples") or 0)
         consecutive = int(health.get("consecutiveErrors") or 0)
         poll_errors = int(health.get("pollErrors") or 0)
         contacts = int(health.get("contacts") or 0)
-        if samples == 0:
-            return result("runtime", "初始化完成但采样任务没有产生样本", "确认任务是否被更高优先级任务饿死；看 pollErrors 是否同步增长")
-        if consecutive >= 3 or (poll_errors and poll_errors * 10 >= samples):
-            return result("runtime", f"就绪但轮询持续出错（pollErrors={poll_errors}, consecutiveErrors={consecutive}, samples={samples}）",
+        if consecutive >= 3 or error not in ("", OK):
+            return result("runtime", f"触控读取异常（error={error}, pollErrors={poll_errors}, consecutiveErrors={consecutive}, samples={samples}）",
                           "总线在运行时不稳定：检查排线接触与 I2C 时钟；控制器可能间歇掉线")
+        if samples == 0:
+            if interrupt_mode:
+                return result("healthy", f"控制器 {health.get('controller')} 已就绪，正在等待 GPIO{interrupt_gpio} 触摸中断",
+                              f"触摸屏幕后再次查询样本数，并核对 TP_INT 到 GPIO{interrupt_gpio} 的飞线")
+            return result("runtime", "初始化完成但采样任务没有产生样本", "确认任务是否被更高优先级任务饿死；看 pollErrors 是否同步增长")
         if contacts == 0:
-            return result("healthy", f"控制器 {health.get('controller')} 就绪、轮询正常，但还没有观察到任何触点（samples={samples}）",
+            return result("healthy", f"控制器 {health.get('controller')} 已就绪，成功样本数为 {samples}，触点数为 0",
                           "在设备上按一下屏幕后再抓一次 diagnostics；或运行 diagnostics/touch-test 看 testScore")
         return result("healthy", f"控制器 {health.get('controller')} 正常：samples={samples}, contacts={contacts}", "可以在 PC 端按能力文件启用触屏组件")
     return result("unknown", f"未知阶段 {stage!r}（error={error}）", "核对固件版本是否与本工具的阶段表一致")

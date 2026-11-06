@@ -1,0 +1,68 @@
+{
+    "error_string": "Success.",
+    "export_time": 1925,
+    "layer_height": 0.1599999964237213,
+    "plate_index": 0,
+    "prepare_time": 57,
+    "return_code": 0,
+    "sliced_plates": [
+        {
+            "feature_type_times": {
+                "Bridge": 115.26258087158203,
+                "Brim": 27.19207191467285,
+                "Custom": 397.7933044433594,
+                "Flush": 25.0,
+                "Gap infill": 2.240673542022705,
+                "Inner wall": 3541.01806640625,
+                "Internal solid infill": 1261.1182861328125,
+                "Outer wall": 2802.30908203125,
+                "Overhang wall": 157.96884155273438,
+                "Sparse infill": 1472.9647216796875,
+                "Support": 2450.796142578125,
+                "Support interface": 403.4094543457031,
+                "Support transition": 89.03942108154297,
+                "Top surface": 85.32466125488281,
+                "Travel": 2677.091796875,
+                "Undefined": 2660.53564453125
+            },
+            "filament_change_times": 0,
+            "filaments": [
+                {
+                    "filament_id": "GFB99",
+                    "id": 1,
+                    "main_used_g": 44.86507034301758,
+                    "total_used_g": 44.86507034301758
+                }
+            ],
+            "generate_support_material_time": 2159,
+            "id": 1,
+            "infill_time": 541,
+            "layer_filament_change": 0,
+            "main_predication": 15064.078125,
+            "make_perimeters_time": 509,
+            "obj_cached_cnt": 0,
+            "objects": [
+                {
+                    "bbox": {
+                        "depth": 97.00733947753906,
+                        "height": 36.77238082885742,
+                        "width": 88.5,
+                        "x": 83.74999237060547,
+                        "y": 79.49633026123047,
+                        "z": 0.0
+                    },
+                    "id": 5,
+                    "name": "HD28091-option1-R10-screen-up.stl",
+                    "triangle_count": 24974
+                }
+            ],
+            "sliced_time": 4969,
+            "sliced_time_with_cache": 1658,
+            "total_predication": 15495.28515625,
+            "triangle_count": 24974,
+            "warning_message": ""
+        }
+    ],
+    "sparse_infill_density": 20.0,
+    "wall_loops": 4
+}

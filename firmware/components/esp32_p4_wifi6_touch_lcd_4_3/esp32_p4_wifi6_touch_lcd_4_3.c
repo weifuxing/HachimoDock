@@ -6,7 +6,7 @@
  * licenses/DEPENDENCY-LICENSE-NOTICE.md for upstream provenance and notices.
  */
 /*
- * Local 480x640 desk-pet display BSP adaptations.
+ * HD28091C40-V1 480x640 display with the Rev A RC-reset adapter.
  * The MIPI command return path is treated as write-only during panel startup.
  */
 #include "sdkconfig.h"
@@ -33,6 +33,8 @@
 
 static const char *TAG = "ESP32_P4_4_3";
 
+// Supplier BOE ZV028V0Q-N10-1QP0 ADS 480x640, 45Duty, 190802.
+// C1 specifies internal VFP=12; host VBP>=16 and external VFP>=14.
 static const st7701_lcd_init_cmd_t vendor_specific_init_default[] = {
     {0xFF, (uint8_t[]){0x77, 0x01, 0x00, 0x00, 0x13}, 5, 0},
     {0xEF, (uint8_t[]){0x08}, 1, 0},
@@ -45,10 +47,10 @@ static const st7701_lcd_init_cmd_t vendor_specific_init_default[] = {
     {0xB1, (uint8_t[]){0x0A, 0x19, 0x21, 0x0A, 0x0C, 0x00, 0x0C, 0x03, 0x03, 0x23, 0x01, 0x0E, 0x0C, 0x27, 0x2B, 0x1C}, 16, 0},
     {0xFF, (uint8_t[]){0x77, 0x01, 0x00, 0x00, 0x11}, 5, 0},
     {0xB0, (uint8_t[]){0x5D}, 1, 0},
-    {0xB1, (uint8_t[]){0x61}, 1, 0},
-    {0xB2, (uint8_t[]){0x84}, 1, 0},
+    {0xB1, (uint8_t[]){0x4F}, 1, 0},
+    {0xB2, (uint8_t[]){0x00}, 1, 0},
     {0xB3, (uint8_t[]){0x80}, 1, 0},
-    {0xB5, (uint8_t[]){0x4D}, 1, 0},
+    {0xB5, (uint8_t[]){0x0C}, 1, 0},
     {0xB7, (uint8_t[]){0x85}, 1, 0},
     {0xB8, (uint8_t[]){0x20}, 1, 0},
     {0xC1, (uint8_t[]){0x78}, 1, 0},
@@ -59,17 +61,18 @@ static const st7701_lcd_init_cmd_t vendor_specific_init_default[] = {
     {0xE2, (uint8_t[]){0x20, 0x20, 0x44, 0x44, 0x96, 0xA0, 0x00, 0x00, 0x96, 0xA0, 0x00, 0x00}, 12, 0},
     {0xE3, (uint8_t[]){0x00, 0x00, 0x22, 0x22}, 4, 0},
     {0xE4, (uint8_t[]){0x44, 0x44}, 2, 0},
-    {0xE5, (uint8_t[]){0x0D, 0x91, 0xA0, 0xA0, 0x0F, 0x93, 0xA0, 0xA0, 0x09, 0x8D, 0xA0, 0xA0, 0x0B, 0x8F, 0xA0, 0xA0}, 16, 0},
+    {0xE5, (uint8_t[]){0x0D, 0x91, 0x0A, 0xA0, 0x0F, 0x93, 0x0A, 0xA0, 0x09, 0x8D, 0x0A, 0xA0, 0x0B, 0x8F, 0x0A, 0xA0}, 16, 0},
     {0xE6, (uint8_t[]){0x00, 0x00, 0x22, 0x22}, 4, 0},
     {0xE7, (uint8_t[]){0x44, 0x44}, 2, 0},
-    {0xE8, (uint8_t[]){0x0C, 0x90, 0xA0, 0xA0, 0x0E, 0x92, 0xA0, 0xA0, 0x08, 0x8C, 0xA0, 0xA0, 0x0A, 0x8E, 0xA0, 0xA0}, 16, 0},
+    {0xE8, (uint8_t[]){0x0C, 0x90, 0x0A, 0xA0, 0x0E, 0x92, 0x0A, 0xA0, 0x08, 0x8C, 0x0A, 0xA0, 0x0A, 0x8E, 0x0A, 0xA0}, 16, 0},
     {0xE9, (uint8_t[]){0x36, 0x00}, 2, 0},
     {0xEB, (uint8_t[]){0x00, 0x01, 0xE4, 0xE4, 0x44, 0x88, 0x40}, 7, 0},
     {0xED, (uint8_t[]){0xFF, 0x45, 0x67, 0xFA, 0x01, 0x2B, 0xCF, 0xFF, 0xFF, 0xFC, 0xB2, 0x10, 0xAF, 0x76, 0x54, 0xFF}, 16, 0},
     {0xEF, (uint8_t[]){0x10, 0x0D, 0x04, 0x08, 0x3F, 0x1F}, 6, 0},
     {0x11, (uint8_t[]){0x00}, 0, 120},
-    {0x29, (uint8_t[]){0x00}, 0, 0},
+    {0x36, (uint8_t[]){0x00}, 1, 0},
     {0x35, (uint8_t[]){0x00}, 1, 0},
+    {0x29, (uint8_t[]){0x00}, 0, 0},
 };
 
 #if (BSP_CONFIG_NO_GRAPHIC_LIB == 0)
@@ -428,6 +431,10 @@ esp_codec_dev_handle_t bsp_audio_codec_microphone_init(void)
 
 esp_err_t bsp_display_brightness_init(void)
 {
+    if (BSP_LCD_BACKLIGHT < 0) {
+        brightness = 100; // Adapter EN is tied to its supply.
+        return ESP_OK;
+    }
     // Setup LEDC peripheral for PWM backlight control
     const ledc_channel_config_t LCD_backlight_channel = {
         .gpio_num = BSP_LCD_BACKLIGHT,
@@ -452,6 +459,7 @@ esp_err_t bsp_display_brightness_init(void)
 
 esp_err_t bsp_display_brightness_deinit(void)
 {
+    if (BSP_LCD_BACKLIGHT < 0) return ESP_OK;
     const ledc_timer_config_t LCD_backlight_timer = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
         .timer_num = 1,
@@ -464,6 +472,9 @@ esp_err_t bsp_display_brightness_deinit(void)
 
 esp_err_t bsp_display_brightness_set(int brightness_percent)
 {
+    if (BSP_LCD_BACKLIGHT < 0) {
+        return brightness_percent == 100 ? ESP_OK : ESP_ERR_NOT_SUPPORTED;
+    }
     if (brightness_percent > 100)
     {
         brightness_percent = 100;
@@ -517,7 +528,7 @@ static esp_err_t bsp_enable_dsi_phy_power(void)
 esp_err_t bsp_display_new(const bsp_display_config_t *config, esp_lcd_panel_handle_t *ret_panel, esp_lcd_panel_io_handle_t *ret_io)
 {
     esp_err_t ret = ESP_OK;
-    bsp_lcd_handles_t handles;
+    bsp_lcd_handles_t handles = {0};
     ret = bsp_display_new_with_handles(config, &handles);
 
     *ret_panel = handles.panel;
@@ -531,6 +542,8 @@ esp_err_t bsp_display_new_with_handles(const bsp_display_config_t *config, bsp_l
     esp_err_t ret = ESP_OK;
 
     ESP_RETURN_ON_ERROR(bsp_display_brightness_init(), TAG, "Brightness init failed");
+    // Allow the adapter supply and both RC resets to settle before any commands.
+    vTaskDelay(pdMS_TO_TICKS(BSP_LCD_POWER_ON_DELAY_MS));
     ESP_RETURN_ON_ERROR(bsp_enable_dsi_phy_power(), TAG, "DSI PHY power failed");
 
     /* create MIPI DSI bus first, it will initialize the DSI PHY as well */
@@ -547,11 +560,11 @@ esp_err_t bsp_display_new_with_handles(const bsp_display_config_t *config, bsp_l
 
     ESP_LOGI(TAG, "Install MIPI DSI LCD control panel");
     // we use DBI interface to send LCD commands and parameters
-    esp_lcd_panel_io_handle_t io;
+    esp_lcd_panel_io_handle_t io = NULL;
     esp_lcd_dbi_io_config_t dbi_config = {
         .virtual_channel = 0,
-        .lcd_cmd_bits = 8,   // according to the LCD ILI9881C spec
-        .lcd_param_bits = 8, // according to the LCD ILI9881C spec
+        .lcd_cmd_bits = 8,
+        .lcd_param_bits = 8,
     };
     ESP_GOTO_ON_ERROR(esp_lcd_new_panel_io_dbi(mipi_dsi_bus, &dbi_config, &io), err, TAG, "New panel IO failed");
 
@@ -563,9 +576,8 @@ esp_err_t bsp_display_new_with_handles(const bsp_display_config_t *config, bsp_l
     esp_lcd_dpi_panel_config_t dpi_config = {
         .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
 #if CONFIG_ESP32P4_REV_MIN_FULL >= 300
-        // IDF 5.5.4 rounds 240 / 25 to 10, then compensates the horizontal
-        // porch by -21 pixels (514 * 24 / 25 - 514). Our 10-pixel front
-        // porch cannot absorb that correction. Use an exact divider on v3.
+        // Use an exact divider on v3 so the SDK cannot shorten the line
+        // below the supplier's RTNI minimum when rounding 25 MHz to 24 MHz.
         .dpi_clock_freq_mhz = 24,
 #else
         .dpi_clock_freq_mhz = 25,
@@ -578,16 +590,18 @@ esp_err_t bsp_display_new_with_handles(const bsp_display_config_t *config, bsp_l
             .v_size = BSP_LCD_V_RES,
             .hsync_back_porch = 20,
             .hsync_pulse_width = 4,
-            .hsync_front_porch = 10,
-            .vsync_back_porch = 14,
+            // C2 RTNI=0x14 requires 512 + 16*20 = 832 PCLK per line.
+            .hsync_front_porch = 328,
+            .vsync_back_porch = 16,
             .vsync_pulse_width = 4,
-            .vsync_front_porch = 8,
+            .vsync_front_porch = 14,
         },
         .flags.use_dma2d = true,
     };
     dpi_config.num_fbs = CONFIG_BSP_LCD_DPI_BUFFER_NUMS;
 
-    ESP_LOGI(TAG, "Install Waveshare ESP32-P4-WIFI6-Touch-LCD-4B LCD control panel");
+    ESP_LOGI(TAG, "Install HD28091C40-V1 LCD, lanes=%d, clock=%u MHz",
+             BSP_LCD_MIPI_DSI_LANE_NUM, (unsigned)dpi_config.dpi_clock_freq_mhz);
     st7701_vendor_config_t vendor_config = {
         .init_cmds = vendor_specific_init_default,
         .init_cmds_size = sizeof(vendor_specific_init_default) / sizeof(st7701_lcd_init_cmd_t),
@@ -624,6 +638,7 @@ err:
     if (panel_handle)
     {
         esp_lcd_panel_del(panel_handle);
+        panel_handle = NULL;
     }
     if (io)
     {

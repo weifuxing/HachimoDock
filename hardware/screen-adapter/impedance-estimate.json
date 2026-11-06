@@ -1,0 +1,25 @@
+{
+  "w_mil": 16,
+  "s_mil": 14,
+  "g_mil": 6,
+  "h_mil": 59.449,
+  "er": 4.5,
+  "mask_thickness_mm": 0.01,
+  "grid_mm": 0.01,
+  "z_diff_ohm": 106.92217195582346,
+  "iterations": [
+    606,
+    612
+  ],
+  "note": "二维静电有限差分名义估算，非板厂阻抗保证",
+  "target_ohm": 100,
+  "method": "二维奇模静电有限差分，空气电容与介质电容求准TEM阻抗",
+  "manufacturing_verified": false,
+  "limitations": [
+    "仅均匀主干截面",
+    "不含扇出、过孔、拐角、附近走线和地铜开槽",
+    "不含板厂材料及工艺公差"
+  ],
+  "applies_to_current_design": false,
+  "status": "历史16mil/14mil均匀截面估算；当前工程布线已调整，需重新按板厂实际叠层核算"
+}

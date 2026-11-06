@@ -32,8 +32,12 @@
 #define BSP_LCD_H_RES              (480)
 #define BSP_LCD_V_RES              (640)
 
-#define BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS (800)
-#define BSP_LCD_MIPI_DSI_LANE_NUM          (1)    // WLK2802MIPI-15P/ST7701S uses 1 data lane
+// ST7701S two-lane limit is 550 Mbps/lane. Start at 500 pending panel validation.
+#define BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS (500)
+#define BSP_LCD_MIPI_DSI_LANE_NUM          (2)    // HD28091C40-V1 adapter routes D0 and D1
+
+// HD28091 adapter Rev A uses independent RC resets for LCD and CST328.
+#define BSP_LCD_POWER_ON_DELAY_MS         (1000)
 
 #define BSP_MIPI_DSI_PHY_PWR_LDO_CHAN       (3)  // LDO_VO3 is connected to VDD_MIPI_DPHY
 #define BSP_MIPI_DSI_PHY_PWR_LDO_VOLTAGE_MV (2500)
@@ -64,10 +68,9 @@ typedef struct {
 /**
  * @brief Create new display panel
  *
- * For maximum flexibility, this function performs only reset and initialization of the display.
- * You must turn on the display explicitly by calling esp_lcd_panel_disp_on_off().
- * The display's backlight is not turned on either. You can use bsp_display_backlight_on/off(),
- * bsp_display_brightness_set() (on supported boards) or implement your own backlight control.
+ * Resets and initializes HD28091 using the supplier command table.
+ * Rev A powers the backlight continuously. Use esp_lcd_panel_disp_on_off()
+ * to blank or reveal the initialized display.
  *
  * If you want to free resources allocated by this function, you can use esp_lcd API, ie.:
  *
@@ -89,10 +92,9 @@ esp_err_t bsp_display_new(const bsp_display_config_t *config, esp_lcd_panel_hand
 /**
  * @brief Create new display panel
  *
- * For maximum flexibility, this function performs only reset and initialization of the display.
- * You must turn on the display explicitly by calling esp_lcd_panel_disp_on_off().
- * The display's backlight is not turned on either. You can use bsp_display_backlight_on/off(),
- * bsp_display_brightness_set() (on supported boards) or implement your own backlight control.
+ * Resets and initializes HD28091 using the supplier command table.
+ * Rev A powers the backlight continuously. Use esp_lcd_panel_disp_on_off()
+ * to blank or reveal the initialized display.
  *
  * If you want to free resources allocated by this function, you can use esp_lcd API, ie.:
  *
@@ -124,6 +126,9 @@ esp_err_t bsp_display_brightness_init(void);
 
 /**
  * @brief Set display's brightness
+ *
+ * HD28091 adapter Rev A supports only its fixed 100% backlight level.
+ * Other levels return ESP_ERR_NOT_SUPPORTED.
  *
  * Brightness is controlled with PWM signal to a pin controlling backlight.
  * Brightness must be already initialized by calling bsp_display_brightness_init() or bsp_display_new()

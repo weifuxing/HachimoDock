@@ -1,0 +1,68 @@
+{
+    "error_string": "Success.",
+    "export_time": 1099,
+    "layer_height": 0.1599999964237213,
+    "plate_index": 0,
+    "prepare_time": 14,
+    "return_code": 0,
+    "sliced_plates": [
+        {
+            "feature_type_times": {
+                "Bridge": 10.166696548461914,
+                "Brim": 200.55368041992188,
+                "Custom": 398.25115966796875,
+                "Flush": 25.0,
+                "Gap infill": 83.97537994384766,
+                "Inner wall": 684.6844482421875,
+                "Internal solid infill": 127.95996856689453,
+                "Outer wall": 831.3475341796875,
+                "Overhang wall": 57.65924835205078,
+                "Sparse infill": 88.47901153564453,
+                "Support": 139.3307647705078,
+                "Support interface": 150.1344451904297,
+                "Support transition": 13.221302032470703,
+                "Top surface": 75.9354476928711,
+                "Travel": 632.2399291992188,
+                "Undefined": 615.1502075195313
+            },
+            "filament_change_times": 0,
+            "filaments": [
+                {
+                    "filament_id": "GFB99",
+                    "id": 1,
+                    "main_used_g": 7.434737682342529,
+                    "total_used_g": 7.434737205505371
+                }
+            ],
+            "generate_support_material_time": 76,
+            "id": 1,
+            "infill_time": 38,
+            "layer_filament_change": 0,
+            "main_predication": 3070.6923828125,
+            "make_perimeters_time": 38,
+            "obj_cached_cnt": 0,
+            "objects": [
+                {
+                    "bbox": {
+                        "depth": 80.0,
+                        "height": 9.0,
+                        "width": 54.599998474121094,
+                        "x": 100.69998931884766,
+                        "y": 88.0,
+                        "z": 0.0
+                    },
+                    "id": 5,
+                    "name": "screen-fit-gap-0.30-screen-up.stl",
+                    "triangle_count": 1518
+                }
+            ],
+            "sliced_time": 640,
+            "sliced_time_with_cache": 461,
+            "total_predication": 3501.8232421875,
+            "triangle_count": 1518,
+            "warning_message": ""
+        }
+    ],
+    "sparse_infill_density": 20.0,
+    "wall_loops": 4
+}

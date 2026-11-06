@@ -1,0 +1,209 @@
+{
+  "date": "2026-11-03",
+  "eda_version": "4.1.78",
+  "components": 19,
+  "compared_pins_including_NC": 113,
+  "schematic_pcb_pin_net_mismatches": 0,
+  "pcb_drc": [],
+  "schematic_erc": [
+    {
+      "type": "warn",
+      "rule": "SHOWDANDLING",
+      "primitives": [
+        {
+          "primitiveId": "590d8f47c1d63cc7",
+          "sheet": "067b0e07413f9ee6",
+          "name": "$1N574"
+        }
+      ]
+    },
+    {
+      "type": "warn",
+      "rule": "ATTRMATCHCODE",
+      "primitives": [
+        {
+          "primitiveId": "6aa9a2a38031a6fd",
+          "sheet": "067b0e07413f9ee6",
+          "name": "J1($1I2)"
+        },
+        {
+          "primitiveId": "475a1cdc9b6335d0",
+          "sheet": "067b0e07413f9ee6",
+          "name": "J2($1I3)"
+        },
+        {
+          "primitiveId": "241e77b7cfff2839",
+          "sheet": "067b0e07413f9ee6",
+          "name": "R1($1I9)"
+        },
+        {
+          "primitiveId": "b8a8525a54e9d551",
+          "sheet": "067b0e07413f9ee6",
+          "name": "C1($1I13)"
+        },
+        {
+          "primitiveId": "af9c4a581612e7ef",
+          "sheet": "067b0e07413f9ee6",
+          "name": "C2($1I14)"
+        },
+        {
+          "primitiveId": "3c58ac61d1ef5f67",
+          "sheet": "067b0e07413f9ee6",
+          "name": "C3($1I15)"
+        },
+        {
+          "primitiveId": "e457a57445e329a3",
+          "sheet": "067b0e07413f9ee6",
+          "name": "C4($1I20)"
+        },
+        {
+          "primitiveId": "b6dffc9102799805",
+          "sheet": "067b0e07413f9ee6",
+          "name": "J3($1I23)"
+        },
+        {
+          "primitiveId": "5cb6d09d1605d302",
+          "sheet": "067b0e07413f9ee6",
+          "name": "C6($1I58)"
+        },
+        {
+          "primitiveId": "52a1337e6f0471d3",
+          "sheet": "067b0e07413f9ee6",
+          "name": "C8($1I59)"
+        }
+      ]
+    }
+  ],
+  "dsi_length_mil": [
+    {
+      "net": "DSI_CLK_P",
+      "mil": 818.100385
+    },
+    {
+      "net": "DSI_CLK_N",
+      "mil": 818.000387
+    },
+    {
+      "net": "DSI_D1_N",
+      "mil": 922.486549
+    },
+    {
+      "net": "DSI_D0_N",
+      "mil": 979.331219
+    },
+    {
+      "net": "DSI_D0_P",
+      "mil": 979.809644
+    },
+    {
+      "net": "DSI_D1_P",
+      "mil": 925.680963
+    }
+  ],
+  "outline_mm": [
+    40.64,
+    38.1
+  ],
+  "copper_layers": 2,
+  "nominal_thickness_mm": 1.6,
+  "bench_tested": false,
+  "checks_pending": [
+    "确认LCD与触摸FPC的接触方向及实物装配配合",
+    "按板厂实际叠层复核100Ω差分阻抗",
+    "实测LCD负载下的3.0V电源与背光电流",
+    "使用屏厂初始化命令和DSI时序，验证CST328轮询读取",
+    "实测两路RC的复位脉宽，覆盖慢上电、短暂掉电与快速断电重启"
+  ],
+  "annotation_language": "zh-CN",
+  "connected_pins": 106,
+  "reset_circuit": {
+    "type": "两路独立RC，带快速放电二极管",
+    "LCD_RST": {
+      "supply": "LCD_3V0",
+      "R": "R2 10kΩ",
+      "C": "C6 1µF",
+      "diode": "D2 BAT54WS"
+    },
+    "TP_RST": {
+      "supply": "VIN_3V3",
+      "R": "R3 10kΩ",
+      "C": "C8 1µF",
+      "diode": "D3 BAT54WS"
+    },
+    "nominal_time_constant_ms": 10,
+    "bench_validated": false
+  },
+  "schematic_frame": {
+    "size": "A2",
+    "native_sheet": true,
+    "title_block": true
+  },
+  "connector_orientation": {
+    "J2": {
+      "rotation_deg": 0,
+      "cable_exit": "+Y"
+    },
+    "J3": {
+      "rotation_deg": 180,
+      "cable_exit": "+Y"
+    },
+    "same_exit_direction": false,
+    "J1": {
+      "layer": "TOP",
+      "rotation_deg": 0,
+      "center_mil": [
+        1180,
+        390
+      ],
+      "cable_exit": "-Y"
+    },
+    "LCD_touch_same_exit_direction": true
+  },
+  "save_reopen_verified": {
+    "pcb": true,
+    "schematic": true
+  },
+  "active_copper_layers": [
+    1,
+    2
+  ],
+  "ground_copper": {
+    "outer_pours": 2,
+    "inner_planes": 0,
+    "preserve_islands": false,
+    "ground_stitching": true
+  },
+  "layout_review": {
+    "backlight_modified_minimum_envelope_gap_mm": 0.5327904,
+    "j1_cable_corridor_width_mm": 12.7,
+    "j1_cable_corridor_component_obstacles": [],
+    "native_component_keepout": true,
+    "native_keepout_rule_verified_after_reopen": true,
+    "j1_minimum_envelope_gap_mm": 1.3739368000000025
+  },
+  "dsi_geometry": {
+    "actual_line_widths_mil": {
+      "7": 109
+    },
+    "physical_via_counts": {
+      "DSI_CLK_P": 1,
+      "DSI_CLK_N": 3,
+      "DSI_D0_P": 3,
+      "DSI_D1_N": 2,
+      "DSI_D0_N": 2,
+      "DSI_D1_P": 2
+    },
+    "max_pair_skew_mil": 3.1944140199778985,
+    "max_signal_length_difference_mil": 161.80925700706314,
+    "impedance_verified": false
+  },
+  "footprint_mismatches": 0,
+  "manufacturing_impedance_verified": false,
+  "all_components_top": true,
+  "mipi_routing_unchanged": false,
+  "existing_mipi_segments_preserved": false,
+  "display_side_main_routing_retained": true,
+  "mipi_connection_loop_removed": true,
+  "d1p_single_path_verified": true,
+  "user_positions_preserved": true
+}

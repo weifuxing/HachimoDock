@@ -1,0 +1,16 @@
+当前打印版本：option1-r10/joystick-clearance-2mm/root-fillet-r04（R10＋摇杆圆环外抬 2 mm＋根部 R0.4 过渡）
+
+推荐打印输入：
+option1-r10/joystick-clearance-2mm/root-fillet-r04/HD28091-R10-joystick-plus2mm-rootR04-screen-up.stl
+option1-r10/joystick-clearance-2mm/root-fillet-r04/HD28091-R10-joystick-plus2mm-rootR04-screen-up.3mf（未切片）
+
+四处机身外角统一 R10，面框边缘约 R4.5，屏幕配合保留已实物试装版本。
+摇杆圆环沿孔轴向壳外抬高 2 mm，孔中心不动，为元件增加净空；补充 0.8 mm 环形连接壁。
+外侧根部增加 R0.4 小圆角，内侧避让空间保留，邻按键开口未封堵。
+详细说明和验证数据见 option1-r10/joystick-clearance-2mm/root-fillet-r04/模型说明.txt、fillet-report.json、delivery-check.json。
+joystick-clearance-2mm 根目录的前壳为本次圆角之前的直壁连接版本。
+底壳在本轮未修改。option1-r10 根目录的前壳为此次摇杆避让之前的外观版本。
+
+上级目录 HD28091-front-body.step、HD28091-enclosure.FCStd 和 HD28091-front-body.stl
+保留为已试装通过的原参数/打印基准，外观仍是方案一之前的版本。
+option1-r10 中附带的 STEP/FCStd 是最终打印网格转实体的交换版本，并非光滑参数历史模型。

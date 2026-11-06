@@ -1,0 +1,25 @@
+{
+  "old_opening_radius_mm": 7.1,
+  "new_glass_radius_mm": 2.0,
+  "new_opening_radius_mm": 2.3,
+  "glass_area_outside_original_flat_contour_mm2": 0.0,
+  "corner_pieces": [],
+  "minimum_front_flat_band_new_mm": 0.3128405309680674,
+  "minimum_front_flat_band_old_mm": 0.6367965644035287,
+  "new_opening_outside_front_flat_area_mm2": 0.0,
+  "upper_flat_outer_corner_radius_approx_mm": 7.5,
+  "minimum_band_witness": [
+    {
+      "outer": [
+        -36.28691625806837,
+        57.90395473121905,
+        3.197442310920451e-13
+      ],
+      "inner": [
+        -36.07655722217386,
+        57.67239853105608,
+        0.0
+      ]
+    }
+  ]
+}

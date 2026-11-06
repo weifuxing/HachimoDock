@@ -1,0 +1,121 @@
+{
+  "source": "D:\\UGit\\WW\\HachimoDock\\hardware\\enclosure-hd28091\\option1-r10\\joystick-clearance-2mm\\HD28091-R10-joystick-plus2mm.stl",
+  "source_sha256": "a0032dab51b0253a90ea6525c326b873dd33b533216ac7ef5b80580240967438",
+  "fillet_radius_nominal_mm": 0.4,
+  "outer_foot_radius_mm": 9.4,
+  "profile_arc_segments": 12,
+  "angular_segments": 256,
+  "construction": "External additive quarter-circle, conformed to original exterior skin; not an internal fillet.",
+  "maximum_right_side_skin_drop_mm": 0.00598919187447721,
+  "source_material_removed_raw_mm3": -1.0367189343964225e-11,
+  "added_volume_raw_mm3": 1.989020444101172,
+  "new_material_inside_radius_8p2_mm3": 0.0,
+  "new_material_outside_root_region_mm3": -1.036916446894316e-11,
+  "nominal_gap_to_neighbor_opening_at_center_section_mm": 0.40000000000000213,
+  "hole_axis_world_xz_mm": [
+    29.5,
+    15.75
+  ],
+  "clearance_samples": [
+    {
+      "angle_deg": 0.0,
+      "clearance_gain_mm": 1.9999999997124864
+    },
+    {
+      "angle_deg": 22.5,
+      "clearance_gain_mm": 1.999999949866294
+    },
+    {
+      "angle_deg": 45.0,
+      "clearance_gain_mm": 1.999999946663913
+    },
+    {
+      "angle_deg": 67.5,
+      "clearance_gain_mm": 1.9999999467948308
+    },
+    {
+      "angle_deg": 90.0,
+      "clearance_gain_mm": 1.9999999525104848
+    },
+    {
+      "angle_deg": 112.5,
+      "clearance_gain_mm": 1.999999946938643
+    },
+    {
+      "angle_deg": 135.0,
+      "clearance_gain_mm": 1.9999999469380954
+    },
+    {
+      "angle_deg": 157.5,
+      "clearance_gain_mm": 1.9999999469386425
+    },
+    {
+      "angle_deg": 180.0,
+      "clearance_gain_mm": 1.9999999469378515
+    },
+    {
+      "angle_deg": 202.5,
+      "clearance_gain_mm": 1.9999999469386456
+    },
+    {
+      "angle_deg": 225.0,
+      "clearance_gain_mm": 1.9999999469380993
+    },
+    {
+      "angle_deg": 247.49999999999997,
+      "clearance_gain_mm": 1.999999946938643
+    },
+    {
+      "angle_deg": 270.0,
+      "clearance_gain_mm": 1.9999999525104888
+    },
+    {
+      "angle_deg": 292.5,
+      "clearance_gain_mm": 1.9999999467947105
+    },
+    {
+      "angle_deg": 315.0,
+      "clearance_gain_mm": 1.9999999466641523
+    },
+    {
+      "angle_deg": 337.5,
+      "clearance_gain_mm": 1.9999999440453373
+    }
+  ],
+  "mesh": {
+    "closed": true,
+    "nonmanifold": false,
+    "self_intersections": false,
+    "solids": 1,
+    "triangles": 33470,
+    "volume_mm3": 44796.71490609853,
+    "numeric_grid_mm": 0.0001,
+    "simplification_tolerance_mm": 0.0005
+  },
+  "STEP_note": "Faceted mesh-derived solid; not a smooth parametric STEP.",
+  "step_readback": {
+    "valid": true,
+    "solids": 1,
+    "volume_mm3": 44796.71490607636
+  },
+  "final_mesh_differences_mm3": {
+    "added": 1.9903292612833323,
+    "removed": 0.013280455335614824,
+    "added_outside_root": 0.0017135594773286234,
+    "removed_outside_root": 0.013279559241265951,
+    "added_inside_radius_8p2": 0.00012245817848076973,
+    "removed_inside_radius_8p2": 2.8599599957714657e-06
+  },
+  "independent_ray_checks": {
+    "neighbor_opening_rays": 31270,
+    "joystick_inner_rays": 9000,
+    "joystick_inner_max_axial_difference_mm": 0.00028918,
+    "screen_fit_rays": 23865,
+    "screen_fit_max_axial_difference_mm": 0,
+    "screen_corner_rays": 10366,
+    "screen_corner_max_axial_difference_mm": 0.0007267,
+    "button_corner_rays": 8708,
+    "button_corner_max_axial_difference_mm": 0.0004332,
+    "hit_counts_unchanged": true
+  }
+}

@@ -6,8 +6,11 @@
 #include <string.h>
 
 #include "bsp/esp32_p4_wifi6_touch_lcd_4_3.h"
+#include "bsp/display.h"
 #include "cJSON.h"
+#include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "esp_attr.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_touch.h"
 #include "esp_lcd_touch_gt911.h"
@@ -27,11 +30,14 @@
 #define PET_P4_TOUCH_LONG_PRESS_MS 700ULL
 #define PET_P4_TOUCH_QUEUE_LENGTH 32
 #define PET_P4_TOUCH_REACTION_MIN_MS 1200ULL
+#define PET_P4_CST328_ADDRESS 0x1a
 
 static const char *TAG = "pet-p4-touch";
 static esp_lcd_touch_handle_t g_touch;
 static esp_lcd_panel_io_handle_t g_touch_io;
 static QueueHandle_t g_touch_queue;
+static TaskHandle_t g_touch_task;
+static bool g_touch_interrupt_mode;
 static atomic_uint g_dropped_events;
 static unsigned int g_event_sequence;
 static unsigned int g_reaction_sequence;
@@ -39,13 +45,15 @@ static bool g_ready;
 static const char *g_init_stage = "not_started";
 static esp_err_t g_init_error, g_primary_error, g_backup_error;
 static esp_err_t g_probe_15 = ESP_ERR_INVALID_STATE, g_probe_38 = ESP_ERR_INVALID_STATE, g_probe_10 = ESP_ERR_INVALID_STATE,
-                 g_probe_18 = ESP_ERR_INVALID_STATE;
+                 g_probe_18 = ESP_ERR_INVALID_STATE, g_probe_1a = ESP_ERR_INVALID_STATE;
 static int g_address;
 static bool g_ft6336;
 static bool g_cst826;
-static uint8_t g_chip_id, g_vendor_id;
+static bool g_cst328;
+static uint16_t g_chip_id;
+static uint8_t g_vendor_id;
 const char *pet_p4_touch_controller(void) {
-  return g_cst826 ? "CST826" : g_ft6336 ? "FT6336U" : g_touch ? "GT911" : "unidentified";
+  return g_cst328 ? "CST328" : g_cst826 ? "CST826" : g_ft6336 ? "FT6336U" : g_touch ? "GT911" : "unidentified";
 }
 static atomic_uint g_samples, g_contacts, g_poll_errors, g_consecutive_errors;
 static atomic_int g_panel_x, g_panel_y, g_ui_x, g_ui_y;
@@ -65,6 +73,8 @@ void pet_p4_touch_health(pet_p4_touch_health_t *out) {
     .stage = g_init_stage, .error = g_init_error, .address = g_address,
     .primary_error = g_primary_error, .backup_error = g_backup_error,
     .probe_15 = g_probe_15, .probe_38 = g_probe_38, .probe_10 = g_probe_10, .probe_18 = g_probe_18,
+    .probe_1a = g_probe_1a,
+    .interrupt_gpio = g_touch_interrupt_mode ? BSP_LCD_TOUCH_INT : GPIO_NUM_NC,
     .chip_id = g_chip_id, .vendor_id = g_vendor_id,
     .samples = atomic_load(&g_samples), .contacts = atomic_load(&g_contacts),
     .poll_errors = atomic_load(&g_poll_errors),
@@ -93,6 +103,134 @@ static uint64_t monotonic_ms(void) {
   return (uint64_t) (esp_timer_get_time() / 1000ULL);
 }
 
+static void IRAM_ATTR touch_interrupt_handler(void *arg) {
+  BaseType_t task_awake = pdFALSE;
+  vTaskNotifyGiveFromISR((TaskHandle_t)arg, &task_awake);
+  if (task_awake == pdTRUE) portYIELD_FROM_ISR();
+}
+
+static esp_err_t init_touch_interrupt(void) {
+  int interrupt_gpio = BSP_LCD_TOUCH_INT;
+  const gpio_config_t config = {
+    .pin_bit_mask = 1ULL << interrupt_gpio,
+    .mode = GPIO_MODE_INPUT,
+    .pull_up_en = GPIO_PULLUP_ENABLE,
+    .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    .intr_type = GPIO_INTR_NEGEDGE,
+  };
+  esp_err_t err = gpio_config(&config);
+  if (err != ESP_OK) {
+    gpio_reset_pin(interrupt_gpio);
+    return err;
+  }
+  err = gpio_install_isr_service(0);
+  bool own_service = err == ESP_OK;
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) goto fail;
+  err = gpio_isr_handler_add(interrupt_gpio, touch_interrupt_handler, g_touch_task);
+  if (err != ESP_OK) {
+    if (own_service) gpio_uninstall_isr_service();
+    goto fail;
+  }
+  // Consume a report whose IRQ pulse may have occurred during initialization.
+  xTaskNotifyGive(g_touch_task);
+  return ESP_OK;
+fail:
+  gpio_reset_pin(interrupt_gpio);
+  return err;
+}
+
+static bool wait_for_touch_interrupt(pet_p4_touch_decoder_t *decoder,
+                                     pet_p4_pointer_decoder_t *pointer) {
+  TickType_t wait_ticks = portMAX_DELAY;
+  if (decoder->down && !decoder->moved && !decoder->long_press_emitted) {
+    uint64_t now = monotonic_ms();
+    uint64_t deadline = decoder->start_ms + decoder->long_press_ms;
+    wait_ticks = now < deadline ? pdMS_TO_TICKS(deadline - now) + 1 : 0;
+  }
+  // Clear before reading. IRQs arriving during I2C/ACK remain pending.
+  if (ulTaskNotifyTake(pdTRUE, wait_ticks) != 0) return true;
+  touch_sample_t sample = {0};
+  sample.has_gesture = pet_p4_touch_decoder_update(decoder, decoder->down,
+    decoder->current_x, decoder->current_y, monotonic_ms(), &sample.gesture);
+  queue_sample(&sample, decoder, pointer);
+  return false;
+}
+
+/* CST328 uses 16-bit registers and a 27-byte report, unlike CST826.
+ * Register layout follows Hynitron CST328 datasheet v2.2, section 12.
+ * Clear/sync sequence follows the Waveshare and ESPHome CST328 drivers. */
+typedef struct {
+  bool has_report;
+  unsigned count;
+  int x, y, track_id;
+} cst328_frame_t;
+
+static esp_err_t cst328_ack_report(void) {
+  const uint8_t clear = 0, sync = 0xab;
+  esp_err_t err = esp_lcd_panel_io_tx_param(g_touch_io, 0xd005, &clear, 1);
+  esp_err_t sync_err = esp_lcd_panel_io_tx_param(g_touch_io, 0xd000, &sync, 1);
+  return err != ESP_OK ? err : sync_err;
+}
+
+static esp_err_t read_cst328_touch(cst328_frame_t *frame) {
+  uint8_t raw[27];
+  memset(frame, 0, sizeof(*frame));
+  esp_err_t err = esp_lcd_panel_io_rx_param(g_touch_io, 0xd000, raw, sizeof(raw));
+  if (err != ESP_OK) return err;
+  if (raw[6] != 0xab) return ESP_ERR_INVALID_RESPONSE;
+  /* The consumed marker is not a lift. The upstream Hynitron CST3xx
+   * driver also rejects D000 == AB before interpreting the finger count. */
+  if (raw[0] == 0xab) return ESP_OK;
+  esp_err_t ack_err = cst328_ack_report();
+  if (ack_err != ESP_OK) return ack_err;
+  unsigned count = raw[5] & 0x0f;
+  if (count > 5 || (raw[5] & 0x80)) return ESP_ERR_INVALID_RESPONSE;
+  frame->has_report = true;
+  if (count == 0) return ESP_OK;
+  /* Multi-contact reports cancel the stroke before any coordinates are used. */
+  if (count > 1) {
+    frame->count = count;
+    return ESP_OK;
+  }
+  unsigned status = (raw[0] & 0x0f) >> 1;
+  if (status == 0) return ESP_OK;  // Explicit lift report.
+  if (status != 3) return ESP_ERR_INVALID_RESPONSE;
+  frame->x = (raw[1] << 4) | (raw[3] >> 4);
+  frame->y = (raw[2] << 4) | (raw[3] & 0x0f);
+  if (frame->x >= BSP_LCD_H_RES || frame->y >= BSP_LCD_V_RES) return ESP_ERR_INVALID_RESPONSE;
+  frame->count = 1;
+  frame->track_id = raw[0] >> 4;
+  return ESP_OK;
+}
+
+static esp_err_t identify_cst328_touch(void) {
+  uint8_t check[4] = {0}, resolution[4] = {0}, identity[4] = {0};
+  esp_err_t err = esp_lcd_panel_io_tx_param(g_touch_io, 0xd101, NULL, 0);
+  if (err == ESP_OK) {
+    vTaskDelay(pdMS_TO_TICKS(20));
+    err = esp_lcd_panel_io_rx_param(g_touch_io, 0xd1fc, check, sizeof(check));
+  }
+  if (err == ESP_OK && (check[2] != 0xca || check[3] != 0xca)) err = ESP_ERR_INVALID_RESPONSE;
+  if (err == ESP_OK) err = esp_lcd_panel_io_rx_param(g_touch_io, 0xd1f8, resolution, sizeof(resolution));
+  if (err == ESP_OK && ((resolution[0] | (resolution[1] << 8)) != BSP_LCD_H_RES ||
+                       (resolution[2] | (resolution[3] << 8)) != BSP_LCD_V_RES)) {
+    ESP_LOGW(TAG, "CST328 resolution mismatch x=%u y=%u", resolution[0] | (resolution[1] << 8),
+             resolution[2] | (resolution[3] << 8));
+    err = ESP_ERR_NOT_SUPPORTED;
+  }
+  if (err == ESP_OK) err = esp_lcd_panel_io_rx_param(g_touch_io, 0xd204, identity, sizeof(identity));
+  /* Always leave info mode, including after an I2C error or identity mismatch. */
+  esp_err_t normal_err = esp_lcd_panel_io_tx_param(g_touch_io, 0xd109, NULL, 0);
+  if (err != ESP_OK) return err;
+  if (normal_err != ESP_OK) return normal_err;
+  vTaskDelay(pdMS_TO_TICKS(20));
+  err = cst328_ack_report();
+  if (err != ESP_OK) return err;
+  g_chip_id = identity[2] | (identity[3] << 8);
+  g_cst328 = true;
+  return ESP_OK;
+}
+
 static void touch_task(void *arg) {
   (void) arg;
   pet_p4_touch_decoder_t decoder;
@@ -100,15 +238,56 @@ static void touch_task(void *arg) {
   int track_id = -1;
   TickType_t last_wake = xTaskGetTickCount();
   unsigned int consecutive_errors = 0;
+  unsigned int retry_attempts = 0;
+  bool retry_pending = false;
   pet_p4_touch_decoder_init(&decoder, PET_P4_TOUCH_SWIPE_THRESHOLD, PET_P4_TOUCH_LONG_PRESS_MS);
 
   while (true) {
+    if (g_touch_interrupt_mode) {
+      if (retry_pending) {
+        vTaskDelay(pdMS_TO_TICKS(PET_P4_TOUCH_SAMPLE_MS));
+        retry_pending = false;
+      } else {
+        if (!wait_for_touch_interrupt(&decoder, &pointer)) continue;
+        retry_attempts = 0;
+      }
+    }
     esp_err_t err = ESP_OK;
     bool pressed = false;
     bool contact_ambiguous = false;
     int ui_x = decoder.current_x;
     int ui_y = decoder.current_y;
-    if (g_ft6336 || g_cst826) {
+    if (g_cst328) {
+      cst328_frame_t frame;
+      err = read_cst328_touch(&frame);
+      if (err == ESP_OK && !frame.has_report) {
+        if (!g_touch_interrupt_mode) {
+          consecutive_errors = 0;
+          atomic_store(&g_consecutive_errors, 0);
+        }
+        /* Keep a short gap between controller reports out of the gesture
+         * decoder. Reuse the existing pointer freshness limit for a stall. */
+        uint64_t now = monotonic_ms();
+        if (!g_touch_interrupt_mode && pointer.down && now - pointer.last_ms > PET_P4_POINTER_STALE_MS) {
+          touch_sample_t sample = {0};
+          sample.has_pointer = pet_p4_pointer_update(&pointer, false, false, ui_x, ui_y, now, &sample.pointer);
+          pet_p4_touch_decoder_init(&decoder, PET_P4_TOUCH_SWIPE_THRESHOLD, PET_P4_TOUCH_LONG_PRESS_MS);
+          queue_sample(&sample, &decoder, &pointer);
+        }
+        if (!g_touch_interrupt_mode) vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(PET_P4_TOUCH_SAMPLE_MS));
+        continue;
+      }
+      if (err == ESP_OK) {
+        contact_ambiguous = frame.count > 1;
+        pressed = frame.count == 1;
+        if (pressed) {
+          contact_ambiguous = pointer.down && track_id != frame.track_id;
+          track_id = frame.track_id;
+          pet_p4_touch_panel_to_ui(frame.x, frame.y, &ui_x, &ui_y);
+          atomic_store(&g_panel_x, frame.x); atomic_store(&g_panel_y, frame.y);
+        }
+      }
+    } else if (g_ft6336 || g_cst826) {
       uint8_t raw[13]; pet_p4_ft6336_frame_t frame;
       err = esp_lcd_panel_io_rx_param(g_touch_io, 0x02, raw, sizeof(raw));
       if (err == ESP_OK && !pet_p4_ft6336_decode(raw, sizeof(raw), &frame)) err = ESP_ERR_INVALID_RESPONSE;
@@ -146,10 +325,20 @@ static void touch_task(void *arg) {
       queue_sample(&sample, &decoder, &pointer);
       pet_p4_touch_decoder_init(&decoder, PET_P4_TOUCH_SWIPE_THRESHOLD, PET_P4_TOUCH_LONG_PRESS_MS);
       if (consecutive_errors == 1 || consecutive_errors % 200 == 0) {
-        ESP_LOGW(TAG, "%s poll failed count=%u error=%s",
+        ESP_LOGW(TAG, "%s read failed count=%u error=%s",
                  pet_p4_touch_controller(), consecutive_errors, esp_err_to_name(err));
       }
-      vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(PET_P4_TOUCH_SAMPLE_MS));
+      if (g_touch_interrupt_mode) {
+        if (retry_attempts < 2) {
+          retry_attempts += 1;
+          retry_pending = true;
+        } else {
+          // Release a latched IRQ after the bounded retries, retaining the error status.
+          (void)cst328_ack_report();
+        }
+      } else {
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(PET_P4_TOUCH_SAMPLE_MS));
+      }
       continue;
     }
     consecutive_errors = 0;
@@ -161,18 +350,20 @@ static void touch_task(void *arg) {
     }
     touch_sample_t sample = {0};
     uint64_t now = monotonic_ms();
+    // IRQ reports describe changes. A stationary finger may have no new IRQs.
+    if (g_touch_interrupt_mode) pointer.last_ms = now;
     sample.has_pointer = pet_p4_pointer_update(&pointer, !contact_ambiguous, pressed, ui_x, ui_y, now, &sample.pointer);
     if (contact_ambiguous) {
       pet_p4_touch_decoder_init(&decoder, PET_P4_TOUCH_SWIPE_THRESHOLD, PET_P4_TOUCH_LONG_PRESS_MS);
       queue_sample(&sample, &decoder, &pointer);
-      vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(PET_P4_TOUCH_SAMPLE_MS));
+      if (!g_touch_interrupt_mode) vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(PET_P4_TOUCH_SAMPLE_MS));
       continue;
     }
     if (sample.has_pointer && sample.pointer.kind == PET_P4_POINTER_CANCEL)
       pet_p4_touch_decoder_init(&decoder, PET_P4_TOUCH_SWIPE_THRESHOLD, PET_P4_TOUCH_LONG_PRESS_MS);
     else sample.has_gesture = pet_p4_touch_decoder_update(&decoder, pressed, ui_x, ui_y, now, &sample.gesture);
     queue_sample(&sample, &decoder, &pointer);
-    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(PET_P4_TOUCH_SAMPLE_MS));
+    if (!g_touch_interrupt_mode) vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(PET_P4_TOUCH_SAMPLE_MS));
   }
 }
 
@@ -208,7 +399,15 @@ static esp_err_t identify_register_touch(void) {
 esp_err_t pet_p4_touch_init(void) {
   if (g_ready) return ESP_OK;
   g_address = 0;
-  g_cst826 = g_ft6336 = false;
+  g_cst328 = g_cst826 = g_ft6336 = false;
+  g_touch_interrupt_mode = false;
+  g_chip_id = g_vendor_id = 0;
+  g_init_stage = "power_on_wait";
+  /* The adapter uses RC resets. Also allow direct touch-only initialization. */
+  uint64_t uptime_ms = monotonic_ms();
+  if (uptime_ms < BSP_LCD_POWER_ON_DELAY_MS) {
+    vTaskDelay(pdMS_TO_TICKS(BSP_LCD_POWER_ON_DELAY_MS - uptime_ms) + 1);
+  }
   g_init_stage = "i2c_init";
   esp_err_t err = bsp_i2c_init();
   if (err != ESP_OK) { g_init_error = err; return err; }
@@ -218,9 +417,13 @@ esp_err_t pet_p4_touch_init(void) {
   esp_lcd_panel_io_i2c_config_t io_config = ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG();
   g_init_stage = "probe";
   g_primary_error = g_backup_error = ESP_ERR_NOT_FOUND;
-  /* Allow controller power-up, bounded to under one second. No shared bus
-   * reset and no speculative GPIO drive: the installed panel must be verified. */
+  /* Probe only. Both resets are generated by the adapter RC circuits. */
   for (unsigned attempt = 0; attempt < 4 && !g_address; attempt++) {
+    g_probe_1a = i2c_master_probe(i2c_bus, PET_P4_CST328_ADDRESS, 50);
+    if (g_probe_1a == ESP_OK) {
+      g_address = PET_P4_CST328_ADDRESS;
+      break;
+    }
     g_primary_error = i2c_master_probe(i2c_bus, ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS, 50);
     if (g_primary_error == ESP_OK) g_address = ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS;
     else {
@@ -228,6 +431,21 @@ esp_err_t pet_p4_touch_init(void) {
       if (g_backup_error == ESP_OK) g_address = ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS_BACKUP;
     }
     if (!g_address && attempt < 3) vTaskDelay(pdMS_TO_TICKS(100));
+  }
+  if (g_address == PET_P4_CST328_ADDRESS) {
+    io_config = (esp_lcd_panel_io_i2c_config_t){
+      .dev_addr = PET_P4_CST328_ADDRESS, .scl_speed_hz = 100000,
+      .control_phase_bytes = 1, .lcd_cmd_bits = 16, .flags.disable_control_phase = 1,
+    };
+    g_init_stage = "identify_cst328";
+    err = esp_lcd_new_panel_io_i2c(i2c_bus, &io_config, &g_touch_io);
+    if (err == ESP_OK) err = identify_cst328_touch();
+    if (err != ESP_OK) {
+      if (g_touch_io) esp_lcd_panel_io_del(g_touch_io);
+      g_touch_io = NULL;
+      g_init_error = err;
+      return err;
+    }
   }
   if (!g_address) {
     /* Address ACKs only, not controller identification or register writes.
@@ -260,7 +478,7 @@ esp_err_t pet_p4_touch_init(void) {
   }
   io_config.dev_addr = g_address;
   g_init_stage = "panel_io";
-  io_config.scl_speed_hz = (g_ft6336 || g_cst826) ? 100000 : CONFIG_BSP_I2C_CLK_SPEED_HZ;
+  io_config.scl_speed_hz = (g_cst328 || g_ft6336 || g_cst826) ? 100000 : CONFIG_BSP_I2C_CLK_SPEED_HZ;
   if (!g_touch_io) err = esp_lcd_new_panel_io_i2c(i2c_bus, &io_config, &g_touch_io);
   if (err != ESP_OK) { g_init_error = err; return err; }
 
@@ -280,7 +498,7 @@ esp_err_t pet_p4_touch_init(void) {
     },
   };
   g_init_stage = "controller";
-  if (!g_ft6336 && !g_cst826) err = esp_lcd_touch_new_i2c_gt911(g_touch_io, &touch_config, &g_touch);
+  if (!g_cst328 && !g_ft6336 && !g_cst826) err = esp_lcd_touch_new_i2c_gt911(g_touch_io, &touch_config, &g_touch);
   if (err != ESP_OK) {
     esp_lcd_panel_io_del(g_touch_io);
     g_touch_io = NULL;
@@ -289,23 +507,35 @@ esp_err_t pet_p4_touch_init(void) {
 
   g_init_stage = "queue";
   g_touch_queue = xQueueCreate(PET_P4_TOUCH_QUEUE_LENGTH, sizeof(touch_sample_t));
-  if (!g_touch_queue) goto no_memory;
+  if (!g_touch_queue) { err = ESP_ERR_NO_MEM; goto task_fail; }
+  g_touch_interrupt_mode = g_cst328 && BSP_LCD_TOUCH_INT >= 0;
   g_init_stage = "task";
-  if (xTaskCreate(touch_task, "pet_p4_touch", 4096, NULL, 8, NULL) != pdPASS) {
-    vQueueDelete(g_touch_queue);
-    g_touch_queue = NULL;
-    goto no_memory;
+  if (xTaskCreate(touch_task, "pet_p4_touch", 4096, NULL, 8, &g_touch_task) != pdPASS) {
+    err = ESP_ERR_NO_MEM;
+    goto task_fail;
+  }
+  if (g_touch_interrupt_mode) {
+    g_init_stage = "interrupt";
+    err = init_touch_interrupt();
+    if (err != ESP_OK) goto task_fail;
   }
   g_ready = true;
   g_init_stage = "ready"; g_init_error = ESP_OK;
-  ESP_LOGI(TAG, "%s ready addr=0x%02x chip=0x%02x reset=disabled sample=%dms",
-           pet_p4_touch_controller(), io_config.dev_addr, g_chip_id, PET_P4_TOUCH_SAMPLE_MS);
+  ESP_LOGI(TAG, "%s ready addr=0x%02x chip=0x%02x mode=%s int_gpio=%d",
+           pet_p4_touch_controller(), io_config.dev_addr, g_chip_id,
+           g_touch_interrupt_mode ? "interrupt" : "polling",
+           g_touch_interrupt_mode ? BSP_LCD_TOUCH_INT : GPIO_NUM_NC);
   return ESP_OK;
-no_memory:
+task_fail:
+  if (g_touch_task) vTaskDelete(g_touch_task);
+  g_touch_task = NULL;
+  if (g_touch_queue) vQueueDelete(g_touch_queue);
+  g_touch_queue = NULL;
+  g_touch_interrupt_mode = false;
   if (g_touch) esp_lcd_touch_del(g_touch);
-  g_touch = NULL; g_ft6336 = false;
+  g_touch = NULL; g_cst328 = g_cst826 = g_ft6336 = false;
   esp_lcd_panel_io_del(g_touch_io); g_touch_io = NULL;
-  g_init_error = ESP_ERR_NO_MEM;
+  g_init_error = err;
   return g_init_error;
 }
 
@@ -513,7 +743,8 @@ void pet_p4_touch_process(
       && pet_p4_miniapp_slicing_active();
     bool application = state && !pet_p4_conversation_active(state) && !strcmp(state->screen_page,"app")
       && pet_p4_miniapp_pointer_active();
-    bool captured = g_test_stroke;
+    // Timer-driven long presses can arrive without a new pointer report.
+    bool captured = g_test_stroke || g_component_stroke || g_app_stroke;
     if (sample.has_pointer) {
       if (sample.pointer.kind == PET_P4_POINTER_DOWN) g_test_stroke = test;
       if (sample.pointer.kind == PET_P4_POINTER_DOWN) g_component_stroke = component;

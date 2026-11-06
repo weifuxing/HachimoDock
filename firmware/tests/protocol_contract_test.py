@@ -89,7 +89,10 @@ def test_v3_dpi_clock_keeps_compensated_front_porch_positive():
         actual = 240 / divider
         return front + int(actual / requested * total + 0.5) - total
 
-    assert compensated_front(25) == -11  # Regression reproduced numerically.
+    minimum_total = 512 + 16 * 0x14  # Supplier C2 RTNI.
+    assert total == minimum_total
+    # A rounded 25 MHz request would shorten the line below the panel limit.
+    assert total - front + compensated_front(25) < minimum_total
     assert 240 % v3_clock == 0
     assert compensated_front(v3_clock) == front > 0
 
@@ -1404,14 +1407,14 @@ def test_p4_runtime_initializes_waveshare_lcd_bsp():
     assert "CONFIG_SPIRAM=y" in sdkconfig
 
 
-def test_p4_lcd_matches_wlk2802_st7701s_panel_geometry():
+def test_p4_lcd_matches_hd28091_st7701s_panel_geometry():
     display = read("components/esp32_p4_wifi6_touch_lcd_4_3/include/bsp/display.h")
     bsp = read("components/esp32_p4_wifi6_touch_lcd_4_3/esp32_p4_wifi6_touch_lcd_4_3.c")
 
     assert "#define BSP_LCD_H_RES              (480)" in display
     assert "#define BSP_LCD_V_RES              (640)" in display
-    assert "#define BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS (800)" in display
-    assert "#define BSP_LCD_MIPI_DSI_LANE_NUM          (1)" in display
+    assert "#define BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS (500)" in display
+    assert "#define BSP_LCD_MIPI_DSI_LANE_NUM          (2)" in display
     assert ".h_size = BSP_LCD_H_RES" in bsp
     assert ".v_size = BSP_LCD_V_RES" in bsp
     assert "#define BSP_LCD_PIXEL_FORMAT        LCD_COLOR_PIXEL_FORMAT_RGB565" in display
@@ -1420,18 +1423,24 @@ def test_p4_lcd_matches_wlk2802_st7701s_panel_geometry():
     assert ".bits_per_pixel = BSP_LCD_BITS_PER_PIXEL" in bsp
     assert ".rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB" in bsp
     assert ".dpi_clock_freq_mhz = 25" in bsp
-    assert ".hsync_front_porch = 10" in bsp
+    assert ".hsync_front_porch = 328" in bsp
     assert ".hsync_pulse_width = 4" in bsp
     assert ".hsync_back_porch = 20" in bsp
-    assert ".vsync_front_porch = 8" in bsp
+    assert ".vsync_front_porch = 14" in bsp
     assert ".vsync_pulse_width = 4" in bsp
-    assert ".vsync_back_porch = 14" in bsp
+    assert ".vsync_back_porch = 16" in bsp
     assert "{0xC0, (uint8_t[]){0x4F, 0x00}, 2, 0}" in bsp
     assert "{0xC2, (uint8_t[]){0x01, 0x14}, 2, 0}" in bsp
     assert "{0xB0, (uint8_t[]){0x5D}, 1, 0}" in bsp
+    assert "{0xB1, (uint8_t[]){0x4F}, 1, 0}" in bsp
+    assert "{0xB2, (uint8_t[]){0x00}, 1, 0}" in bsp
+    assert "{0xB5, (uint8_t[]){0x0C}, 1, 0}" in bsp
+    assert "{0xE5, (uint8_t[]){0x0D, 0x91, 0x0A, 0xA0, 0x0F, 0x93, 0x0A, 0xA0, 0x09, 0x8D, 0x0A, 0xA0, 0x0B, 0x8F, 0x0A, 0xA0}" in bsp
+    assert "{0xE8, (uint8_t[]){0x0C, 0x90, 0x0A, 0xA0, 0x0E, 0x92, 0x0A, 0xA0, 0x08, 0x8C, 0x0A, 0xA0, 0x0A, 0x8E, 0x0A, 0xA0}" in bsp
     assert "{0xED, (uint8_t[]){0xFF, 0x45, 0x67, 0xFA" in bsp
-    assert bsp.index("{0x11, (uint8_t[]){0x00}, 0, 120}") < bsp.index("{0x29, (uint8_t[]){0x00}, 0, 0}")
-    assert bsp.index("{0x29, (uint8_t[]){0x00}, 0, 0}") < bsp.index("{0x35, (uint8_t[]){0x00}, 1, 0}")
+    assert bsp.index("{0x11, (uint8_t[]){0x00}, 0, 120}") < bsp.index("{0x36, (uint8_t[]){0x00}, 1, 0}")
+    assert bsp.index("{0x36, (uint8_t[]){0x00}, 1, 0}") < bsp.index("{0x35, (uint8_t[]){0x00}, 1, 0}")
+    assert bsp.index("{0x35, (uint8_t[]){0x00}, 1, 0}") < bsp.index("{0x29, (uint8_t[]){0x00}, 0, 0}")
     assert ".flags = {.output_invert = 0}" in bsp
 
 

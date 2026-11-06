@@ -166,7 +166,9 @@ static esp_err_t panel_st7701_reset(esp_lcd_panel_t *panel)
         vTaskDelay(pdMS_TO_TICKS(ST7701_HW_RESET_RECOVERY_MS));
     } else if (io) { // perform software reset
         ESP_RETURN_ON_ERROR(esp_lcd_panel_io_tx_param(io, LCD_CMD_SWRESET, NULL, 0), TAG, "send command failed");
-        vTaskDelay(pdMS_TO_TICKS(20)); // spec, wait at least 5ms before sending new command
+        // The RC-reset adapter uses this path on MCU-only restarts too.
+        // Match the supplier's 120 ms recovery before its initialization table.
+        vTaskDelay(pdMS_TO_TICKS(ST7701_HW_RESET_RECOVERY_MS));
     }
 
     return ESP_OK;

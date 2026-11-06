@@ -56,6 +56,7 @@ typedef struct {
   int x, y;
   uint64_t last_ms;
 } pet_p4_pointer_decoder_t;
+#define PET_P4_POINTER_STALE_MS 150ULL
 typedef struct { unsigned count; int x, y, track_id; } pet_p4_ft6336_frame_t;
 /* FT6336U / CST826 register 0x02 followed by two six-byte point records.
  * Controller identity must be verified separately before using this decoder. */

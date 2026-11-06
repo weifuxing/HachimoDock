@@ -1,0 +1,11 @@
+{
+  "project": "D:\\UGit\\WW\\HachimoDock\\hardware\\enclosure-hd28091\\fdm\\HD28091-A1-ABS-screen-up-trimmed-project\\HD28091-A1-ABS-screen-up-trimmed-project.3mf",
+  "printer": "Bambu Lab A1",
+  "raft_layers": "0",
+  "automatic_support": "1",
+  "unsliced": true,
+  "model_count": 1,
+  "oriented_stl_closed": true,
+  "oriented_stl_bounds": "BoundBox (-44.25, -48.5009, 1e-07, 44.25, 48.504, 36.7723)",
+  "slicer_log_clear": true
+}

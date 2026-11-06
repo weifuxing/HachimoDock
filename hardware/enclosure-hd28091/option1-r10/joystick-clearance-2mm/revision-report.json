@@ -1,0 +1,70 @@
+{
+  "source": "D:\\UGit\\WW\\HachimoDock\\hardware\\enclosure-hd28091\\option1-r10\\HD28091-option1-R10.stl",
+  "source_sha256": "3e1bbd27c5765e2e2d9cc852badfe1409c0a2b710c71a581971a5387554a843a",
+  "axis_world": "+Y, outward normal of button panel",
+  "translation_mm": 2.0,
+  "hole_center_world_xz_mm": [
+    29.5,
+    15.75
+  ],
+  "hole_center_moved": false,
+  "modified_radius_mm": 9.0,
+  "collar_inner_radius_mm": 8.2,
+  "collar_radial_wall_mm": 0.8000000000000007,
+  "crown_top_y_mm": {
+    "before": 1.0,
+    "after": 3.0
+  },
+  "section_clearance_measurements": [
+    {
+      "offset_x_mm": -6,
+      "old_inner_y_mm": -0.5906384560769401,
+      "new_inner_y_mm": 1.4093615439230598,
+      "clearance_gain_mm": 2.0
+    },
+    {
+      "offset_x_mm": 6,
+      "old_inner_y_mm": -0.6074148429686014,
+      "new_inner_y_mm": 1.3925851570313987,
+      "clearance_gain_mm": 2.0
+    },
+    {
+      "offset_x_mm": -7,
+      "old_inner_y_mm": -0.7669710607916593,
+      "new_inner_y_mm": 1.2330289392083407,
+      "clearance_gain_mm": 2.0
+    },
+    {
+      "offset_x_mm": 7,
+      "old_inner_y_mm": -0.7837600276394593,
+      "new_inner_y_mm": 1.2162399723605408,
+      "clearance_gain_mm": 2.0
+    }
+  ],
+  "old_volume_mm3": 44700.317117142156,
+  "new_volume_mm3": 44794.73785729258,
+  "removed_volume_mm3": 222.97652760513307,
+  "added_volume_mm3": 317.39595536367494,
+  "changes_outside_local_zone_mm3": 2.0735021430081353e-11,
+  "mesh": {
+    "connected_solids": 1,
+    "triangles": 27206,
+    "closed": true,
+    "nonmanifold": false,
+    "self_intersections": false,
+    "normalization_grid_mm": 0.0001
+  },
+  "STEP_note": "Mesh-derived faceted solid, not a smooth parametric model.",
+  "step_readback": {
+    "valid": true,
+    "solids": 1,
+    "volume_mm3": 44794.73785726953
+  },
+  "slice_check": {
+    "return_code": 0,
+    "internal_error_log": false,
+    "estimated_minutes": 261,
+    "estimated_grams": 45.026981353759766,
+    "model_count": 1
+  }
+}

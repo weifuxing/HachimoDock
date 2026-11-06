@@ -1,6 +1,6 @@
 /*
  * [Input] Waveshare panel/BSP operations, boot lifecycle, and RGB565 pixels.
- * [Output] Backlight-gated LCD initialization, first-frame reveal, and draws.
+ * [Output] First-frame LCD reveal using DCS on the fixed-backlight adapter.
  * [Pos] ESP32-P4 LCD hardware boundary.
  * [Sync] If this file changes, update `firmware/.folder.md`.
  */
@@ -48,20 +48,32 @@ static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 static esp_err_t force_lcd_backlight_gpio(int level) {
+  int backlight_gpio = BSP_LCD_BACKLIGHT;
+  if (backlight_gpio < 0) return ESP_OK;
   gpio_config_t io_conf = {
-    .pin_bit_mask = 1ULL << BSP_LCD_BACKLIGHT,
+    .pin_bit_mask = 1ULL << backlight_gpio,
     .mode = GPIO_MODE_OUTPUT,
     .pull_up_en = GPIO_PULLUP_DISABLE,
     .pull_down_en = GPIO_PULLDOWN_DISABLE,
     .intr_type = GPIO_INTR_DISABLE,
   };
   ESP_RETURN_ON_ERROR(gpio_config(&io_conf), TAG, "configure LCD backlight GPIO");
-  ESP_RETURN_ON_ERROR(gpio_set_level(BSP_LCD_BACKLIGHT, level), TAG, "force LCD backlight GPIO");
+  ESP_RETURN_ON_ERROR(gpio_set_level(backlight_gpio, level), TAG, "force LCD backlight GPIO");
   if (level == LCD_BACKLIGHT_FORCE_LEVEL && !g_forced_backlight_logged) {
     ESP_LOGI(TAG, "LCD backlight revealed gpio=%d", LCD_BACKLIGHT_FORCE_LEVEL);
     g_forced_backlight_logged = true;
   }
   return ESP_OK;
+}
+
+static esp_err_t set_lcd_visible(bool visible) {
+  if (BSP_LCD_BACKLIGHT < 0) {
+    // Rev A has a permanently powered backlight. Gate the image using DCS.
+    return esp_lcd_panel_disp_on_off(g_panel_handle, visible);
+  }
+  esp_err_t err = visible ? bsp_display_backlight_on() : bsp_display_backlight_off();
+  esp_err_t force_err = force_lcd_backlight_gpio(visible ? LCD_BACKLIGHT_FORCE_LEVEL : 1 - LCD_BACKLIGHT_FORCE_LEVEL);
+  return err == ESP_OK ? force_err : err;
 }
 
 esp_err_t pet_p4_lcd_prepare_boot(void) {
@@ -88,7 +100,7 @@ static bool IRAM_ATTR lcd_refresh_done_callback(
 esp_err_t pet_p4_lcd_init(void) {
   if (g_panel_handle) return ESP_OK;
 
-  ESP_LOGI(TAG, "Initialize Waveshare ESP32-P4 LCD BSP");
+  ESP_LOGI(TAG, "Initialize HD28091C40-V1 LCD on ESP32-P4");
   ESP_RETURN_ON_ERROR(bsp_display_new(NULL, &g_panel_handle, &g_lcd_io), TAG, "initialize display");
   if (!g_refresh_done_sem) {
     g_refresh_done_sem = xSemaphoreCreateBinary();
@@ -112,16 +124,11 @@ esp_err_t pet_p4_lcd_init(void) {
     BSP_LCD_COLOR_FORMAT == ESP_LCD_COLOR_FORMAT_RGB565 ? "RGB565" : "RGB888",
     BSP_LCD_BITS_PER_PIXEL
   );
-  // Component/storage migration may run for several seconds after an OTA.
-  // Keep the panel hidden until the renderer has committed the first complete
-  // frame so the controller's blue reset surface is never shown to the user.
-  g_backlight_status = bsp_display_backlight_off();
-  esp_err_t force_err = force_lcd_backlight_gpio(1 - LCD_BACKLIGHT_FORCE_LEVEL);
-  if (g_backlight_status != ESP_OK || force_err != ESP_OK) {
-    ESP_LOGW(TAG, "display backlight hide failed: %s", esp_err_to_name(g_backlight_status));
-  }
-  if (g_backlight_status == ESP_OK && force_err != ESP_OK) {
-    g_backlight_status = force_err;
+  // Keep the initialized panel hidden until the first complete rendered frame.
+  // The fixed-backlight adapter can only blank pixels after DCS is available.
+  g_backlight_status = set_lcd_visible(false);
+  if (g_backlight_status != ESP_OK) {
+    ESP_LOGW(TAG, "display hide failed: %s", esp_err_to_name(g_backlight_status));
   }
   return ESP_OK;
 }
@@ -129,11 +136,7 @@ esp_err_t pet_p4_lcd_init(void) {
 esp_err_t pet_p4_lcd_reveal(void) {
   if (!g_panel_handle) return ESP_ERR_INVALID_STATE;
   if (g_backlight_revealed) return g_backlight_status;
-  g_backlight_status = bsp_display_backlight_on();
-  esp_err_t force_err = force_lcd_backlight_gpio(LCD_BACKLIGHT_FORCE_LEVEL);
-  if (g_backlight_status == ESP_OK && force_err != ESP_OK) {
-    g_backlight_status = force_err;
-  }
+  g_backlight_status = set_lcd_visible(true);
   if (g_backlight_status == ESP_OK) {
     g_backlight_revealed = true;
   } else {

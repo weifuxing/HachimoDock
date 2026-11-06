@@ -14,11 +14,25 @@
 | 片上内存 | 768 KB L2MEM、32 KB 低功耗 SRAM、8 KB TCM |
 | PSRAM | 32 MB 封装内堆叠内存 |
 | Flash | 32 MB QSPI NOR Flash |
-| 显示屏 | 480 × 640 ST7701S MIPI 屏幕；固件使用 640 × 480 横向逻辑画布，再旋转输出 |
-| 输入 | SW1 / SW2 / SW3、摇杆；触控支持 GT911 与按芯片 ID 识别的 FT6336U / CST826，是否可用以实机 `touchReady` 为准 |
+| 显示屏 | HD28091C40-V1，480 × 640 ST7701S MIPI 屏幕；固件使用 640 × 480 横向逻辑画布，再旋转输出 |
+| 输入 | SW1 / SW2 / SW3、摇杆；触控支持 CST328、GT911 与按芯片 ID 识别的 FT6336U / CST826，是否可用以实机 `touchReady` 为准 |
 | USB | Type-C，可通过板上切换电路连接 CH343 USB-UART 或 ESP32-P4 原生 USB HS OTG |
 
 板型、引脚与分区配置以 [boards/](boards/)、[sdkconfig.defaults](sdkconfig.defaults) 和 [partitions.csv](partitions.csv) 为准。不同硬件版本烧录前需核对配置。
+
+### HD28091C40-V1 屏幕适配
+
+当前工作树采用 `hardware/screen-adapter/README.md` 中的 Rev A 转接板，并将 `TP_INT` 测试焊盘（触摸 J3 第 3 脚）飞线接到微雪开发板 GPIO22。LCD 和 CST328 各自通过 RC 上电复位，初始化前等待至少 1 秒，LCD 软件复位后再等待 120 ms。触摸通过 GPIO7/SDA、GPIO8/SCL 在地址 `0x1A` 通信，GPIO22 配为上拉输入、下降沿中断，触摸复位引脚设为 NC。CST328 校验信息模式标识和 480 × 640 坐标范围，按屏幕原生坐标旋转到横向界面。
+
+中断处理函数发送任务通知，由触摸任务执行 I²C 读帧。启动时主动同步一次，此后任务等待中断，静止按住的 700 ms 长按由任务计时触发。已消费报文维持当前状态，有效抬起、多点或通信错误结束当前手势。通信失败时最多追加两次间隔 15 ms 的读取重试，再尝试一次 ACK 清理并保留错误状态。将 `BSP_LCD_TOUCH_INT` 改为 NC 可使用 15 ms 轮询及其 150 ms 鲜度检查。寄存器协议依据 Hynitron 数据手册，读后确认及消费标识处理参考公开驱动。[CST328 数据手册](https://www.cdtech-display.com/wp-content/uploads/2024/07/CST328-DataSheet-V2.2.pdf) [微雪 CST328 驱动](https://github.com/waveshareteam/Waveshare-ESP32-components/blob/master/display/touch/esp_lcd_touch_cst328/esp_lcd_touch_cst328.c) [Linux Hynitron 驱动](https://github.com/torvalds/linux/blob/master/drivers/input/touchscreen/hynitron_cstxxx.c)
+
+初始化表来自用户提供的 `BOE2.8IPS(ZV028V0Q-N10-1QP0 )_ADS(480X640)_FW(Customer)-45Duty-190802.ini.txt`，包含厂方电压、Gamma、GIP 参数及 `11 → 等待120ms → 36 00 → 35 00 → 29` 的结束顺序。外部 VBP/VFP 分别设置为 16/14 行，满足文件开头的约束。
+
+根据转接板两对数据线配置双通道 DSI，初始速率为每通道 500 Mbps。水平总长按厂方 `C2` 的 `RTNI=0x14` 换算为 832 像素周期，HBP/HSYNC/HFP 分别为 20/4/328。v1 像素时钟采用 25 MHz，v3 采用可整除的 24 MHz，计算刷新率约为 44.6/42.8 Hz。厂方文件没有完整主机时序和模组内部 LANSEL 配置，上述链路参数仍需实机验证。计算依据见 ST7701S 手册第 9、39、271 页。[ST7701S 数据手册](https://focuslcds.com/wp-content/uploads/Drivers/ST7701S.pdf)
+
+Rev A 背光 EN 接电源，亮度固定。固件在 LCD 初始化后通过 DCS 关闭画面，在首帧绘制完成后开启画面，上电至软件接管期间可能可见亮屏。`backlightStatus` 记录该显示门控命令的执行结果。实机验收需覆盖冷启动、MCU 重启、彩条颜色与边界，以及触摸四角、拖动和抬起。`diagnostics/query` 的触摸诊断新增 `probe0x1a`，成功识别时 `controller` 为 `CST328`。
+
+中断固件的 `touchHealth.interruptGpio` 应为 `22`，启动日志包含 `mode=interrupt int_gpio=22`。飞线完成后需实测轻触、静止长按、连续拖动、抬起和冷启动期间的触摸，核对目标屏的完整中断报文时序。
 
 ESP32-P4-WIFI6-M 的 M 表示焊接排针，不代表芯片版本。v1 与 v3 使用不同固件镜像，同一种芯片的镜像由 Windows/macOS 共用；v3 的构建与实机验收要求见 [BUILD.md](BUILD.md)。
 

@@ -136,7 +136,7 @@ void pet_p4_touch_cst826_to_ui(int panel_x, int panel_y, int *ui_x, int *ui_y) {
 bool pet_p4_pointer_update(pet_p4_pointer_decoder_t *d, bool valid,
   bool pressed, int x, int y, uint64_t now_ms, pet_p4_pointer_event_t *e) {
   if (!d || !e) return false;
-  if (!valid || now_ms < d->last_ms || (d->down && now_ms - d->last_ms > 150)) {
+  if (!valid || now_ms < d->last_ms || (d->down && now_ms - d->last_ms > PET_P4_POINTER_STALE_MS)) {
     bool down = d->down;
     *e = (pet_p4_pointer_event_t){PET_P4_POINTER_CANCEL, d->x, d->y, now_ms};
     *d = (pet_p4_pointer_decoder_t){.last_ms = now_ms};

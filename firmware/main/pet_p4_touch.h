@@ -15,7 +15,8 @@ const char *pet_p4_touch_controller(void);
 typedef struct {
   const char *stage;
   int error, address, primary_error, backup_error;
-  int probe_15, probe_38, probe_10, probe_18;
+  int probe_15, probe_38, probe_10, probe_18, probe_1a;
+  int interrupt_gpio;
   int chip_id, vendor_id;
   unsigned int samples, contacts, poll_errors, consecutive_errors;
   int panel_x, panel_y, ui_x, ui_y;

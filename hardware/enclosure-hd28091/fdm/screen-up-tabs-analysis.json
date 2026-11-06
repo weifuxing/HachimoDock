@@ -1,0 +1,21 @@
+{
+  "screen_up_frame_height_above_ear_low_point_mm": 1.887755749377206,
+  "ear_ranges_x_mm": [
+    [
+      -30,
+      -20
+    ],
+    [
+      20,
+      30
+    ]
+  ],
+  "frame_plane_local_depth_mm": -15.5,
+  "ear_lowest_local_depth_mm": -17.387755749377206,
+  "ear_hole_diameter_mm": 2,
+  "minimum_cylinder_point_height_after_ear_alignment_mm": 2.82842712474619,
+  "vertical_hole_margin_if_trimmed_to_frame_plane_mm": 0.9406713753689839,
+  "interpretation": "The body has a flat rear frame parallel to the screen. Two original mounting ears project about 1.89 mm below it in the screen-up pose. Earlier general explanation based only on the rear mating-plane angle was incomplete.",
+  "limitations": "Historical before-trim comparison only. The current model has been trimmed per user instruction.",
+  "model_state": "Historical untrimmed state; current trimmed geometry is documented in trimmed-ears-verification.json"
+}

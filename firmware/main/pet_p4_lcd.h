@@ -1,6 +1,6 @@
 /*
  * [Input] P4 LCD panel operations, boot lifecycle, and RGB565 frame buffers.
- * [Output] Hidden-until-first-frame display initialization and bounded draws.
+ * [Output] DCS-gated first-frame reveal and bounded draws on the fixed-backlight adapter.
  * [Pos] Public LCD contract for the ESP32-P4 runtime.
  * [Sync] If this file changes, update `firmware/.folder.md`.
  */

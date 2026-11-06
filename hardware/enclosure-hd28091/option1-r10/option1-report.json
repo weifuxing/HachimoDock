@@ -1,0 +1,166 @@
+{
+  "source": "D:\\UGit\\WW\\HachimoDock\\hardware\\enclosure-hd28091\\HD28091-front-body.stl",
+  "source_sha256": "f64863af08a20fa1b91f8f743e6c274e699a93ed14a8a5535ba2b6f770bc9110",
+  "operation": "Exterior union only, against the user-tested STL; no original material removed",
+  "corners": [
+    {
+      "region": "screen",
+      "side": "left",
+      "old_outer_radius_mm": 13.0,
+      "new_outer_radius_mm": 10.0,
+      "front_flat_corner_radius_mm": 4.5,
+      "edge_roll_radius_mm": 5.5,
+      "patch_volume_mm3": 271.53636723421914
+    },
+    {
+      "region": "screen",
+      "side": "right",
+      "old_outer_radius_mm": 13.0,
+      "new_outer_radius_mm": 10.0,
+      "front_flat_corner_radius_mm": 4.5,
+      "edge_roll_radius_mm": 5.5,
+      "patch_volume_mm3": 271.53636723421914
+    },
+    {
+      "region": "buttons",
+      "side": "left",
+      "old_outer_radius_mm": 12.0,
+      "new_outer_radius_mm": 10.0,
+      "front_flat_corner_radius_mm": 4.5,
+      "edge_roll_radius_mm": 5.5,
+      "patch_volume_mm3": 189.08121467872195
+    },
+    {
+      "region": "buttons",
+      "side": "right",
+      "old_outer_radius_mm": 12.0,
+      "new_outer_radius_mm": 10.0,
+      "front_flat_corner_radius_mm": 4.5,
+      "edge_roll_radius_mm": 5.5,
+      "patch_volume_mm3": 189.0812146787222
+    }
+  ],
+  "old_volume_mm3": 44207.148903716276,
+  "new_volume_mm3": 44700.32028704288,
+  "discarded_numerical_component_volumes_mm3": [
+    -9.27073396007052e-08
+  ],
+  "added_volume_mm3": 493.1713833266048,
+  "removed_volume_mm3": 4.182397356843631e-15,
+  "four_corner_witnesses": [
+    {
+      "point_screen_local_mm": [
+        -42,
+        61,
+        -7.5
+      ],
+      "fraction_inside": 1.000000000000006
+    },
+    {
+      "point_screen_local_mm": [
+        42,
+        61,
+        -7.5
+      ],
+      "fraction_inside": 0.9999999999999982
+    },
+    {
+      "point_screen_local_mm": [
+        -41.5,
+        -25.809397513308983,
+        15.20279579551077
+      ],
+      "fraction_inside": 1.0000000000000144
+    },
+    {
+      "point_screen_local_mm": [
+        41.5,
+        -25.809397513308983,
+        15.20279579551077
+      ],
+      "fraction_inside": 0.9999999999999876
+    }
+  ],
+  "protected_spaces": [
+    {
+      "region": "glass_and_screen",
+      "new_material_mm3": 8.836247292166555e-18
+    },
+    {
+      "region": "LCD_FPC",
+      "new_material_mm3": 0.0
+    },
+    {
+      "region": "TP_FPC",
+      "new_material_mm3": 0.0
+    },
+    {
+      "region": "rear_adhesive_upper",
+      "new_material_mm3": 0.0
+    },
+    {
+      "region": "rear_adhesive_lower",
+      "new_material_mm3": 0.0
+    }
+  ],
+  "assembly_intersections": [
+    {
+      "part": 2,
+      "new_material_intersection_mm3": 3.0502105202477034e-06
+    },
+    {
+      "part": 3,
+      "new_material_intersection_mm3": 0.0
+    },
+    {
+      "part": 4,
+      "new_material_intersection_mm3": 0.0
+    },
+    {
+      "part": 5,
+      "new_material_intersection_mm3": 0.0
+    },
+    {
+      "part": 6,
+      "new_material_intersection_mm3": 0.0
+    },
+    {
+      "part": 7,
+      "new_material_intersection_mm3": 0.0
+    },
+    {
+      "part": 8,
+      "new_material_intersection_mm3": 0.0
+    }
+  ],
+  "connected_solids": 1,
+  "triangle_count": 24974,
+  "baseline_tessellation": "Existing user-tested STL; new analytic patches meshed at 0.02 mm linear deflection",
+  "STL_numeric_normalization": {
+    "coordinate_grid_mm": 0.0001,
+    "simplification_tolerance_mm": 0.0001,
+    "maximum_combined_surface_deviation_bound_mm": 0.0002,
+    "closed": true,
+    "self_intersections": false
+  },
+  "STEP_note": "Analytic patches are a reference construction; final print solid uses robust mesh union. Any final STEP is a faceted mesh-derived solid.",
+  "front_corner_band_from_mesh_section_mm": {
+    "before": 0.35067161198012103,
+    "after": 1.5498878969703007,
+    "plane_depth_mm": -0.001
+  },
+  "final_step_readback": {
+    "valid": true,
+    "solid_count": 1,
+    "volume_mm3": 44700.31711711856,
+    "face_count": 24974,
+    "representation": "faceted, mesh-derived"
+  },
+  "local_slice_check": {
+    "return_code": 0,
+    "internal_error_log": false,
+    "estimated_minutes": 258,
+    "estimated_grams": 44.86507034301758,
+    "model_count": 1
+  }
+}

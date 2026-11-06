@@ -21,9 +21,11 @@ def health(**fields):
 
 def test_stages_map_to_the_firmware_init_sequence():
     source = (ROOT / "main/pet_p4_touch.c").read_text()
-    for stage in ("i2c_init", "probe", "identify_register_touch", "panel_io", "controller", "queue", "task", "ready"):
+    for stage in ("power_on_wait", "i2c_init", "probe", "identify_cst328", "identify_register_touch",
+                  "panel_io", "controller", "queue", "task", "interrupt", "ready"):
         assert f'g_init_stage = "{stage}"' in source, stage
     assert classify(health(stage="not_started"))["category"] == "display"
+    assert classify(health(stage="power_on_wait"))["category"] == "runtime"
     assert classify(health(stage="i2c_init", error="ESP_FAIL"))["category"] == "bus"
     assert classify(health(stage="probe", primaryProbe=TO, backupProbe=NF, error=TO))["category"] == "bus"
     r134_like = classify(health(stage="probe", error=NF, probe0x15=NF, probe0x38=NF, probe0x10=OK, probe0x18=OK))
@@ -39,6 +41,39 @@ def test_stages_map_to_the_firmware_init_sequence():
     assert classify(health(stage="ready", controller="CST826", samples=500))["category"] == "healthy"
     assert classify(health(stage="ready", controller="GT911", samples=500, contacts=12))["category"] == "healthy"
     assert classify(health(stage="later"))["category"] == "unknown"
+
+
+def test_cst328_probe_identification_and_interrupt_stages():
+    response = classify(health(stage="probe", error=NF, probe0x1a=TO))
+    assert response["category"] == "bus"
+    assert response["evidence"]["probe0x1a"] == TO
+    assert classify(health(stage="probe", error=NF, probe0x1a=OK))["category"] == "driver"
+    for error in ("ESP_ERR_NOT_SUPPORTED", "ESP_ERR_INVALID_RESPONSE", "ESP_FAIL"):
+        response = classify(health(stage="identify_cst328", error=error, address=0x1a))
+        assert response["category"] == "driver" and "CST328" in response["verdict"]
+    assert classify(health(stage="interrupt", error="ESP_FAIL"))["category"] == "driver"
+    assert classify(health(stage="interrupt", error="ESP_ERR_NO_MEM"))["category"] == "memory"
+
+
+def test_interrupt_idle_and_current_errors_take_precedence():
+    for gpio in (22, 0):
+        response = classify(health(controller="CST328", interruptGpio=gpio))
+        assert response["category"] == "healthy"
+        assert f"GPIO{gpio}" in response["verdict"]
+        assert response["evidence"]["interruptGpio"] == gpio
+    for gpio in (-1, None):
+        assert classify(health(interruptGpio=gpio))["category"] == "runtime"
+    assert classify(health())["category"] == "runtime"  # Legacy polling payload.
+    for fields in ({"consecutiveErrors": 3}, {"error": "ESP_FAIL"}):
+        assert classify(health(interruptGpio=22, **fields))["category"] == "runtime"
+
+
+def test_recovered_historical_errors_allow_healthy_reports():
+    for fields in ({"samples": 1, "contacts": 1}, {"samples": 0, "contacts": 0}):
+        response = classify(health(controller="CST328", interruptGpio=22, pollErrors=100,
+                                   consecutiveErrors=0, **fields))
+        assert response["category"] == "healthy"
+    assert classify(health(samples=1, contacts=1, pollErrors=100, consecutiveErrors=0))["category"] == "healthy"
 
 
 def test_cli_reads_a_status_line_and_prints_json(tmp_path):

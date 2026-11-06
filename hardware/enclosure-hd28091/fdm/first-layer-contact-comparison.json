@@ -1,0 +1,52 @@
+[
+  {
+    "pose": "mating_down",
+    "first_layers": [
+      {
+        "height_mm": 0.05,
+        "model_cross_section_mm2": 226.6355538122436,
+        "closed_wires": 1
+      },
+      {
+        "height_mm": 0.2,
+        "model_cross_section_mm2": 339.8365304556287,
+        "closed_wires": 1
+      },
+      {
+        "height_mm": 0.4,
+        "model_cross_section_mm2": 426.2383855223059,
+        "closed_wires": 1
+      },
+      {
+        "height_mm": 1.0,
+        "model_cross_section_mm2": 572.3022293757921,
+        "closed_wires": 1
+      }
+    ]
+  },
+  {
+    "pose": "screen_up",
+    "first_layers": [
+      {
+        "height_mm": 0.05,
+        "model_cross_section_mm2": 1.9999999999999254,
+        "closed_wires": 2
+      },
+      {
+        "height_mm": 0.2,
+        "model_cross_section_mm2": 7.999999999999915,
+        "closed_wires": 2
+      },
+      {
+        "height_mm": 0.4,
+        "model_cross_section_mm2": 15.999999999999929,
+        "closed_wires": 2
+      },
+      {
+        "height_mm": 1.0,
+        "model_cross_section_mm2": 39.99999999999993,
+        "closed_wires": 2
+      }
+    ]
+  }
+]
