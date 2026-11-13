@@ -6,9 +6,11 @@
 
 ## 屏幕与转接板
 
-显示屏采用 HD28091C40-V1，物理分辨率 480×640，界面使用 640×480 横向逻辑坐标并旋转输出。屏侧为 40Pin LCD 排线和独立 6Pin 触摸排线。
+显示屏采用 HD28091C40-V1，物理分辨率 480×640，界面使用 640×480 横向逻辑坐标并旋转输出。屏侧为 40Pin LCD 排线和独立 6Pin 触摸排线。[屏幕淘宝购买链接](https://item.taobao.com/item.htm?id=566355265504&mi_id=0000sGhHLYPMQHlue9llXrv9IkNEE6YnqL7G8TRNHJ512as&spm=tbpc.boughtlist.suborder_itemtitle.1.70d82e8dXaiCDY)
 
 转接板工程及检查记录在 [hardware/screen-adapter](../hardware/screen-adapter/README.md)，包括嘉立创EDA原生工程、原理图、PCB、BOM、网表及预览。
+
+转接板的在线工程位于立创开源硬件平台。[转接板工程](https://oshwhub.com/fosen/project_tzekpmhv)
 
 | 项目 | 当前实现 |
 | --- | --- |
@@ -88,7 +90,7 @@ python -m platformio run -e esp32_p4_pico_v3 -t factory
 
 ## 外壳与打印工程
 
-外壳模型、转接板避让和打印记录在 [hardware/enclosure-hd28091](../hardware/enclosure-hd28091/当前模型说明.txt)。2026-11-13 的当前打印版本选用 `option1-r10`，包含 R10 外角和约 R4.5 面框边缘，摇杆凸台采用抬高前的位置。打印入口为 [screen-up STL](../hardware/enclosure-hd28091/option1-r10/HD28091-option1-R10-screen-up.stl) 和 [screen-up 3MF](../hardware/enclosure-hd28091/option1-r10/HD28091-option1-R10-screen-up.3mf)。`joystick-clearance-2mm` 及 `root-fillet-r04` 目录记录已撤回的外抬和圆角方案，详情见各自模型说明。目录提供 STL、STEP、FreeCAD、3MF 和检查记录。
+整套外壳文件与打印说明集中在 [hardware/enclosure-hd28091](../hardware/enclosure-hd28091/README.md)。当前保留方案一 R10，包含 R10 外角和约 R4.5 面框边缘，摇杆凸台采用抬高前的位置。前壳打印入口为 [screen-up STL](../hardware/enclosure-hd28091/HD28091-option1-R10-screen-up.stl) 和 [screen-up 3MF](../hardware/enclosure-hd28091/HD28091-option1-R10-screen-up.3mf)，文件与选定版本保持一致。后壳、三个按键帽及摇把的三个零件已从原总装中独立导出，整套共 8 件，每件打印 1 个。同目录提供各件 STEP、使用当前 R10 前壳的总装 STEP、FreeCAD 工程、零件预览和来源核验清单。前壳 CAD 为网格转实体，配套件的切片与实物装配验证待完成。
 
 ## 验证记录与待测项
 

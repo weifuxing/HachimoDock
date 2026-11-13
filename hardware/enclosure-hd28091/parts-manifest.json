@@ -1,0 +1,299 @@
+{
+  "version": "HD28091-R10",
+  "units": "mm",
+  "sourceGitCommit": "f7371de62c1b018f5743831edf545f95cd8498a8",
+  "sourceAssembly": "hardware/enclosure-hd28091/HD28091-enclosure-assembly.step",
+  "sourceAssemblySha256": "dbaad96dd5ab6efea5d146a1fce90b4e5ebb3e45d13b4146e743f28c8a7cc948",
+  "sourceR10StepSha256": "4fc251a122a15eef9662dfab2a1dd66b35f001ee21fc22c7927de284086e9bfd",
+  "parts": [
+    {
+      "id": 1,
+      "name": "前壳 R10",
+      "quantity": 1,
+      "sourceSolid": 1,
+      "sourceLabel": "原前壳经 HD28091 及 R10 外角适配",
+      "stl": "HD28091-option1-R10-screen-up.stl",
+      "step": "HD28091-R10-front-faceted.step",
+      "volumeMm3": 44700.317117142404,
+      "assemblyBoundsMm": [
+        -44.25,
+        -15.500000000000002,
+        -55.45859909057617,
+        44.25,
+        44.49850082397461,
+        32.5
+      ],
+      "printBoundsMm": [
+        -44.25,
+        -48.50366973876953,
+        0.0,
+        44.25,
+        48.50366973876953,
+        36.77238082885742
+      ],
+      "printPose": {
+        "method": "保留已确认的前壳屏幕面朝上摆放",
+        "rotationDegrees": 45
+      },
+      "closed": true,
+      "nonManifold": false,
+      "selfIntersections": false,
+      "stlSha256": "9bd2e47d68a6c344a25623f40e1751c8a16127bbbfd42fde34d27caf9d0f0d3d",
+      "stepSha256": "4fc251a122a15eef9662dfab2a1dd66b35f001ee21fc22c7927de284086e9bfd"
+    },
+    {
+      "id": 2,
+      "name": "后壳",
+      "quantity": 1,
+      "sourceSolid": 2,
+      "sourceLabel": "底壳-摇把版",
+      "stl": "HD28091-R10-rear-print.stl",
+      "step": "HD28091-R10-rear.step",
+      "volumeMm3": 23070.51993295529,
+      "assemblyBoundsMm": [
+        -39.2500001,
+        -18.750000100000012,
+        -54.126702831900005,
+        39.2500001,
+        32.387219562406,
+        28.183748498799
+      ],
+      "printBoundsMm": [
+        -39.25,
+        -41.15522384643555,
+        0.0,
+        39.25,
+        41.15522384643555,
+        51.1372184753418
+      ],
+      "printPose": {
+        "method": "最大外侧支承平面朝下，XY 居中，最低点 Z=0",
+        "hasFlatSupportFace": true
+      },
+      "closed": true,
+      "nonManifold": false,
+      "selfIntersections": false,
+      "stlSha256": "6446294c52a2af3494dc3770aa74c3716182e715ea641c59dc2a3c9b48241a72",
+      "stepSha256": "a9bceb489f68d26b350013e735e035263228ad78a019ea544174b8ca7327f859"
+    },
+    {
+      "id": 3,
+      "name": "按键帽 1",
+      "quantity": 1,
+      "sourceSolid": 3,
+      "sourceLabel": "按键1",
+      "stl": "HD28091-R10-button-1-print.stl",
+      "step": "HD28091-R10-button-1.step",
+      "volumeMm3": 1042.6496918474093,
+      "assemblyBoundsMm": [
+        -37.58229006458,
+        -0.5899561885544894,
+        6.7713347826706345,
+        -19.5822898645737,
+        8.410044011446,
+        24.771334982671366
+      ],
+      "printBoundsMm": [
+        -9.0,
+        -9.0,
+        0.0,
+        9.0,
+        9.000000953674316,
+        9.0
+      ],
+      "printPose": {
+        "method": "最大外侧支承平面朝下，XY 居中，最低点 Z=0",
+        "hasFlatSupportFace": true
+      },
+      "closed": true,
+      "nonManifold": false,
+      "selfIntersections": false,
+      "stlSha256": "d3c160517c4aa4a9fc37547d45014f25e695a92257b2db50f9ef9094c13ab3ad",
+      "stepSha256": "31d057a707a89b65f822ac5f3ad6ce5d20907181b24bec6b2df6924b01ead364"
+    },
+    {
+      "id": 4,
+      "name": "按键帽 2",
+      "quantity": 1,
+      "sourceSolid": 4,
+      "sourceLabel": "按键001",
+      "stl": "HD28091-R10-button-2-print.stl",
+      "step": "HD28091-R10-button-2.step",
+      "volumeMm3": 1042.6496918478988,
+      "assemblyBoundsMm": [
+        -18.5703520407,
+        -0.5899561885543724,
+        6.771334782670665,
+        -0.5703518407039995,
+        8.410044011446,
+        24.771334982671338
+      ],
+      "printBoundsMm": [
+        -9.0,
+        -9.0,
+        0.0,
+        9.000000953674316,
+        9.000000953674316,
+        9.0
+      ],
+      "printPose": {
+        "method": "最大外侧支承平面朝下，XY 居中，最低点 Z=0",
+        "hasFlatSupportFace": true
+      },
+      "closed": true,
+      "nonManifold": false,
+      "selfIntersections": false,
+      "stlSha256": "7489e82ac9806b2c3d7786eafbe4c8d1dc355db794f2455012b426509ba45fcc",
+      "stepSha256": "ac0880eeb37eecc690a85f8593217e3aa847b151f02635459677ed77f6e46521"
+    },
+    {
+      "id": 5,
+      "name": "按键帽 3",
+      "quantity": 1,
+      "sourceSolid": 5,
+      "sourceLabel": "按键002",
+      "stl": "HD28091-R10-button-3-print.stl",
+      "step": "HD28091-R10-button-3.step",
+      "volumeMm3": 1042.6496918477656,
+      "assemblyBoundsMm": [
+        0.44158598317165687,
+        -0.5899561885541141,
+        6.771334782670665,
+        18.441586183172003,
+        8.410044011446,
+        24.771334982671338
+      ],
+      "printBoundsMm": [
+        -8.999999046325684,
+        -9.0,
+        0.0,
+        9.0,
+        9.000000953674316,
+        9.0
+      ],
+      "printPose": {
+        "method": "最大外侧支承平面朝下，XY 居中，最低点 Z=0",
+        "hasFlatSupportFace": true
+      },
+      "closed": true,
+      "nonManifold": false,
+      "selfIntersections": false,
+      "stlSha256": "2257a291faac7a8d089df8f411fb63231a162dfc4b9871aa5a0547f05c99b846",
+      "stepSha256": "05827a115941a963aceebac37e2f0fdcaff083fe2a85d6154a3cd2b4ee70da32"
+    },
+    {
+      "id": 6,
+      "name": "摇把帽",
+      "quantity": 1,
+      "sourceSolid": 6,
+      "sourceLabel": "摇把帽",
+      "stl": "HD28091-R10-joystick-cap-print.stl",
+      "step": "HD28091-R10-joystick-cap.step",
+      "volumeMm3": 1333.3426176462608,
+      "assemblyBoundsMm": [
+        22.5,
+        5.1949999,
+        8.75,
+        36.5,
+        17.144747468306,
+        22.75
+      ],
+      "printBoundsMm": [
+        -6.999174118041992,
+        -6.999176025390625,
+        0.0,
+        6.999176025390625,
+        6.999175071716309,
+        11.949747085571289
+      ],
+      "printPose": {
+        "method": "参考安装平面法向摆放，曲面接触平台，切片时确认支撑",
+        "hasFlatSupportFace": false
+      },
+      "closed": true,
+      "nonManifold": false,
+      "selfIntersections": false,
+      "stlSha256": "6d1ac95dbded7fd2375bd9cc6c57af79a4ed1294e5de45ca6effd301054ca852",
+      "stepSha256": "567ab9deca1f136a803a278c016acac0591303b07084c63c2339257e695042d4"
+    },
+    {
+      "id": 7,
+      "name": "摇把帽内件",
+      "quantity": 1,
+      "sourceSolid": 7,
+      "sourceLabel": "摇把帽001",
+      "stl": "HD28091-R10-joystick-insert-print.stl",
+      "step": "HD28091-R10-joystick-insert.step",
+      "volumeMm3": 135.56295311304697,
+      "assemblyBoundsMm": [
+        24.555257587567,
+        -0.8552525316940844,
+        10.805257587566999,
+        34.444742412433,
+        5.19,
+        20.694742412433
+      ],
+      "printBoundsMm": [
+        -4.944435119628906,
+        -4.944436073303223,
+        0.0,
+        4.944435119628906,
+        4.944435119628906,
+        6.045252799987793
+      ],
+      "printPose": {
+        "method": "最大外侧支承平面朝下，XY 居中，最低点 Z=0",
+        "hasFlatSupportFace": true
+      },
+      "closed": true,
+      "nonManifold": false,
+      "selfIntersections": false,
+      "stlSha256": "b2360d6e8c3148baddce571c5e568dce3754cd5cf348335ee88606a7d818a8f5",
+      "stepSha256": "7e9f7318a79f0b619f83fff7767e50794d2d9e9d3457c4e0b792803ca6b3eebd"
+    },
+    {
+      "id": 8,
+      "name": "摇把盖板",
+      "quantity": 1,
+      "sourceSolid": 8,
+      "sourceLabel": "摇把盖板",
+      "stl": "HD28091-R10-joystick-cover-print.stl",
+      "step": "HD28091-R10-joystick-cover.step",
+      "volumeMm3": 57.72676500971244,
+      "assemblyBoundsMm": [
+        22.583868801091,
+        -1.0399485334290084,
+        8.78626617582,
+        36.583868801091,
+        -0.6399485334289916,
+        22.78626617582
+      ],
+      "printBoundsMm": [
+        -7.000001907348633,
+        -7.0,
+        0.0,
+        7.0,
+        7.0,
+        0.40000003576278687
+      ],
+      "printPose": {
+        "method": "最大外侧支承平面朝下，XY 居中，最低点 Z=0",
+        "hasFlatSupportFace": true
+      },
+      "closed": true,
+      "nonManifold": false,
+      "selfIntersections": false,
+      "stlSha256": "a5614729861ffd6c67d476f8954f0770c6cd7172e4154bd50e4e38b29fb88904",
+      "stepSha256": "a0ddf8380b3a6c52a069a1b2d4e87ca89c5e7fdf30af695e086739c485b839c4"
+    }
+  ],
+  "assemblyStepReadback": {
+    "solidCount": 8,
+    "valid": true,
+    "sourceVolumeMm3": 72425.41846140978,
+    "readbackVolumeMm3": 72425.41822981003
+  },
+  "front3mfSha256": "cd588c055d1c45231232b6568cafad0a51ca3b02d707d424543a4e9859275f51",
+  "assemblyStepSha256": "58ad5e536774cabaef8a1fb41767f181770ecb3bc15368acdc5cc920fd9303cf",
+  "assemblyFcstdSha256": "b7ee46908edc8aa4b5149a89665260cb5810d632ed49059daf4043953e5923ad"
+}

@@ -36,6 +36,14 @@
 
 接线、板型编译目标、打印文件及实测范围见 [HD28091 硬件改动与固件适配说明](docs/hd28091-hardware-adaptation.md)。本分支适配固件按该说明自行编译，下方版本与下载表对应上游官方发布。
 
+| 配套硬件 | 资料与文件 |
+| --- | --- |
+| HD28091C40-V1 屏幕，480×640 | [淘宝购买链接](https://item.taobao.com/item.htm?id=566355265504&mi_id=0000sGhHLYPMQHlue9llXrv9IkNEE6YnqL7G8TRNHJ512as&spm=tbpc.boughtlist.suborder_itemtitle.1.70d82e8dXaiCDY) |
+| 自制屏幕转接板 | [立创开源硬件平台工程](https://oshwhub.com/fosen/project_tzekpmhv) · [项目内原理图、PCB 与 BOM](hardware/screen-adapter/README.md) |
+| 方案一 R10 整套外壳 | [零件清单与打印说明](hardware/enclosure-hd28091/README.md) · [零件预览](hardware/enclosure-hd28091/HD28091-R10-parts.png) |
+
+外壳采用 R10 外角和约 R4.5 面框边缘，摇杆凸台沿用抬高前的高度。整套共 8 件，包括前壳、后壳、三个按键帽、摇把帽、内件和盖板，每件打印 1 个。外壳目录集中提供独立 STL、各件 STEP、总装 STEP、FreeCAD 工程和前壳 3MF。前壳 CAD 为网格转实体，新增配套件的切片与实物装配验证待完成。
+
 ## 项目简介
 
 HachimoDock（哈基米机）是面向 AI Agent 的桌面交互终端，由 Windows/macOS 管理端与 ESP32-P4 设备组成，提供工作状态显示、语音输入、自定义形象和互动组件。桌面应用的安装名称为 **HachimiDock**，部分开发文档使用 **Pet Manager** 指代管理端。
