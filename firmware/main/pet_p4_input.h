@@ -11,6 +11,7 @@
 #include <stdbool.h>
 
 #include "cJSON.h"
+#include "driver/gpio.h"
 #include "esp_err.h"
 #include "pet_p4_protocol.h"
 
@@ -23,6 +24,15 @@ extern "C" {
 #define PET_P4_INPUT_EVENT_MAX 40
 #define PET_P4_INPUT_ACTION_MAX 24
 #define PET_P4_INPUT_VALUE_MAX 160
+
+/* Same external button-header positions on Waveshare Pico and WIFI6. */
+#if defined(PET_P4_BOARD_PICO) && PET_P4_BOARD_PICO
+#define PET_P4_INPUT_SW1_GPIO GPIO_NUM_14
+#define PET_P4_INPUT_SW2_GPIO GPIO_NUM_6
+#else
+#define PET_P4_INPUT_SW1_GPIO GPIO_NUM_50
+#define PET_P4_INPUT_SW2_GPIO GPIO_NUM_49
+#endif
 
 typedef struct {
   bool ready;

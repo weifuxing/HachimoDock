@@ -77,7 +77,7 @@ def test_v3_dpi_clock_keeps_compensated_front_porch_positive():
     assert clock, "v3 must use an exact DPI divider without changing v1 timing"
     v3_clock, v1_clock = map(int, clock.groups())
     assert v1_clock == 25
-    assert v3_clock == 24
+    assert v3_clock == 20
     front = int(re.search(r"\.hsync_front_porch = (\d+)", bsp).group(1))
     back = int(re.search(r"\.hsync_back_porch = (\d+)", bsp).group(1))
     sync = int(re.search(r"\.hsync_pulse_width = (\d+)", bsp).group(1))
@@ -2322,13 +2322,18 @@ def test_p4_hardware_inputs_are_debounced_persistent_and_configurable():
     core = read_required("main/pet_p4_input_core.c")
     core_header = read_required("main/pet_p4_input_core.h")
     input_source = read_required("main/pet_p4_input.c")
+    input_header = read_required("main/pet_p4_input.h")
     protocol = read("main/pet_p4_protocol.c")
     main = read("main/pet_p4_main.c")
 
     assert '"pet_p4_input.c"' in cmake
     assert '"pet_p4_input_core.c"' in cmake
-    assert "PET_P4_INPUT_SW1_GPIO GPIO_NUM_50" in input_source
-    assert "PET_P4_INPUT_SW2_GPIO GPIO_NUM_49" in input_source
+    assert "PET_P4_INPUT_SW1_GPIO GPIO_NUM_50" in input_header
+    assert "PET_P4_INPUT_SW2_GPIO GPIO_NUM_49" in input_header
+    assert "PET_P4_INPUT_SW1_GPIO GPIO_NUM_14" in input_header
+    assert "PET_P4_INPUT_SW2_GPIO GPIO_NUM_6" in input_header
+    assert 'cJSON_AddNumberToObject(controls, "sw1", PET_P4_INPUT_SW1_GPIO)' in protocol
+    assert 'cJSON_AddNumberToObject(controls, "sw2", PET_P4_INPUT_SW2_GPIO)' in protocol
     assert "PET_P4_INPUT_SW3_GPIO GPIO_NUM_5" in input_source
     assert "PET_P4_INPUT_ENCODER_PRESS_GPIO GPIO_NUM_4" in input_source
     assert "PET_P4_INPUT_ENCODER_B_GPIO GPIO_NUM_3" in input_source

@@ -46,8 +46,6 @@
 #include "pet_p4_miniapp.h"
 #include "pet_p4_media.h"
 
-#define PET_P4_INPUT_SW1_GPIO GPIO_NUM_50
-#define PET_P4_INPUT_SW2_GPIO GPIO_NUM_49
 #define PET_P4_INPUT_SW3_GPIO GPIO_NUM_5
 #define PET_P4_INPUT_ENCODER_PRESS_GPIO GPIO_NUM_4
 #define PET_P4_INPUT_ENCODER_B_GPIO GPIO_NUM_3

@@ -3426,8 +3426,8 @@ void pet_p4_send_hello_for_board(const char *board_id, pet_p4_send_line_fn send_
   cJSON_AddBoolToObject(features, "safeReboot", true);
   cJSON_AddItemToObject(capabilities, "features", features);
 
-  cJSON_AddNumberToObject(controls, "sw1", 50);
-  cJSON_AddNumberToObject(controls, "sw2", 49);
+  cJSON_AddNumberToObject(controls, "sw1", PET_P4_INPUT_SW1_GPIO);
+  cJSON_AddNumberToObject(controls, "sw2", PET_P4_INPUT_SW2_GPIO);
   cJSON_AddNumberToObject(controls, "sw3", 5);
   cJSON_AddNumberToObject(controls, "encoderPress", 4);
   cJSON_AddNumberToObject(controls, "encoderB", 3);

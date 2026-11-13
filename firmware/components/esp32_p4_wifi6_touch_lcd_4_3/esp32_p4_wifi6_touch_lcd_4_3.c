@@ -578,7 +578,7 @@ esp_err_t bsp_display_new_with_handles(const bsp_display_config_t *config, bsp_l
 #if CONFIG_ESP32P4_REV_MIN_FULL >= 300
         // Use an exact divider on v3 so the SDK cannot shorten the line
         // below the supplier's RTNI minimum when rounding 25 MHz to 24 MHz.
-        .dpi_clock_freq_mhz = 24,
+        .dpi_clock_freq_mhz = 20,
 #else
         .dpi_clock_freq_mhz = 25,
 #endif

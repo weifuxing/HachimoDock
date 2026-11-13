@@ -804,6 +804,11 @@ Board to PC:
 }
 ```
 
+The controls example uses the WIFI6 board profile. Pico targets built with
+`PET_P4_BOARD_PICO=1` report `sw1=14` and `sw2=6` for the corresponding
+external button-header positions. Input sampling and these reported values
+use the shared definitions in `pet_p4_input.h`.
+
 `p4-bounded-runtime-v4` / `p4-grid-scene-v2` add modern semantic shapes and
 bounded animated sprites while the advertised arrays preserve v3/v1 package
 compatibility. A package may declare at most four horizontal PNG sprite sheets,

@@ -28,7 +28,7 @@
 
 初始化表来自用户提供的 `BOE2.8IPS(ZV028V0Q-N10-1QP0 )_ADS(480X640)_FW(Customer)-45Duty-190802.ini.txt`，包含厂方电压、Gamma、GIP 参数及 `11 → 等待120ms → 36 00 → 35 00 → 29` 的结束顺序。外部 VBP/VFP 分别设置为 16/14 行，满足文件开头的约束。
 
-根据转接板两对数据线配置双通道 DSI，初始速率为每通道 500 Mbps。水平总长按厂方 `C2` 的 `RTNI=0x14` 换算为 832 像素周期，HBP/HSYNC/HFP 分别为 20/4/328。v1 像素时钟采用 25 MHz，v3 采用可整除的 24 MHz，计算刷新率约为 44.6/42.8 Hz。厂方文件没有完整主机时序和模组内部 LANSEL 配置，上述链路参数仍需实机验证。计算依据见 ST7701S 手册第 9、39、271 页。[ST7701S 数据手册](https://focuslcds.com/wp-content/uploads/Drivers/ST7701S.pdf)
+根据转接板两对数据线配置双通道 DSI，初始速率为每通道 500 Mbps。水平总长按厂方 `C2` 的 `RTNI=0x14` 换算为 832 像素周期，HBP/HSYNC/HFP 分别为 20/4/328。v1 像素时钟采用 25 MHz，v3 当前使用可整除的 20 MHz 做降频对比，计算刷新率约为 44.6/35.7 Hz；v3 的上一版为 24 MHz、约 42.8 Hz。厂方文件没有完整主机时序和模组内部 LANSEL 配置，上述链路参数仍需实机验证。计算依据见 ST7701S 手册第 9、39、271 页。[ST7701S 数据手册](https://focuslcds.com/wp-content/uploads/Drivers/ST7701S.pdf)
 
 Rev A 背光 EN 接电源，亮度固定。固件在 LCD 初始化后通过 DCS 关闭画面，在首帧绘制完成后开启画面，上电至软件接管期间可能可见亮屏。`backlightStatus` 记录该显示门控命令的执行结果。实机验收需覆盖冷启动、MCU 重启、彩条颜色与边界，以及触摸四角、拖动和抬起。`diagnostics/query` 的触摸诊断新增 `probe0x1a`，成功识别时 `controller` 为 `CST328`。
 
@@ -58,6 +58,8 @@ ESP32-P4-WIFI6-M 的 M 表示焊接排针，不代表芯片版本。v1 与 v3 �
 - 原生 USB 可复用已缓存的形象包；包含 H.264 / MJPEG 的首次完整素材下发仍使用 USB-UART。
 
 ## 页面与默认操作
+
+ESP32-P4-Pico 使用 `esp32_p4_pico`（v1）或 `esp32_p4_pico_v3`（v3）构建。沿用外接按键板的相同排针位置时，SW1/SW2 分别对应 Pico 的 GPIO14/GPIO6；WIFI6 对应 GPIO50/GPIO49。SW3 为 GPIO5，编码器中键/B/A 为 GPIO4/3/2，摇杆 X/Y 为 GPIO21/20，触摸 INT 为 GPIO22。握手中的 `capabilities.controls.sw1/sw2` 上报所选板型的实际引脚。[Pico 引脚图](https://docs.waveshare.com/ESP32-P4-Pico#pinout-definition) [WIFI6 引脚图](https://docs.waveshare.com/ESP32-P4-WIFI6#pinout-definition)
 
 宠物主界面 `main` 和组件中心 `components` 是同级页面；组件运行页 `app` 是组件中心的子页面。宠物页面不显示顶部页面指示圆点。
 
