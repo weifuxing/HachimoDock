@@ -88,7 +88,7 @@ python -m platformio run -e esp32_p4_pico_v3 -t factory
 
 ## 外壳与打印工程
 
-外壳模型、转接板避让和打印记录在 [hardware/enclosure-hd28091](../hardware/enclosure-hd28091/当前模型说明.txt)。当前打印版本是 `option1-r10/joystick-clearance-2mm/root-fillet-r04`，包含 R10 外角、摇杆圆环外抬 2mm 及根部 R0.4 过渡。目录提供 STL、STEP、FreeCAD、3MF 和检查记录，本次同时提交当前 screen-up 3MF 打印工程更新。
+外壳模型、转接板避让和打印记录在 [hardware/enclosure-hd28091](../hardware/enclosure-hd28091/当前模型说明.txt)。2026-11-13 的当前打印版本选用 `option1-r10`，包含 R10 外角和约 R4.5 面框边缘，摇杆凸台采用抬高前的位置。打印入口为 [screen-up STL](../hardware/enclosure-hd28091/option1-r10/HD28091-option1-R10-screen-up.stl) 和 [screen-up 3MF](../hardware/enclosure-hd28091/option1-r10/HD28091-option1-R10-screen-up.3mf)。`joystick-clearance-2mm` 及 `root-fillet-r04` 目录记录已撤回的外抬和圆角方案，详情见各自模型说明。目录提供 STL、STEP、FreeCAD、3MF 和检查记录。
 
 ## 验证记录与待测项
 
