@@ -35,11 +35,10 @@ const bridgeRuntimePackage = join(
 );
 const generatedRuntime = join(tauriRoot, "generated-runtime");
 const bundledP4FirmwareDir = join(tauriRoot, "firmware", "esp32-p4");
-const p4ProjectCmake = join(repositoryRoot, "firmware", "CMakeLists.txt");
+const p4Profiles = readFileSync(join(repositoryRoot, "firmware", "platformio.ini"), "utf8");
 const auditedFfmpegBinarySha256 = {
-  "macos-arm64": "e340c148c720888a528e7bd2e7867da3b4bea91d1f6e508c9526111257ee0468",
-  "macos-x64": "8817b8186324bcfac4c18070ba7c1981cf05b1de2b722ed0514fa6dfce4e9bf0",
-  "windows-x64": "1cefca14ea713d5d7e7a1b948299142831185487f5efb14914d049ba9090d95f",
+  "macos-arm64": "ec8356f02a301258f9c4737ef3ab034259f4ff9031c905271e07892fa8bdf7c5",
+  "windows-x64": "18ac8e4c695148f3e2e20b6a24b3974a7b350b3a6dee1c8a018db5c2d1b3fc4f",
 };
 
 function requestedTarget(argv, platform) {
@@ -233,7 +232,7 @@ function ensureBundledFfmpeg(target, arch) {
   const targetReadme = join(generatedRuntime, "ffmpeg.README");
   const targetLicense = join(generatedRuntime, "ffmpeg.LICENSE");
   const targetSource = join(generatedRuntime, "ffmpeg.SOURCE.txt");
-  const targetSourceArchive = join(generatedRuntime, "ffmpeg-8.1.2.tar.xz");
+  const targetSourceArchive = join(generatedRuntime, "ffmpeg-8.1.3.tar.xz");
   const targetZlibLicense = join(generatedRuntime, "zlib.LICENSE");
   const configuredRuntime = process.env.PET_MANAGER_FFMPEG_BIN;
 
@@ -259,8 +258,8 @@ function ensureBundledFfmpeg(target, arch) {
     if (!existsSync(sourceRuntime)) throw new Error(`FFmpeg 运行时不存在：${sourceRuntime}`);
     if (!existsSync(sourceArchive)) throw new Error(`FFmpeg 源码包不存在：${sourceArchive}`);
     const sourceArchiveHash = sha256(readFileSync(sourceArchive));
-    if (sourceArchiveHash !== "464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c") {
-      throw new Error(`FFmpeg 8.1.2 源码包 SHA-256 不匹配：${sourceArchiveHash}`);
+    if (sourceArchiveHash !== "99b393871f64a2d860587bcf0f9bdbf68b28693100b51c9dfdf3f37b604896a9") {
+      throw new Error(`FFmpeg 8.1.3 源码包 SHA-256 不匹配：${sourceArchiveHash}`);
     }
     assertRuntimeMatchesTarget(sourceRuntime, target, arch);
     assertLgplFfmpegMetadata(sourceReadme, sourceLicense, target);
@@ -273,10 +272,10 @@ function ensureBundledFfmpeg(target, arch) {
       targetSource,
       [
         "Pet Manager bundled LGPL-only FFmpeg runtime",
-        "FFmpeg version: 8.1.2",
+        "FFmpeg version: 8.1.3",
         `Target: ${target}-${arch}`,
-        "Source: https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz",
-        "Source SHA-256: 464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c",
+        "Source: https://api.github.com/repos/FFmpeg/FFmpeg/tarball/1041abdc962f4cc4f394aa8de9dc5236c0c3b9e7",
+        "Source SHA-256: 99b393871f64a2d860587bcf0f9bdbf68b28693100b51c9dfdf3f37b604896a9",
         `Binary SHA-256: ${sha256(readFileSync(targetRuntime))}`,
         "Relinkable FFmpeg source and exact build configuration are identified in ffmpeg.README.",
         "",
@@ -292,7 +291,7 @@ function ensureBundledFfmpeg(target, arch) {
   if (target === "windows" && !existsSync(targetZlibLicense)) {
     throw new Error("Windows FFmpeg 缺少 zlib 许可证");
   }
-  if (sha256(readFileSync(targetSourceArchive)) !== "464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c") {
+  if (sha256(readFileSync(targetSourceArchive)) !== "99b393871f64a2d860587bcf0f9bdbf68b28693100b51c9dfdf3f37b604896a9") {
     throw new Error("已暂存 FFmpeg 源码包校验失败");
   }
   const expectedBinaryHash = auditedFfmpegBinarySha256[`${target}-${arch}`];
@@ -324,6 +323,7 @@ function ensureBundledFfmpeg(target, arch) {
     if (
       version.error
       || version.status !== 0
+      || !/^ffmpeg version 8\.1\.3\s/m.test(buildText)
       || !buildText.includes("--disable-gpl")
       || !buildText.includes("--disable-nonfree")
       || buildText.includes("--enable-gpl")
@@ -353,7 +353,7 @@ function readFirmwareBuildId(firmware, version) {
   return readNullTerminatedUtf8(firmware.subarray(offset, offset + 128));
 }
 
-function validateBundledP4Firmware(target, firmwareName, expectedMin, expectedMax) {
+function validateBundledP4Firmware(firmwareName, profile, expectedMin, expectedMax) {
   const bundledP4Firmware = join(bundledP4FirmwareDir, firmwareName);
   if (!existsSync(bundledP4Firmware)) {
     throw new Error(`缺少 PC 内置 P4 固件：${bundledP4Firmware}`);
@@ -373,9 +373,9 @@ function validateBundledP4Firmware(target, firmwareName, expectedMin, expectedMa
   }
   const version = readNullTerminatedUtf8(firmware.subarray(descriptorOffset + 16, descriptorOffset + 48));
   const projectName = readNullTerminatedUtf8(firmware.subarray(descriptorOffset + 48, descriptorOffset + 80));
-  const cmake = readFileSync(p4ProjectCmake, "utf8");
-  const sourceVersion = cmake.match(/set\(PROJECT_VER\s+"([^"]+)"\)/)?.[1] || "";
-  const expectedVersion = sourceVersion;
+  const profileBody = p4Profiles.split(/^\[env:/m)
+    .find((section) => section.startsWith(`${profile}]`));
+  const expectedVersion = profileBody?.match(/^custom_p4_project_version\s*=\s*([\w.-]+)[ \t]*$/m)?.[1];
   if (projectName !== "pet_manager_p4_runtime") {
     throw new Error(`PC 内置固件 projectName 异常：${projectName || "(empty)"}`);
   }
@@ -410,13 +410,20 @@ if (builtinsCheck.status !== 0) throw new Error('Built-in local-delights resourc
 // Python validation may leave bytecode containing absolute build-machine paths.
 cleanSkillBytecode(join(repositoryRoot, "pc", "skills", "petui"));
 const targetArch = requestedArch(target, process.platform, process.arch);
+const authoring = spawnSync(process.execPath,
+  [join(scriptDir, "prepare-petui-runtime.mjs"), `${target}-${targetArch}`, join(tauriRoot, "authoring-runtime-bundle")],
+  { stdio: "inherit" });
+if (authoring.status !== 0) throw new Error("无法准备 PetUI 创作工具链");
+
 // Validate historical non-P4 voice resources only when explicitly supplied; P4 uses native ASR.
 const voiceRuntime = prepareVoiceRuntime({tauriRoot,target,arch:targetArch});
 if(voiceRuntime.enabled)console.log("Explicit legacy voice bundle requires --config src-tauri/tauri.voice-legacy.conf.json");
 const runtimeName = target === "windows" ? "node.exe" : "node";
 const targetRuntime = join(generatedRuntime, runtimeName);
-const p4Firmware = validateBundledP4Firmware(target, "firmware.bin", 1, 199);
-validateBundledP4Firmware(target, "firmware-v3.bin", 300, 399);
+const p4Firmware = validateBundledP4Firmware("firmware.bin", "esp32_p4_wifi6_system_settings_v1", 1, 199);
+validateBundledP4Firmware("firmware-v3.bin", "esp32_p4_wifi6_system_settings_v3", 300, 399);
+validateBundledP4Firmware("firmware-pico-v1.bin", "esp32_p4_pico_v1", 1, 199);
+validateBundledP4Firmware("firmware-pico-v3.bin", "esp32_p4_pico_v3", 300, 399);
 let sourceRuntime = process.env.PET_MANAGER_NODE_BIN
   ? resolve(process.env.PET_MANAGER_NODE_BIN)
   : process.execPath;

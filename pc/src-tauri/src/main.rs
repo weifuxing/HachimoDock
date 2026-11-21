@@ -1,6 +1,6 @@
 /*
- * [Input] Normal desktop launch, or a debug-only macOS Codex/Claude task ID/title/workspace probe.
- * [Output] Pet Manager Tauri runtime, or a bounded native Accessibility probe result.
+ * [Input] Desktop launch, PetUI command, or debug-only macOS Accessibility probe.
+ * [Output] Tauri runtime, PetUI artifact, or Accessibility probe result.
  * [Pos] Native executable entry point for pc/src-tauri.
  * [Sync] If this file changes, update `pc/.folder.md`.
  */
@@ -8,6 +8,19 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(std::ffi::OsStr::new("--petui")) {
+        let args: Vec<_> = args.collect();
+        match pet_manager_tauri_lib::run_petui_cli(&args) {
+            Ok(output) => println!("{output}"),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     #[cfg(all(target_os = "macos", debug_assertions))]
     {
         let mut args = std::env::args().skip(1);

@@ -19,7 +19,23 @@ typedef struct {
   char lyric_lines[5][PET_P4_MEDIA_LYRIC_BYTES];
 } pet_p4_media_view_t;
 void pet_p4_media_init(void);
+#if PET_P4_SYSTEM_WIFI
+#define PET_P4_MEDIA_WIFI_SOURCE "wifi.audio"
+#define PET_P4_MEDIA_WIFI_PLAYLIST_MAX 16
+#define PET_P4_MEDIA_WIFI_PLAYLIST_BYTES 7168
+bool pet_p4_media_wifi_playlist_valid(const cJSON *playlist);
+/* Pass one active miniapp snapshot outside its runtime lock. Media copies a
+ * new playlist and accepts NULL for repeated visible calls at that revision. */
+void pet_p4_media_authorize_live_playlist_revision(const char *widget_id, const char *source,
+                                                   bool visible, bool pc_connected, uint32_t revision,
+                                                   const cJSON *playlist);
+void pet_p4_media_authorize_live(const char *widget_id, const char *source, bool visible, bool pc_connected);
+#endif
 void pet_p4_media_transport(pet_p4_send_line_fn send,void *ctx);
+/* Empty request-owned slot receives one immutable chunk status. Caller sends
+ * and frees it on the original route after releasing its state lock. */
+bool pet_p4_media_handle_with_reply(const char *topic,const cJSON *payload,
+    pet_p4_send_line_fn send,void *ctx,pet_p4_query_reply_t *reply);
 bool pet_p4_media_handle(const char *topic,const cJSON *payload,pet_p4_send_line_fn send,void *ctx);
 bool pet_p4_media_action(const char *action);
 bool pet_p4_media_live_action(const char *source,const char *action);

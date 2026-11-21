@@ -3,6 +3,7 @@
 #include <stdbool.h>
 
 #include "pet_p4_protocol.h"
+#include "pet_p4_system_settings.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,6 +35,9 @@ typedef struct {
   /* Main captures this under the state mutex; rendering never reads a live
    * activation job or takes ownership of its storage. */
   bool component_loading;
+#if PET_P4_SYSTEM_WIFI
+  const pet_settings_view_t *settings;
+#endif
 } pet_p4_view_model_t;
 
 void pet_p4_build_view_model(const pet_p4_runtime_state_t *state, pet_p4_view_model_t *out);

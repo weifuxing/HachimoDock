@@ -20,7 +20,10 @@ function syncMiMoCodePlugin(options = {}) {
   const configDir = options.configDir || resolveMiMoCodeConfigDir(options);
   const pluginDir = path.join(configDir, "plugin");
   const targetPath = path.join(pluginDir, MANAGED_PLUGIN_FILE_NAME);
-  const source = fs.readFileSync(sourcePath);
+  const source = Buffer.from(fs.readFileSync(sourcePath, "utf8").replace(
+    JSON.stringify("__HACHIMO_CAPABILITY_MODULE__"),
+    JSON.stringify(require.resolve("../packages/agent-session-bus/src/local-capability")),
+  ));
   let previous = null;
   try {
     previous = fs.readFileSync(targetPath);

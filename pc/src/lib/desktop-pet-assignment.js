@@ -74,7 +74,7 @@ export async function reconcileDesktopPetAppearance({ invoke, boardDeviceId, isC
       throw new Error("当前连接未提供安全状态确认能力。若刚完成升级，请等待设备重新连接；仍未恢复时再检查固件版本。");
     }
     if (code === "appearance_raw_stream_quarantined_no_probe") {
-      throw new Error("设备连接暂时无法确认，本次未切换。请检查设备连接。");
+      throw new Error("设备连接暂时无法确认。请断开 USB 后重新连接，再到设备页点「确认重启并恢复」。");
     }
     if (code === "appearance_recovery_no_pending") {
       return { observed: false, noPending: true, message: "设备已就绪。" };
@@ -109,6 +109,7 @@ export async function reconcileDesktopPetAppearance({ invoke, boardDeviceId, isC
 
 export const APPEARANCE_SYNC_STAGE_TEXT = {
   checking_cache: "正在检查设备是否已缓存该形象…",
+  waiting_storage: "正在等待设备完成存储操作…",
   comparing_assets: "正在对比设备已有素材…",
   preparing_slot: "正在准备设备形象存储槽…",
   preparing_storage: "设备正在擦除旧素材、准备存储空间…",
@@ -260,6 +261,13 @@ export async function applyDesktopPetAssignment({
         error.outcome = "not_submitted";
         throw error;
       }
+      if (notSubmitted && /^APPEARANCE_NOT_SUBMITTED:\s*appearance_slot_query_(busy|timeout)$/.test(detail)) {
+        const error = appearanceConfirmationRequired(true);
+        error.message = detail.endsWith("_busy")
+          ? "设备正在处理存储操作，本次切换尚未提交。请稍候再试。"
+          : "设备未确认形象槽位，本次切换尚未提交。请保持 USB 连接后再试。";
+        throw error;
+      }
       // The durable unknown latch may predate this click. Do not claim this
       // request uploaded anything, expose native codes, or infer old image state.
       throw appearanceConfirmationRequired(notSubmitted);
@@ -320,7 +328,8 @@ export async function applyDesktopPetAssignment({
 
   if (followChanged) {
     try {
-      await invoke("ensure_bridge_runtime", { input: { forceRestart: true } });
+      const runtime = await invoke("ensure_bridge_runtime", { input: { forceRestart: true } });
+      if (runtime?.running !== true) throw new Error("本地桥接服务未就绪");
     } catch {
       const error = new Error("USB 跟随指令已提交且配置已保存，但本地桥接服务未就绪；请检查桥接状态，不要重复发送设备指令。");
       error.committedAssignment = { nextMap, enabledAgents, agentId };

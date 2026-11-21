@@ -1,3 +1,5 @@
+#include "pet_p4_boot_memory.h"
+#include "pet_p4_protocol_budget.h"
 /*
  * [Input] diagnostics/recovery topics, runtime state, and persistent boot data.
  * [Output] bounded health/session-retention snapshots including stable queue
@@ -7,6 +9,10 @@
  */
 
 #include "pet_p4_diagnostics.h"
+#include "pet_p4_widget_data.h"
+#include "pet_p4_lcd.h"
+#include "pet_p4_device_wifi.h"
+#include "bsp/display.h"
 
 #include <stdio.h>
 #include <stdatomic.h>
@@ -29,6 +35,7 @@
 #include "pet_p4_build_info.h"
 #include "pet_p4_input.h"
 #include "pet_p4_miniapp.h"
+#include "pet_p4_wasm_trial.h"
 #include "pet_p4_ota.h"
 #include "pet_p4_touch.h"
 #include "pet_p4_renderer.h"
@@ -88,6 +95,47 @@ void pet_p4_diagnostics_storage_refresh(void){
     sampled_ms,sampled>=0?result:ESP_ERR_INVALID_STATE);
   portEXIT_CRITICAL(&g_storage_snapshot_mux);
 #endif
+}
+
+static portMUX_TYPE g_boot_memory_lock = portMUX_INITIALIZER_UNLOCKED;
+static pet_boot_memory_trace_t g_boot_memory;
+
+void pet_p4_boot_memory_checkpoint(pet_boot_stage_t stage) {
+  pet_boot_memory_sample_t sample = {
+    .uptime_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+    .free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+    .minimum_internal = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+    .largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+    .free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+  };
+  portENTER_CRITICAL(&g_boot_memory_lock);
+  (void)pet_boot_memory_record(&g_boot_memory, stage, sample);
+  portEXIT_CRITICAL(&g_boot_memory_lock);
+}
+
+static void add_boot_memory(cJSON *payload) {
+  static const char *const names[PET_MEMORY_BOOT_STAGE_COUNT] = {
+    "entry", "storage", "catalog", "builtins", "manifest", "transport",
+    "display", "audio", "first_frame", "rx_tasks", "afe", "ready"
+  };
+  cJSON *stages = cJSON_AddArrayToObject(payload, "bootMemory");
+  if (!stages) return;
+  for (unsigned i = 0; i < PET_MEMORY_BOOT_STAGE_COUNT; ++i) {
+    portENTER_CRITICAL(&g_boot_memory_lock);
+    bool recorded = (g_boot_memory.recorded & (1U << i)) != 0;
+    pet_boot_memory_sample_t sample = g_boot_memory.samples[i];
+    portEXIT_CRITICAL(&g_boot_memory_lock);
+    if (!recorded) continue;
+    cJSON *item = cJSON_CreateObject();
+    if (!item) break;
+    cJSON_AddStringToObject(item, "stage", names[i]);
+    cJSON_AddNumberToObject(item, "uptimeMs", sample.uptime_ms);
+    cJSON_AddNumberToObject(item, "freeInternalBytes", sample.free_internal);
+    cJSON_AddNumberToObject(item, "minimumFreeInternalBytes", sample.minimum_internal);
+    cJSON_AddNumberToObject(item, "largestInternalBlockBytes", sample.largest_internal);
+    cJSON_AddNumberToObject(item, "freePsramBytes", sample.free_psram);
+    cJSON_AddItemToArray(stages, item);
+  }
 }
 
 static const char *reset_reason_name(esp_reset_reason_t reason) {
@@ -174,6 +222,102 @@ static void add_request_id(cJSON *response, const cJSON *request) {
   if (copy) cJSON_AddItemToObject(response, "requestId", copy);
 }
 
+__attribute__((optimize("Oz"), noinline))
+static void add_retained_reset_details(cJSON *payload) {
+  (void)payload;
+#if PET_P4_RESET_PHASE_TRACE
+  pet_reset_record_snapshot_t retained_snapshot={0};uint32_t retained_errors=0;
+  bool retained_available=pet_reset_phase_previous(&retained_snapshot,&retained_errors);
+#if PET_P4_FLASH_PHASE_TRACE
+  cJSON_AddNumberToObject(payload,"nativeErasePhaseCoverage",pet_flash_phase_coverage());
+#endif
+  cJSON *retained_trace=cJSON_AddObjectToObject(payload,"previousResetTrace");
+  if(retained_trace){
+    cJSON_AddBoolToObject(retained_trace,"available",retained_available);
+    cJSON_AddBoolToObject(retained_trace,"lastValidOnly",true);
+    cJSON_AddBoolToObject(retained_trace,"authentication",false);
+    cJSON_AddNumberToObject(retained_trace,"storageBytes",sizeof(pet_reset_record_storage_t));
+    cJSON_AddBoolToObject(retained_trace,"headerValid",retained_snapshot.header_valid);
+    cJSON_AddBoolToObject(retained_trace,"sameBuild",retained_snapshot.same_build);
+    cJSON_AddNumberToObject(retained_trace,"validMask",retained_snapshot.valid_mask);
+    cJSON_AddNumberToObject(retained_trace,"saturatedMask",retained_snapshot.saturated_mask);
+    cJSON_AddNumberToObject(retained_trace,"currentErrors",retained_errors);
+    cJSON *records=cJSON_AddArrayToObject(retained_trace,"actors");
+    if(records)for(unsigned actor=0;actor<PET_RESET_ACTORS;actor++){
+      if(!(retained_snapshot.valid_mask&(1U<<actor)))continue;
+      const pet_reset_phase_record_t *r=&retained_snapshot.records[actor];
+      cJSON *item=cJSON_CreateObject();if(!item)break;
+      cJSON_AddNumberToObject(item,"actor",actor);
+      cJSON_AddNumberToObject(item,"phase",r->phase_core&255U);
+      cJSON_AddNumberToObject(item,"core",(r->phase_core>>8)&255U);
+      cJSON_AddNumberToObject(item,"cycles",r->cycles);
+      cJSON_AddNumberToObject(item,"sequence",r->sequence);
+      if(!cJSON_AddItemToArray(records,item)){cJSON_Delete(item);break;}
+    }
+  }
+#endif
+#if PET_P4_NATIVE_PANIC_TRACE
+  pet_native_panic_snapshot_t native_snapshot={0};
+  bool native_available=pet_native_panic_previous(&native_snapshot);
+  cJSON *native_trace=cJSON_AddObjectToObject(payload,"previousNativePanic");
+  if(native_trace){
+    cJSON_AddBoolToObject(native_trace,"available",native_available);
+    cJSON_AddBoolToObject(native_trace,"sameBuild",native_snapshot.same_build);
+    cJSON_AddBoolToObject(native_trace,"authentication",false);
+    cJSON_AddNumberToObject(native_trace,"validMask",native_snapshot.valid_mask);
+    cJSON_AddNumberToObject(native_trace,"storageBytes",PET_NATIVE_PANIC_STORAGE_BYTES);
+    cJSON *sites=cJSON_AddArrayToObject(native_trace,"sites");
+    if(sites)for(unsigned core=0;core<2;core++){
+      if(!(native_snapshot.valid_mask&(1U<<core)))continue;
+      const pet_native_panic_site_t *site=&native_snapshot.sites[core];
+      cJSON *item=cJSON_CreateObject();if(!item)break;
+      cJSON_AddNumberToObject(item,"core",site->core);
+      cJSON_AddNumberToObject(item,"pc",site->pc);
+      cJSON_AddNumberToObject(item,"returnPc",site->return_pc);
+      cJSON_AddNumberToObject(item,"cause",site->cause);
+      cJSON_AddNumberToObject(item,"exception",site->exception);
+      cJSON_AddNumberToObject(item,"flags",site->flags);
+#if PET_P4_H264_PANIC_TRACE
+      const pet_native_panic_h264_t *decode = &site->h264;
+      cJSON *h264 = decode->stream_bytes ? cJSON_AddObjectToObject(item, "h264Decode") : NULL;
+      if (h264) {
+        cJSON_AddNumberToObject(h264, "streamCrc32", decode->stream_crc32);
+        cJSON_AddNumberToObject(h264, "streamBytes", decode->stream_bytes);
+        cJSON_AddNumberToObject(h264, "streamOffset", decode->stream_offset);
+        cJSON_AddNumberToObject(h264, "nextFrame", decode->next_frame);
+        cJSON_AddNumberToObject(h264, "width", decode->width);
+        cJSON_AddNumberToObject(h264, "height", decode->height);
+        cJSON_AddNumberToObject(h264, "trapValue", decode->trap_value);
+        cJSON_AddNumberToObject(h264, "a0", decode->register_a0);
+      }
+#endif
+      if(!cJSON_AddItemToArray(sites,item)){cJSON_Delete(item);break;}
+    }
+  }
+#endif
+}
+
+#if PET_P4_SYSTEM_WIFI
+__attribute__((optimize("Oz"), noinline))
+static void add_lcd_scanout(cJSON *runtime) {
+  cJSON *value = cJSON_AddObjectToObject(runtime, "lcdScanout");
+  if (!value) return;
+  const pet_lcd_underrun_t event = pet_p4_lcd_underrun();
+  cJSON_AddNumberToObject(value, "underruns", event.count);
+  cJSON_AddNumberToObject(value, "tickHz", configTICK_RATE_HZ);
+  if (event.count) {
+    cJSON_AddNumberToObject(value, "lastTick", event.last_tick);
+    cJSON_AddNumberToObject(value, "lastPhase", event.last_phase);
+    cJSON_AddBoolToObject(value, "videoWorkerActive", event.video_worker);
+  }
+}
+#endif
+static void add_widget_data_snapshot(cJSON *payload) {
+  cJSON *streams = pet_p4_widget_data_diagnostics(esp_timer_get_time() / 1000ULL);
+  if (streams && !cJSON_AddItemToObject(payload, "widgetData", streams)) cJSON_Delete(streams);
+}
+
+__attribute__((optimize("Oz")))
 static char *prepare_status(
   const cJSON *request,
   const pet_p4_runtime_state_t *state
@@ -230,6 +374,7 @@ static char *prepare_status(
   cJSON_AddStringToObject(payload, "boardDeviceId", state ? state->board_device_id : "");
   cJSON_AddNumberToObject(payload, "bootCount", g_boot_record.boot_count);
   cJSON_AddNumberToObject(payload, "faultResetCount", g_boot_record.fault_reset_count);
+  pet_p4_wasm_trial_diagnostics(payload);
   cJSON_AddNumberToObject(payload, "lastResetReasonCode", g_boot_record.last_reset_reason);
   cJSON_AddNumberToObject(payload, "lastResetRawReasonCpu0", g_raw_reset_reason[0]);
   cJSON_AddNumberToObject(payload, "lastResetRawReasonCpu1", g_raw_reset_reason[1]);
@@ -265,62 +410,7 @@ static char *prepare_status(
     }
   }
 #endif
-#if PET_P4_RESET_PHASE_TRACE
-  pet_reset_record_snapshot_t retained_snapshot={0};uint32_t retained_errors=0;
-  bool retained_available=pet_reset_phase_previous(&retained_snapshot,&retained_errors);
-#if PET_P4_FLASH_PHASE_TRACE
-  cJSON_AddNumberToObject(payload,"nativeErasePhaseCoverage",pet_flash_phase_coverage());
-#endif
-  cJSON *retained_trace=cJSON_AddObjectToObject(payload,"previousResetTrace");
-  if(retained_trace){
-    cJSON_AddBoolToObject(retained_trace,"available",retained_available);
-    cJSON_AddBoolToObject(retained_trace,"lastValidOnly",true);
-    cJSON_AddBoolToObject(retained_trace,"authentication",false);
-    cJSON_AddNumberToObject(retained_trace,"storageBytes",sizeof(pet_reset_record_storage_t));
-    cJSON_AddBoolToObject(retained_trace,"headerValid",retained_snapshot.header_valid);
-    cJSON_AddBoolToObject(retained_trace,"sameBuild",retained_snapshot.same_build);
-    cJSON_AddNumberToObject(retained_trace,"validMask",retained_snapshot.valid_mask);
-    cJSON_AddNumberToObject(retained_trace,"saturatedMask",retained_snapshot.saturated_mask);
-    cJSON_AddNumberToObject(retained_trace,"currentErrors",retained_errors);
-    cJSON *records=cJSON_AddArrayToObject(retained_trace,"actors");
-    if(records)for(unsigned actor=0;actor<PET_RESET_ACTORS;actor++){
-      if(!(retained_snapshot.valid_mask&(1U<<actor)))continue;
-      const pet_reset_phase_record_t *r=&retained_snapshot.records[actor];
-      cJSON *item=cJSON_CreateObject();if(!item)break;
-      cJSON_AddNumberToObject(item,"actor",actor);
-      cJSON_AddNumberToObject(item,"phase",r->phase_core&255U);
-      cJSON_AddNumberToObject(item,"core",(r->phase_core>>8)&255U);
-      cJSON_AddNumberToObject(item,"cycles",r->cycles);
-      cJSON_AddNumberToObject(item,"sequence",r->sequence);
-      if(!cJSON_AddItemToArray(records,item)){cJSON_Delete(item);break;}
-    }
-  }
-#endif
-#if PET_P4_NATIVE_PANIC_TRACE
-  pet_native_panic_snapshot_t native_snapshot={0};
-  bool native_available=pet_native_panic_previous(&native_snapshot);
-  cJSON *native_trace=cJSON_AddObjectToObject(payload,"previousNativePanic");
-  if(native_trace){
-    cJSON_AddBoolToObject(native_trace,"available",native_available);
-    cJSON_AddBoolToObject(native_trace,"sameBuild",native_snapshot.same_build);
-    cJSON_AddBoolToObject(native_trace,"authentication",false);
-    cJSON_AddNumberToObject(native_trace,"validMask",native_snapshot.valid_mask);
-    cJSON_AddNumberToObject(native_trace,"storageBytes",144);
-    cJSON *sites=cJSON_AddArrayToObject(native_trace,"sites");
-    if(sites)for(unsigned core=0;core<2;core++){
-      if(!(native_snapshot.valid_mask&(1U<<core)))continue;
-      const pet_native_panic_site_t *site=&native_snapshot.sites[core];
-      cJSON *item=cJSON_CreateObject();if(!item)break;
-      cJSON_AddNumberToObject(item,"core",site->core);
-      cJSON_AddNumberToObject(item,"pc",site->pc);
-      cJSON_AddNumberToObject(item,"returnPc",site->return_pc);
-      cJSON_AddNumberToObject(item,"cause",site->cause);
-      cJSON_AddNumberToObject(item,"exception",site->exception);
-      cJSON_AddNumberToObject(item,"flags",site->flags);
-      if(!cJSON_AddItemToArray(sites,item)){cJSON_Delete(item);break;}
-    }
-  }
-#endif
+  add_retained_reset_details(payload);
   cJSON_AddStringToObject(
     payload,
     "lastResetReason",
@@ -332,6 +422,7 @@ static char *prepare_status(
     reset_reason_is_fault((esp_reset_reason_t) g_boot_record.last_reset_reason)
   );
 
+  const pet_render_cache_memory_t cache_before = pet_p4_renderer_cache_memory();
   cJSON_AddNumberToObject(memory, "freeHeapBytes", esp_get_free_heap_size());
   cJSON_AddNumberToObject(memory, "minimumFreeHeapBytes", esp_get_minimum_free_heap_size());
   cJSON_AddNumberToObject(memory, "freePsramBytes", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -346,7 +437,31 @@ static char *prepare_status(
     "minimumFreePsramBytes",
     heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM)
   );
+  const pet_render_cache_memory_t cache_after = pet_p4_renderer_cache_memory();
   cJSON_AddItemToObject(payload, "memory", memory);
+  cJSON *cache = cJSON_AddObjectToObject(payload, "renderCache");
+  cJSON_AddNumberToObject(cache, "streamBytes", cache_after.stream_bytes);
+  cJSON_AddNumberToObject(cache, "workStreamBytes", cache_after.work_stream_bytes);
+  cJSON_AddNumberToObject(cache, "streamSlots", cache_after.stream_slots);
+  cJSON_AddNumberToObject(cache, "generation", cache_after.generation);
+  cJSON_AddBoolToObject(cache, "stableDuringMemorySample",
+    pet_render_cache_memory_stable(cache_before, cache_after));
+
+  if (request && cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(request, "includeBootMemory")))
+    add_boot_memory(payload);
+  pet_protocol_budget_t budget = pet_p4_protocol_budget_snapshot();
+  cJSON *protocol_memory = cJSON_AddObjectToObject(payload, "protocolMemory");
+  if (protocol_memory) {
+    cJSON_AddNumberToObject(protocol_memory, "pendingBytes", budget.bytes);
+    cJSON_AddNumberToObject(protocol_memory, "peakPendingBytes", budget.peak_bytes);
+    cJSON_AddNumberToObject(protocol_memory, "limitBytes", PET_PROTOCOL_PENDING_BYTES);
+    cJSON_AddNumberToObject(protocol_memory, "smallRequestReserveBytes", PET_PROTOCOL_SMALL_RESERVE);
+    cJSON_AddNumberToObject(protocol_memory, "budgetRejected", budget.rejected);
+    cJSON_AddNumberToObject(protocol_memory, "allocationFailures", budget.allocation_failures);
+    cJSON_AddNumberToObject(protocol_memory, "queueFull", budget.queue_full);
+    cJSON_AddNumberToObject(protocol_memory, "maxQueueWaitUs", budget.max_wait_us);
+    cJSON_AddNumberToObject(protocol_memory, "maxHandleUs", budget.max_handle_us);
+  }
 
   cJSON_AddNumberToObject(storage, "totalBytes", (double) storage_total);
   cJSON_AddNumberToObject(storage, "usedBytes", (double) storage_used);
@@ -374,6 +489,7 @@ static char *prepare_status(
     cJSON_AddNumberToObject(lookup,"negativeWallUs",(double)hint.negative_us);
     cJSON_AddNumberToObject(lookup,"errorWallUs",(double)hint.error_us);
     cJSON_AddNumberToObject(lookup,"maximumWallUs",hint.maximum_us);
+    cJSON_AddNumberToObject(lookup,"catalogPrimeWallUs",hint.catalog_prime_us);
     cJSON_AddItemToObject(storage,"lookupHint",lookup);
   }
 #endif
@@ -391,6 +507,13 @@ static char *prepare_status(
   if(save_stack&&!cJSON_AddItemToObject(runtime,"saveWorkerStack",save_stack))cJSON_Delete(save_stack);
 #endif
   pet_p4_render_metrics_t render = pet_p4_renderer_metrics();
+  cJSON_AddNumberToObject(runtime, "lcdDsiLanes", BSP_LCD_MIPI_DSI_LANE_NUM);
+  cJSON_AddNumberToObject(runtime, "lcdDsiLaneMbps", BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS);
+  cJSON_AddNumberToObject(runtime, "lcdPixelClockMHz", BSP_LCD_DPI_CLOCK_MHZ);
+#if PET_P4_SYSTEM_WIFI
+  add_lcd_scanout(runtime);
+#endif
+  cJSON_AddNumberToObject(runtime, "renderTargetIntervalMs", CONFIG_PET_P4_MAIN_RENDER_INTERVAL_MS);
   cJSON_AddNumberToObject(runtime, "renderLastUs", render.last_us);
   cJSON_AddNumberToObject(runtime, "renderP95Us", render.p95_us);
   cJSON_AddNumberToObject(runtime, "renderMaxUs", render.max_us);
@@ -703,8 +826,55 @@ static char *prepare_status(
 #endif
   cJSON_AddItemToObject(payload, "runtime", runtime);
 
+  add_widget_data_snapshot(payload);
   return prepare_topic("diagnostics/status", payload);
 }
+
+#if PET_P4_SYSTEM_WIFI
+__attribute__((optimize("Oz")))
+cJSON *pet_p4_diagnostics_lan_snapshot(const pet_p4_runtime_state_t *state) {
+  cJSON *payload = cJSON_CreateObject();
+  if (!payload) return NULL;
+  cJSON *runtime = cJSON_AddObjectToObject(payload, "runtime");
+  cJSON *memory = cJSON_AddObjectToObject(payload, "memory");
+  cJSON *audio = cJSON_AddObjectToObject(payload, "audio");
+  if (!runtime || !memory || !audio) {
+    cJSON_Delete(payload);
+    return NULL;
+  }
+  const esp_app_desc_t *app = esp_app_get_description();
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  cJSON_AddBoolToObject(payload, "ok", true);
+  cJSON_AddStringToObject(payload, "boardDeviceId", state->board_device_id);
+  cJSON_AddStringToObject(payload, "bootId", pet_p4_boot_identity());
+  cJSON_AddNumberToObject(payload, "bootCount", g_boot_record.boot_count);
+  cJSON_AddNumberToObject(payload, "faultResetCount", g_boot_record.fault_reset_count);
+  cJSON_AddStringToObject(payload, "lastResetReason", reset_reason_name((esp_reset_reason_t)g_boot_record.last_reset_reason));
+  cJSON_AddBoolToObject(payload, "lastResetWasFault", reset_reason_is_fault((esp_reset_reason_t)g_boot_record.last_reset_reason));
+  cJSON_AddNumberToObject(payload, "lastResetRawReasonCpu0", g_raw_reset_reason[0]);
+  cJSON_AddNumberToObject(payload, "lastResetRawReasonCpu1", g_raw_reset_reason[1]);
+  add_retained_reset_details(payload);
+  cJSON_AddNumberToObject(runtime, "uptimeMs", esp_timer_get_time() / 1000ULL);
+  add_lcd_scanout(runtime);
+  cJSON_AddNumberToObject(runtime, "protocolSchema", PET_P4_PROTOCOL_SCHEMA);
+  cJSON_AddStringToObject(runtime, "firmware", app ? app->version : "");
+  cJSON_AddStringToObject(runtime, "runningPartition", running ? running->label : "");
+  cJSON_AddStringToObject(runtime, "buildId", PET_P4_BUILD_ID);
+  cJSON_AddStringToObject(runtime, "screenPage", state->screen_page);
+  cJSON_AddBoolToObject(runtime, "touchReady", pet_p4_touch_ready());
+  cJSON_AddNumberToObject(memory, "freeHeapBytes", esp_get_free_heap_size());
+  cJSON_AddNumberToObject(memory, "minimumFreeHeapBytes", esp_get_minimum_free_heap_size());
+  cJSON_AddNumberToObject(memory, "freePsramBytes", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+  cJSON_AddNumberToObject(memory, "minimumFreePsramBytes", heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM));
+  cJSON_AddBoolToObject(audio, "playbackReady", pet_p4_audio_playback_ready());
+  cJSON_AddBoolToObject(audio, "playbackActive", pet_p4_audio_playback_active());
+  cJSON_AddBoolToObject(audio, "musicActive", pet_p4_audio_music_active());
+  cJSON_AddBoolToObject(audio, "conversationActive", pet_p4_audio_conversation_active());
+  pet_p4_audio_add_completion_counters(audio);
+  add_widget_data_snapshot(payload);
+  return payload;
+}
+#endif
 
 static void send_action(
   const cJSON *request,
@@ -756,6 +926,24 @@ esp_err_t pet_p4_diagnostics_init(void) {
   if (err == ESP_OK) err = nvs_commit(handle);
   nvs_close(handle);
   return err;
+}
+
+static bool schedule_reboot_locked(const pet_p4_runtime_state_t *state) {
+  if (pet_p4_ota_active() || (state && state->asset_transfer_active)) return false;
+  if (!g_reboot_at_ms) {
+    atomic_store_explicit(&g_reboot_pending, true, memory_order_release);
+    g_reboot_at_ms = (unsigned long long)(esp_timer_get_time() / 1000ULL)
+      + PET_P4_DIAGNOSTICS_REBOOT_DELAY_MS;
+  }
+  return true;
+}
+
+bool pet_p4_diagnostics_schedule_reboot(const pet_p4_runtime_state_t *state) {
+  if (!g_diagnostics_mutex || xSemaphoreTake(g_diagnostics_mutex, portMAX_DELAY) != pdTRUE)
+    return false;
+  const bool accepted = schedule_reboot_locked(state);
+  xSemaphoreGive(g_diagnostics_mutex);
+  return accepted;
 }
 
 bool pet_p4_diagnostics_handle_topic_with_reply(
@@ -815,21 +1003,9 @@ bool pet_p4_diagnostics_handle_topic_with_reply(
       err == ESP_OK ? "input bindings restored to safe defaults" : esp_err_to_name(err)
     );
   } else if (strcmp(topic, "system/reboot") == 0) {
-    if (pet_p4_ota_active() || (state && state->asset_transfer_active)) {
-      send_action(
-        payload,
-        send_line,
-        ctx,
-        "reboot",
-        false,
-        "device transfer is active; reboot was not scheduled"
-      );
-    } else {
-      atomic_store_explicit(&g_reboot_pending, true, memory_order_release);
-      send_action(payload, send_line, ctx, "reboot", true, "device reboot scheduled");
-      g_reboot_at_ms = (unsigned long long) (esp_timer_get_time() / 1000ULL)
-        + PET_P4_DIAGNOSTICS_REBOOT_DELAY_MS;
-    }
+    const bool accepted = schedule_reboot_locked(state);
+    send_action(payload, send_line, ctx, "reboot", accepted, accepted
+      ? "device reboot scheduled" : "device transfer is active; reboot was not scheduled");
   } else {
     handled = false;
   }
@@ -860,7 +1036,11 @@ void pet_p4_diagnostics_process(
   }
   xSemaphoreGive(g_diagnostics_mutex);
   if (!restart) return;
-  if (pet_p4_ota_active() || (state && state->asset_transfer_active)) {
+  if (pet_p4_ota_active() || (state && state->asset_transfer_active)
+#if PET_P4_SYSTEM_WIFI
+      || !pet_device_wifi_prepare_reboot()
+#endif
+      ) {
     if (xSemaphoreTake(g_diagnostics_mutex, portMAX_DELAY) == pdTRUE) {
       g_reboot_at_ms = now_ms + PET_P4_DIAGNOSTICS_REBOOT_DELAY_MS;
       xSemaphoreGive(g_diagnostics_mutex);

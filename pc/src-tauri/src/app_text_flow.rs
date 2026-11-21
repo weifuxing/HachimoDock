@@ -53,7 +53,7 @@ impl Flow{
 }
 #[cfg(test)]mod tests{
  use super::*;
- fn flow()->Flow{let runtime:Value=serde_json::from_str(include_str!("../../builtin-clawpkgs/daily-news/runtime/widget.json")).unwrap();Flow::from_surface(&runtime["surface"])}
+ fn flow()->Flow{let runtime:Value=serde_json::from_str(include_str!("../../optional-clawpkgs/daily-news/runtime/widget.json")).unwrap();Flow::from_surface(&runtime["surface"])}
  #[test]fn chinese_fills_both_rows_before_continuing(){let f=flow();let text="知".repeat(150);let pages=f.pages(&text);assert_eq!(pages[0].parts[0].chars().count(),52);assert_eq!(pages[0].parts[1].chars().count(),52);assert_eq!(pages[1].start,104);assert_eq!(f.page_at(&text,103),0);assert_eq!(f.page_at(&text,104),1);}
  #[test]fn mixed_text_is_lossless_bounded_and_fits(){let f=flow();for text in ["AI算力增长2592EFLOPS，看看世界的新鲜事。".repeat(8),"WIFI IIII 2026。".repeat(10),"中文，标点：￥123！℃·—…".repeat(10)]{let pages=f.pages(&text);assert_eq!(pages.iter().flat_map(|p|&p.parts).cloned().collect::<String>(),text);for p in pages{for (i,part)in p.parts.iter().enumerate(){assert!(part.len()<=156);assert!(f.fits(part,f.blocks[i]));}}}}
  #[test]fn package_geometry_changes_page_boundaries(){let f=Flow::from_surface(&serde_json::json!({"elements":[{"type":"text","bind":"note","w":220,"h":29,"font_size":22,"line_height":29},{"type":"text","bind":"footer","w":220,"h":29,"font_size":22,"line_height":29}]}));assert_eq!(f.pages(&"知".repeat(50))[1].start,20);}

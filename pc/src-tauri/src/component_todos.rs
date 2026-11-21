@@ -68,6 +68,15 @@ pub(crate) fn test_execute(reading: &mut Reading, op: &str, request: &Value,
 
 fn apply(reading: &mut Reading, op: &str, request: &Value,
     store: &mut impl FnMut(Input) -> Result<Vec<Todo>, String>) -> Result<Value, String> {
+    apply_rows(reading, op, request, store, 5)
+}
+
+pub(crate) fn execute_rows(reading: &mut Reading, op: &str, request: &Value, page_size: usize) -> Result<Value,String> {
+    apply_rows(reading, op, request, &mut crate::todos::execute, page_size)
+}
+
+fn apply_rows(reading: &mut Reading, op: &str, request: &Value, store: &mut impl FnMut(Input) -> Result<Vec<Todo>,String>, page_size: usize) -> Result<Value,String> {
+    if !(1..=5).contains(&page_size) { return Err("待办分页大小无效".into()); }
     let mut all = store(input("list"))?;
     let mut s = reading.clone();
     let mut notice = String::new();
@@ -90,27 +99,27 @@ fn apply(reading: &mut Reading, op: &str, request: &Value,
         s.detail = false; s.selected.clear(); notice = "原事项已删除".into();
     }
     if !s.detail {
-        s.page = s.page.min(rows.len().saturating_sub(1) / 5);
-        let mut at = rows.iter().position(|t| t.id == s.selected).unwrap_or(s.page * 5);
+        s.page = s.page.min(rows.len().saturating_sub(1) / page_size);
+        let mut at = rows.iter().position(|t| t.id == s.selected).unwrap_or(s.page * page_size);
         match op {
             "up" => at = at.saturating_sub(1),
             "down" => at = (at + 1).min(rows.len().saturating_sub(1)),
-            "previous" => at = (at / 5).saturating_sub(1) * 5,
-            "next" => at = ((at / 5 + 1) * 5).min(rows.len().saturating_sub(1)),
+            "previous" => at = (at / page_size).saturating_sub(1) * page_size,
+            "next" => at = ((at / page_size + 1) * page_size).min(rows.len().saturating_sub(1)),
             _ => {}
         }
         if let Some(slot) = ROWS.iter().position(|r| *r == op) {
-            at = (at / 5) * 5 + slot;
-            if at >= rows.len() { return Err("这行已没有事项，请刷新后重试".into()); }
+            at = (at / page_size) * page_size + slot;
+            if slot >= page_size || at >= rows.len() { return Err("这行已没有事项，请刷新后重试".into()); }
             s.detail = true; s.text_page = 0;
         } else if op == "open" && !rows.is_empty() {
             s.detail = true; s.text_page = 0;
         }
-        s.selected = rows.get(at).map(|t| t.id.clone()).unwrap_or_default(); s.page = at / 5;
+        s.selected = rows.get(at).map(|t| t.id.clone()).unwrap_or_default(); s.page = at / page_size;
     } else if op == "open" {
         s.detail = false; s.text_page = 0;
         let at = rows.iter().position(|t| t.id == s.selected).unwrap_or(0);
-        s.selected = rows.get(at).map(|t| t.id.clone()).unwrap_or_default(); s.page = at / 5;
+        s.selected = rows.get(at).map(|t| t.id.clone()).unwrap_or_default(); s.page = at / page_size;
     } else {
         let count = all.iter().find(|t| t.id == s.selected).map(|t| blocks(&t.title).len().div_ceil(2)).unwrap_or(1);
         s.text_page = s.text_page.min(count - 1);
@@ -134,15 +143,16 @@ fn apply(reading: &mut Reading, op: &str, request: &Value,
         if s.text_page + 1 < pages { allowed.push("next"); }
         (if todo.completed { 5 } else { 1 }, token(todo))
     } else {
-        let count = rows.len(); let pages = count.div_ceil(5).max(1);
+        let count = rows.len(); let pages = count.div_ceil(page_size).max(1);
         values["metricValue"] = format!("{} · {}", if s.completed { "已完成" } else { "待完成" }, count).into();
         values["badge"] = format!("{}/{}", s.page + 1, pages).into();
         if count == 0 {
             values["headline"] = if notice.is_empty() { if s.completed { "还没有已完成事项" } else { "眼前清单已清空" }.into() } else { notice }.into();
             values["note"] = "可在 PC 或实时对话中添加待办".into();
         } else {
-            for (n, todo) in rows.iter().skip(s.page * 5).take(5).enumerate() {
-                values[SLOTS[n]] = format!("{}{} · {}", if todo.id == s.selected { "> " } else { "  " }, short(&todo.title, 20), due(todo, false)).into();
+            for (n, todo) in rows.iter().skip(s.page * page_size).take(page_size).enumerate() {
+                let suffix=if page_size==3&&todo.due_at.is_none(){String::new()}else{format!(" · {}",due(todo,false))};
+                values[SLOTS[n]] = format!("{}{}{}", if todo.id == s.selected { "> " } else { "  " }, short(&todo.title, 20), suffix).into();
                 allowed.push(ROWS[n]);
             }
             let at = rows.iter().position(|t| t.id == s.selected).unwrap_or(0);
@@ -175,6 +185,19 @@ mod tests {
             }
             Ok(all.clone())
         })
+    }
+    #[test]
+    fn three_row_workspace_reaches_all_tasks_and_rejects_hidden_rows() {
+        let mut s=Reading::default();let mut all=(0..8).map(|i|item(i,"需要完成的事项")).collect::<Vec<_>>();
+        let mut store=|i:Input| {assert_eq!(i.operation,"list");Ok(all.clone())};
+        let a=apply_rows(&mut s,"status",&json!({}),&mut store,3).unwrap();
+        assert_eq!(a["badge"],"1/3");assert!(s.ui["operations"].as_array().unwrap().contains(&json!("row_c")));
+        assert!(!s.ui["operations"].as_array().unwrap().contains(&json!("row_d")));
+        let a=apply_rows(&mut s,"next",&json!({}),&mut store,3).unwrap();assert_eq!(a["badge"],"2/3");
+        let a=apply_rows(&mut s,"next",&json!({}),&mut store,3).unwrap();assert_eq!(a["badge"],"3/3");
+        assert!(apply_rows(&mut s,"row_c",&json!({}),&mut store,3).is_err());
+        assert!(apply_rows(&mut s,"row_d",&json!({}),&mut store,3).is_err());
+        apply_rows(&mut s,"row_b",&json!({}),&mut store,3).unwrap();assert!(s.detail);assert_eq!(s.selected,all[7].id);
     }
     #[test]
     fn full_title_is_lossless_and_bounded_even_with_emoji() {

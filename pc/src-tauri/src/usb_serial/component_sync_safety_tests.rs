@@ -15,8 +15,10 @@ const WIDGET: &str = "sync-safety-fixture";
 enum Mode {
     Audio { playback: bool, state: &'static str },
     MissingChunkAck,
+    Resumable { chunk_received: bool },
     InvalidChunkAck(u8),
     DeleteAck,
+    DeleteUnconfirmed { present: bool, complete: bool },
     DeleteWriteRejected,
 }
 #[derive(Default)]
@@ -28,6 +30,9 @@ struct MemoryWriter {
     widget_waiters: Arc<Mutex<Vec<WidgetAckWaiter>>>,
     deferred_media: Option<mpsc::Sender<Value>>,
     mode: Mode,
+    next_sequence: u64,
+    dropped_chunk_ack: bool,
+    committed: bool,
 }
 impl Write for MemoryWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -70,6 +75,41 @@ impl Write for MemoryWriter {
                         resolve_device_response(&self.device_waiters, "media/status", &reply);
                     }
                 }
+                (Mode::Resumable { .. }, "widget/begin") => {
+                    assert_eq!(payload["transferProtocol"], widget_transaction::WIDGET_FILE_TRANSFER);
+                    resolve_widget_ack(&self.widget_waiters, "widget-install-ack", &json!({
+                        "transferId":payload["transferId"],"phase":"begin","ok":true
+                    }));
+                }
+                (Mode::Resumable { chunk_received }, "widget/chunk") => {
+                    assert_eq!(payload["sequence"], self.next_sequence);
+                    assert_eq!(payload["offset"].as_u64().unwrap() % 4096, 0);
+                    assert!(payload["decodedSize"].as_u64().unwrap() <= 4096);
+                    if !self.dropped_chunk_ack {
+                        self.dropped_chunk_ack = true;
+                        self.next_sequence += u64::from(chunk_received);
+                        self.widget_waiters.lock().unwrap().clear();
+                    } else {
+                        self.next_sequence += 1;
+                        resolve_widget_ack(&self.widget_waiters, "widget-install-ack", &json!({
+                            "transferId":payload["transferId"],"phase":"chunk","ok":true,
+                            "path":payload["path"],"index":payload["index"]
+                        }));
+                    }
+                }
+                (Mode::Resumable { .. }, "widget/status") => {
+                    resolve_widget_ack(&self.widget_waiters, "widget-install-ack", &json!({
+                        "transferId":payload["transferId"],"phase":"status","ok":true,
+                        "index":payload["index"],"state":if self.committed {"committed"} else {"pending"},
+                        "nextSequence":self.next_sequence
+                    }));
+                }
+                (Mode::Resumable { .. }, "widget/commit") => {
+                    assert_eq!(self.next_sequence, 7);
+                    assert!(!self.committed);
+                    self.committed = true;
+                    self.widget_waiters.lock().unwrap().clear();
+                }
                 (Mode::MissingChunkAck | Mode::InvalidChunkAck(_), "widget/begin") => {
                     assert!(self.widget_waiters.lock().unwrap().iter().any(|w|
                         w.transfer_id == payload["transferId"].as_str().unwrap() && w.phase == "begin"));
@@ -105,6 +145,18 @@ impl Write for MemoryWriter {
                         "transferId":payload["transferId"],"phase":"delete","ok":true
                     }));
                 }
+                (Mode::DeleteUnconfirmed { .. }, "widget/delete") => {
+                    // Exercise the missing confirmation path without waiting 15 s.
+                    self.widget_waiters.lock().unwrap().clear();
+                }
+                (Mode::DeleteUnconfirmed { present, complete }, "widget/list") => {
+                    let items = if present { json!([{ "id": WIDGET }]) } else { json!([]) };
+                    resolve_device_response(&self.device_waiters, "widget/inventory", &json!({
+                        "requestId": payload["requestId"], "schemaVersion": 1,
+                        "boardDeviceId": BOARD, "ok": true, "complete": complete,
+                        "recoveryBlocked": !complete, "activeWidgetId": null, "items": items,
+                    }));
+                }
                 _ => panic!("unexpected mutation/topic after preflight or unknown ACK: {topic}"),
             }
         }
@@ -121,11 +173,12 @@ fn manager(mode: Mode, deferred_media: Option<mpsc::Sender<Value>>, preserve: bo
         connection_id:101,port_name:"memory-only-no-serial-port".into(),baud_rate:115_200,
         writer:Box::new(MemoryWriter { pending:Vec::new(),trace:trace.clone(),
             device_waiters:manager.device_response_waiters.clone(),
-            widget_waiters:manager.widget_ack_waiters.clone(),deferred_media,mode }),
+            widget_waiters:manager.widget_ack_waiters.clone(),deferred_media,mode,
+            next_sequence:0,dropped_chunk_ack:false,committed:false }),
         board_device_id:BOARD.into(),runtime:"esp-p4".into(),device_model:"test-only".into(),
         firmware:String::new(),build_id:String::new(),git_sha:String::new(),build_dirty:false,
         protocol_schema:7,wire_protocol:"pet-usb-jsonl-v3".into(),
-        capabilities:json!({"widgetMedia":"p4-media-v1","widgetDelete":true,
+        capabilities:json!({"widgetMedia":"p4-media-v1","widgetDelete":true,"widgetInventory":true,
             "widgetDeletePreserveSave":preserve,"debugBootId":"0123456789abcdef"}),
         connected:true,cancel_reader:Arc::new(AtomicBool::new(false)),capture_active:capture.clone(),
     });
@@ -244,6 +297,25 @@ fn production_delete_without_preserve_capability_sends_nothing() {
     assert!(topics(&trace).is_empty());assert!(manager.widget_ack_waiters.lock().unwrap().is_empty());
 }
 #[test]
+fn production_delete_without_ack_reconciles_read_only() {
+    for (present, complete, preserve_save, expected_error) in [
+        (false, true, true, None),
+        (true, true, true, Some("核对时该组件仍在设备上")),
+        (false, false, true, Some("未能核对完整组件清单")),
+        (false, true, false, Some("存档是否清除仍未确认")),
+    ] {
+        let (manager, trace, _) = manager(Mode::DeleteUnconfirmed { present, complete }, None, true);
+        let result = manager.remove_widget_with_save_policy(BOARD, WIDGET, preserve_save);
+        match expected_error {
+            Some(expected) => assert!(result.unwrap_err().contains(expected)),
+            None => result.unwrap(),
+        }
+        assert_eq!(topics(&trace), ["widget/delete", "widget/list"]);
+        assert!(manager.widget_ack_waiters.lock().unwrap().is_empty());
+        assert!(manager.device_response_waiters.lock().unwrap().is_empty());
+    }
+}
+#[test]
 fn production_delete_explicit_clear_sends_false_with_real_ack() {
     let (manager,trace,_) = manager(Mode::DeleteAck,None,false);
     // Native command independently requires the UI's explicit clear consent.
@@ -333,4 +405,25 @@ fn production_autostart_suppression_occurs_only_after_bound_identity_admission()
     assert!(send.find("if conn.connection_id != expected_connection_id").unwrap()<effect);
     assert!(send.find("if conn.board_device_id != expected_board_device_id").unwrap()<effect);
     assert!(send.find("let preempt_on_send =").unwrap()<effect);
+}
+
+
+#[test]
+fn widget_v2_recovers_missing_chunk_and_commit_ack_using_device_progress() {
+    for chunk_received in [true, false] {
+        let (manager, trace, _) = manager(Mode::Resumable { chunk_received }, None, true);
+        let data = vec![0x81; 8 + 64 * 64 * 2 * 3];
+        let entries = vec![("runtime/sprites/letter.p4s".into(), data.clone())];
+        let result = manager.install_widget_file_transfer(BOARD, WIDGET, 101, &Value::Null, &entries, |_, _, _| {});
+        assert_eq!(result.unwrap(), (1, data.len() as u64));
+
+        let requests = &trace.lock().unwrap().requests;
+        let sequences: Vec<_> = requests.iter().filter(|r| r["topic"] == "widget/chunk")
+            .map(|r| r["payload"]["sequence"].as_u64().unwrap()).collect();
+        let expected: Vec<_> = if chunk_received { (0..7).collect() } else { [0].into_iter().chain(0..7).collect() };
+        assert_eq!(sequences, expected);
+        assert_eq!(requests.iter().filter(|r| r["topic"] == "widget/commit").count(), 1);
+        assert_eq!(requests.iter().filter(|r| r["topic"] == "widget/status").count(), 2);
+        assert!(manager.widget_resume.lock().unwrap().is_none());
+    }
 }

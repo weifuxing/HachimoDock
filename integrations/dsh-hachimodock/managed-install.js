@@ -55,22 +55,32 @@ function exclusive(p, bytes) {
 function profilePaths() {
   const home = path.resolve(os.homedir())
   check(home, true)
-  // This is the default desktop profile contract; no scanning user credentials.
-  const profile = path.join(home, '.dsh', 'profiles', 'desktop')
-  let p = home
-  for (const part of ['.dsh', 'profiles', 'desktop']) { p = path.join(p, part); check(p, true) }
-  const manifest = JSON.parse(read(path.join(profile, 'package.json'), 65536))
+  // Match @deepseek-ai/dsh-home-paths: one explicit root, never a profile scan.
+  const configured = process.env.DSH_HOME
+  const selected = typeof configured === 'string' && configured.trim() ? configured : path.join(home, '.dsh')
+  const expanded = selected === '~' ? home
+    : selected.startsWith('~/') || selected.startsWith('~\\') ? path.join(home, selected.slice(2)) : selected
+  const dshHome = path.resolve(expanded)
+  check(dshHome, true)
+  const profile = path.join(dshHome, 'profiles', 'desktop')
+  let p = dshHome
+  for (const part of ['profiles', 'desktop']) { p = path.join(p, part); check(p, true) }
+  const manifest = JSON.parse(metadataText(read(path.join(profile, 'package.json'), 65536)).replace(/^\uFEFF/, ''))
   if (!Array.isArray(manifest.dsh?.profile?.bundles) || !manifest.dsh.profile.bundles.includes('@deepseek-ai/dsh-web-app')) fail('unsupported-desktop-profile-contract')
   return { profile, patch: path.join(profile, 'cordis.patch.yml'), managed: path.join(profile, '.hachimodock-managed') }
 }
-function validatePatch(bytes) {
+function metadataText(bytes) {
   const raw = bytes.toString('utf8')
   if (Buffer.from(raw).compare(bytes) || raw.includes('\0')) fail('unsupported-profile-encoding')
+  return raw
+}
+function validatePatch(bytes) {
+  const raw = metadataText(bytes)
   const value = yaml.load(raw, { schema })
   if (!Array.isArray(value) || value.some(v => !v || typeof v !== 'object' || Array.isArray(v))) fail('unsupported-profile-patch-contract')
   // Preserve block-sequence bytes. Flow arrays/document directives need an
   // explicit adapter, never a lossy YAML parse/dump of a user's patch.
-  const lines = raw.split(/\r?\n/).filter(l => l.trim() && !l.trimStart().startsWith('#'))
+  const lines = raw.replace(/^\uFEFF/, '').split(/\r?\n/).filter(l => l.trim() && !l.trimStart().startsWith('#'))
   if (value.length === 0 && lines.length === 1 && /^[ \t]*\[\][ \t]*(?:#.*)?$/.test(lines[0])) return raw
   if (!lines.length || !lines[0].startsWith('- ') || lines.some(l => !/^\s/.test(l) && !l.startsWith('- '))) fail('unsupported-profile-patch-layout')
   return raw
@@ -121,9 +131,9 @@ async function install() {
     }
     if (!existing) fail('unowned-managed-entry')
   } else if (/hachimodock-bridge/.test(raw)) fail('foreign-bridge-entry')
-  // This lock belongs only to our installer, not the host's undocumented lock
-  // protocol. Refuse an active host lock; never write/steal/remove its lock.
-  if (fs.existsSync(path.join(profile, 'lock'))) fail('host-profile-busy')
+  // Desktop's host-lifetime lock is not a lock on its user patch: the web
+  // profile watches YAML through HMR. Never read/acquire/remove that lock.
+  // Serialize only our installer and retain the before/after byte checks.
   const lock = path.join(managed, 'install.lock')
   let locked = false
   try {
@@ -168,7 +178,7 @@ async function install() {
     // two syntax bytes, preserving all its comments/whitespace in the backup
     // and resulting block document. Nonempty flow sequences remain unsupported.
     const prefix = yaml.load(raw, { schema }).length === 0
-      ? raw.replace(/^([ \t]*)\[\]([ \t]*(?:#[^\r\n]*)?)(\r?)$/m, '$1$2$3') : raw
+      ? raw.replace(/^(\uFEFF?[ \t]*)\[\]([ \t]*(?:#[^\r\n]*)?)(\r?)$/m, '$1$2$3') : raw
     const next = Buffer.from(existing
       ? raw.slice(0, existing.start) + entry + raw.slice(existing.blockEnd)
       : prefix + (prefix.endsWith('\n') ? '' : nl) + entry)
@@ -196,7 +206,6 @@ function rollback() {
   if (!/^profile-[0-9]+-[a-f0-9]{12}\.backup$/.test(r.backup)) fail('invalid-managed-receipt')
   const original = read(path.join(managed, r.backup), 262144, true), current = read(patch)
   if (hash(current) !== r.after || hash(original) !== r.before) fail('profile-changed-rollback-refused')
-  if (fs.existsSync(path.join(profile, 'lock'))) fail('host-profile-busy')
   const lock = path.join(managed, 'install.lock')
   exclusive(lock, String(process.pid))
   try {

@@ -88,7 +88,7 @@ def writer_hosts(tmp_path_factory):
     common = [shutil.which('cc') or 'cc', '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
               '-Wno-error=deprecated-declarations', '-fsanitize=address,undefined',
               '-fno-omit-frame-pointer', '-include', 'inttypes.h',
-              '-I', str(inc), '-I', str(sdk), '-I', str(vendor)]
+              '-I', str(inc), '-I', str(sdk), '-I', str(vendor), '-I', str(ROOT/'main')]
     commands = []
 
     def invoke(argv, name):

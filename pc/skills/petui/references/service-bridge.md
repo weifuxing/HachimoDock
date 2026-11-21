@@ -1,11 +1,10 @@
-# 通用服务桥（候选、默认关闭）
+# 通用服务桥（按固件能力协商）
 
 本参考对应 `pc-service-bridge-v1` / `p4-service-bridge-v1` 候选代码及
 `contracts/service-bridge-v1.json`。协议可表达、离线校验、完整固件编译与实机验收
 是不同状态；本参考不证明普通固件已开放或任何提供器已通过 HIL。
-`PET_SERVICE_BRIDGE_ENABLED` 缺省为 0，仅独立
-`esp32_p4_service_bridge_candidate` 显式开启，并启用其集合依赖。
-不由 r157、客户端版本、PC 预览或包内声明推断设备支持。
+`PET_SERVICE_BRIDGE_ENABLED` 由构建目标配置；启用的目标还需带上集合依赖。
+始终按当前连接设备的握手能力判断可用性。
 
 ## 路由与显式协商
 
@@ -99,6 +98,8 @@ MIME 必须与真实 PNG/JPEG 格式匹配，不能由 MIME 启用其他解码�
 
 ## 本地媒体、权限与验收边界
 
+新建本地播放器时，使用 PC 声明中的 `kind: "local-media"`。旧 `media.source: "audio.player"` 是已停用的播放器接口，仅用于识别历史包。新打包会拒绝旧接口；历史包仍可导入和查看，并标明迁移原因。合法服务桥包可离线打包和导入，正式同步前由客户端核对实际 USB 握手与包声明的依赖。
+
 `kind:"local-media"` 复用原播放器核心，但旧全局 `music_player::AVAILABLE=false`
 保持；不重新开放旧在线歌曲服务。只能由用户在 PC 明确选择本地文件导入，包、设备
 事件和定时器不能提交文件系统路径；带 `_deviceEpoch` 的 import 请求明确拒绝，
@@ -117,4 +118,4 @@ speechProvider=false，不等于有在线音源、录音、OAuth、账号或支�
 音频/语音抢占、Windows、声学和固定门槛 HIL；离线 core/JS/编译记录不能代替这些
 证据。program750µs、frame/gap66667µs、SAVE4096/free1024 等门槛保持不变。
 
-本地媒体另提供无参数 `volume_up` / `volume_down`（每次5、夹到0–100）及 `cycle_mode`（sequence/single/loop/shuffle）；这些方法注册于通用local-media provider，不能由包自行注册方法。删除仍须显式确认。示例候选包与统一验收清单见 `pc/docs/local-music-player-candidate.md`；没有真实候选协商不得同步。
+本地媒体另提供无参数 `volume_up` / `volume_down`（每次 5，范围 0–100）及 `cycle_mode`（sequence/single/loop/shuffle）。这些方法由通用 local-media provider 注册。删除仍须显式确认。示例包、离线验证和设备验收见[本地随身听组件参考](../../../docs/local-music-player-candidate.md)。同步前核对目标设备报告的能力。

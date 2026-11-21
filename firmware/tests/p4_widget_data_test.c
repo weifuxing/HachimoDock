@@ -90,7 +90,7 @@ static void test_source_capacity(void) {
   _Static_assert(PET_P4_DATA_MAX_SOURCES==8,"bounded eight-source store");
   _Static_assert(PET_P4_DATA_MAX_ROWS==20,"row bound is unchanged");
   const char *sources[]={"test.quotes","test.expiry","test.capacity2","test.capacity3",
-                         "test.capacity4","test.capacity5","test.capacity6","test.capacity7"};
+                         "test.capacity4","test.capacity5","test.capacity6","fetch.fixture"};
   cJSON *p=cJSON_Parse("{\"schema\":1,\"source\":\"test.quotes\",\"ttlMs\":5000,\"status\":\"ok\",\"message\":\"initial\",\"rows\":[{\"id\":\"row\",\"label\":\"Row\",\"value\":\"1\",\"detail\":\"\",\"meta\":\"\",\"tone\":0}]}");
   assert(p);
   for(unsigned i=0;i<PET_P4_DATA_MAX_SOURCES;i++){
@@ -116,6 +116,30 @@ static void test_source_capacity(void) {
   }
   cJSON_ReplaceItemInObject(p,"source",cJSON_CreateString("test.ninth"));
   assert(!pet_p4_widget_data_apply(p,102000));
+  cJSON_Delete(p);
+}
+static void test_lan_transport_parity(void) {
+  cJSON *p = cJSON_Parse("{\"schema\":1,\"source\":\"fetch.fixture\",\"ttlMs\":5000,"
+    "\"status\":\"ok\",\"message\":\"private example\",\"clearOnExpire\":true,\"rows\":[]}");
+  assert(p && pet_p4_widget_data_apply_lan(p, 103000));
+  cJSON_ReplaceItemInObject(p, "ttlMs", cJSON_CreateNumber(4000));
+  assert(!pet_p4_widget_data_apply_lan(p, 104000));
+  for (uint64_t now = 108000; now <= 108001; ++now) {
+    cJSON *report = pet_p4_widget_data_diagnostics(now);
+    assert(report);
+    const cJSON *stream = cJSON_GetObjectItemCaseSensitive(report, "fetch.fixture");
+    assert(cJSON_GetArraySize(stream) == 4);
+    assert(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(stream, "received")));
+    assert(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(stream, "fresh")) == (now == 108000));
+    assert(cJSON_GetObjectItemCaseSensitive(stream, "usbCount")->valueint == 2);
+    assert(cJSON_GetObjectItemCaseSensitive(stream, "wifiCount")->valueint == 1);
+    cJSON_Delete(report);
+  }
+  pet_p4_data_view_t view;
+  pet_p4_widget_data_view("fetch.fixture", 0, 108000, &view);
+  assert(!view.stale && !strcmp(view.message, "private example"));
+  pet_p4_widget_data_view("fetch.fixture", 0, 108001, &view);
+  assert(view.stale && !strstr(view.message, "private"));
   cJSON_Delete(p);
 }
 int main(void) {
@@ -192,6 +216,6 @@ int main(void) {
       assert(!view.stale&&paging.pages==view.pages&&paging.page==view.page);
     }
   }
-  cJSON_Delete(p);test_clear_on_expire();test_source_capacity();
+  cJSON_Delete(p);test_clear_on_expire();test_source_capacity();test_lan_transport_parity();
   puts("widget data: atomic validation, paging, expiry, source isolation PASS");
 }

@@ -1,24 +1,26 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { createDshConnectionController } from '../lib/dsh-connection.js';
 
-let optionalEnsureInFlight = null;
-export function ensureOptionalDshDesktop() {
-  if (!optionalEnsureInFlight) {
-    // Replace an old pair dock with the optional status-only module. Installation
-    // failure is deliberately independent of desktop input readiness.
-    const promise = Promise.resolve().then(() => invoke('connect_dsh_desktop'))
-      .then(() => undefined, () => undefined);
-    optionalEnsureInFlight = promise;
-    promise.then(() => { if (optionalEnsureInFlight === promise) optionalEnsureInFlight = null; });
-  }
-  return optionalEnsureInFlight;
+export function useDshFollowConnection(agentId) {
+  const [state, setState] = useState({ phase: 'idle', message: '' });
+  const controller = useRef(null);
+  if (!controller.current) controller.current = createDshConnectionController(invoke, setState);
+  useEffect(() => {
+    const owner = controller.current;
+    void owner.select(agentId);
+    return () => owner.retire();
+  }, [agentId]);
+  return { ...state, retry: controller.current.retry };
 }
 
 // Optional informational view only. Device voice uses the shared desktop
 // composer adapter; plugin connectivity is never an input prerequisite.
-export default function DshConnectionPanel() {
-  return <section className="voice-panel__advanced" aria-label="DeepSeek 桌面输入">
-    <strong>DeepSeek 桌面输入</strong>
-    <p>打开目标对话并保持当前输入框可编辑。语音先写入草稿，确认后发送。</p>
+export default function DshConnectionPanel({ connection }) {
+  if (!['pending', 'error'].includes(connection?.phase)) return null;
+  return <section className="voice-panel__advanced" aria-label="DeepSeek 会话跟随">
+    <strong>DeepSeek 会话跟随</strong>
+    <p role={connection.phase === 'error' ? 'alert' : 'status'}>{connection.message}</p>
+    {connection.phase === 'error' && <button type="button" onClick={connection.retry}>重试连接</button>}
   </section>;
 }

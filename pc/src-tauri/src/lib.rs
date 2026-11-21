@@ -53,12 +53,16 @@
  */
 
 mod startup_policy;
+mod workbuddy_paths;
 mod startup_supervision;
 mod dsh_approval;
 mod dsh_auth;
+mod bridge_capability;
 mod dsh_desktop;
+mod dsh_paths;
 mod dsh_windows_acl;
 mod clawpkg;
+mod wasm_audio;
 mod json_canonical;
 mod app_shell;
 mod app_data_rows;
@@ -83,6 +87,10 @@ mod component_calendar;
 mod component_news;
 mod knowledge_narration;
 mod app_weather;
+mod wasm_uv;
+mod petui_authoring;
+mod wasm_preview_session;
+mod wasm_input_contract;
 mod shared_location;
 mod location_profile;
 mod component_app;
@@ -116,11 +124,18 @@ mod auth_provider;
 mod codex_composer;
 mod codex_import;
 mod component_library;
+mod devin_cloud;
 mod secure_config;
+mod lan_agent;
+mod firmware_rollback;
+mod wireless_ota;
+#[cfg(target_os = "macos")]
+mod desktop_takeover_macos;
 mod desktop_window;
 mod community;
 mod community_credentials;
 mod doubao_tts;
+mod openai_tts;
 mod pc_audio;
 mod pc_playback;
 mod persona_llm;
@@ -452,18 +467,8 @@ fn reconnect_usb_serial_to_expected_board(
 /// Build a reqwest blocking client that is *immune* to system / shell HTTP
 /// proxy env vars (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, …).
 ///
-/// HTTP routed through this helper is exclusively loopback or LAN
-/// (`127.0.0.1:23333` to the bridge sidecar, `192.168.44.1:80` to the
-/// board's AP-mode HTTP server). `reqwest`'s default behaviour is to
-/// honour `ALL_PROXY` regardless, and its `NO_PROXY` parser is stricter
-/// than curl's — so a developer who runs a SOCKS/HTTP proxy in their
-/// shell (e.g. `ALL_PROXY=http://127.0.0.1:63762`) ends up routing
-/// loopback-to-loopback traffic through the proxy, which then refuses
-/// to relay it back into 127.0.0.1 and we surface "error sending
-/// request for url …". The user-visible symptom looked like the bridge
-/// was down, when in fact only the HTTP transport was misrouted.
-///
-/// We never want to proxy these calls; force `.no_proxy()` everywhere.
+/// Requests to the bridge sidecar and the device's setup access point
+/// use direct connections so a system or shell proxy cannot intercept them.
 fn lan_http_client(timeout: Duration) -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .no_proxy()
@@ -680,16 +685,19 @@ fn agent_uses_visible_composer(agent_id: &str) -> bool {
     /* DeepSeek Harness desktop voice is the OS accessibility composer adapter
      * (see integrations/dsh-hachimodock/README.md); the plugin voice endpoints
      * are a legacy ticket flow and do not register a desktop voice owner. */
-    matches!(agent_id, "codex" | "claude-code" | "workbuddy" | "deepseek-harness")
+    matches!(agent_id, "codex" | "claude-code" | "workbuddy" | "devin" | "deepseek-harness")
 }
 
 fn agent_streams_voice_draft(agent_id: &str) -> bool {
     // Rich-text desktop editors use one final insertion, preserving the same
     // draft and selection rather than pasting every ASR hypothesis.
-    agent_uses_visible_composer(agent_id) && !matches!(agent_id, "workbuddy" | "deepseek-harness")
+    agent_uses_visible_composer(agent_id) && !matches!(agent_id, "workbuddy" | "devin" | "deepseek-harness")
 }
 
 fn device_voice_platform_block_reason(agent_id: &str, is_macos: bool) -> Option<&'static str> {
+    if agent_id == "devin" && is_macos {
+        return Some("Devin 的按键语音输入仅支持 Windows Devin Desktop；macOS 暂不支持。");
+    }
     (agent_id == "mimocode" && !is_macos).then_some(
         "MiMoCode 的按键语音输入目前仅支持 macOS 终端；当前系统可使用状态跟随与设备实时对话。",
     )
@@ -698,6 +706,8 @@ fn device_voice_platform_block_reason(agent_id: &str, is_macos: bool) -> Option<
 fn visible_composer_agent_label(agent_id: &str) -> &'static str {
     if agent_id == "workbuddy" {
         "WorkBuddy"
+    } else if agent_id == "devin" {
+        "Devin"
     } else if agent_id == "deepseek-harness" {
         "DeepSeek"
     } else if agent_id == "claude-code" {
@@ -797,6 +807,7 @@ async fn write_workbuddy_voice_test_draft(text: String, app: tauri::AppHandle) -
         let capture_id = id.as_str();
         let connection_id = "";
         let boot_id = "";
+        let wireless_route = None;
         let target = P4SessionBinding { agent_id: "workbuddy".into(), ..P4SessionBinding::default() };
         let session_queue_empty_at_start = true;
         let use_current_visible_session = true;
@@ -807,6 +818,7 @@ async fn write_workbuddy_voice_test_draft(text: String, app: tauri::AppHandle) -
         capture_id: capture_id.to_string(),
         connection_id: connection_id.to_string(),
         boot_id: boot_id.to_string(),
+        wireless_route,
         target,
         session_queue_empty_at_start,
         use_current_visible_session: AtomicBool::new(use_current_visible_session),
@@ -912,6 +924,7 @@ struct DeviceVoiceContext {
     capture_id: String,
     connection_id: String,
     boot_id: String,
+    wireless_route: Option<lan_agent::voice::Route>,
     target: P4SessionBinding,
     session_queue_empty_at_start: bool,
     use_current_visible_session: AtomicBool,
@@ -1133,7 +1146,9 @@ fn should_use_current_visible_session(
     agent_id: &str,
 ) -> bool {
     agent_uses_visible_composer(agent_id)
-        && (agent_is_frontmost || session_queue_empty || matches!(agent_id, "workbuddy" | "codex" | "deepseek-harness"))
+        && (agent_is_frontmost
+            || session_queue_empty
+            || matches!(agent_id, "workbuddy" | "devin" | "codex" | "deepseek-harness"))
 }
 
 fn voice_needs_current_composer(target: &P4SessionBinding, frontmost: bool, empty_queue: bool) -> bool {
@@ -1153,7 +1168,7 @@ fn device_voice_bound_target_is_addressable(
     session_queue_empty: bool,
     target: &P4SessionBinding,
 ) -> bool {
-    !matches!(target.agent_id.as_str(), "workbuddy" | "deepseek-harness")
+    !matches!(target.agent_id.as_str(), "workbuddy" | "devin" | "deepseek-harness")
         && !session_queue_empty
         && !target.session_id.is_empty()
         && !target.session_title.is_empty()
@@ -1191,6 +1206,9 @@ fn should_preserve_exact_auto_binding(
 fn device_voice_target_is_current(context: &DeviceVoiceContext) -> bool {
     if context.cancelled.load(Ordering::SeqCst) || !context.lifecycle.admission_open() {
         return false;
+    }
+    if let Some(route) = &context.wireless_route {
+        return route.is_current() && resolve_usb_inject_agent_id() == context.target.agent_id;
     }
     if !context.connection_id.is_empty() {
         let manager = context.emitter.state::<usb_serial::UsbSerialManager>();
@@ -1331,6 +1349,7 @@ fn emit_device_voice_transcript(
         .unwrap_or(None);
     let mut event = serde_json::json!({
         "utteranceId": context.utterance_id,
+        "transport": if context.wireless_route.is_some() { "wifi" } else { "usb" },
         "captureId": context.capture_id,
         "connectionId": context.connection_id,
         "bootId": context.boot_id,
@@ -1652,6 +1671,20 @@ fn finalize_device_voice_final(
 
     #[cfg(target_os = "macos")]
     if context.target.agent_id == "mimocode" {
+        // ASR and native preparation run concurrently. Only this finalization
+        // worker waits; USB PCM/Finish and ASR callbacks never wait for AX.
+        let ready = context.composer_startup_complete.lock().ok().and_then(|complete|
+            context.composer_startup_ready.wait_timeout_while(complete, VISIBLE_COMPOSER_PREPARE_WAIT,
+                |complete| !*complete && !context.cancelled.load(Ordering::SeqCst)).ok()
+        ).is_some_and(|(complete, _)| *complete);
+        if !device_voice_finalization_target_is_current(&context, "MiMo target changed during preparation") { return; }
+        if !ready {
+            crate::realtime_chat_log::record("", "mimo_voice_target",
+                serde_json::json!({"stage":"insert", "ok":false, "reason":"prepare_timeout"}));
+            report_device_voice_delivery_failure(&context, revision, &text,
+                "MiMo Desktop 输入框准备超时；请打开目标输入框后重试", "MiMo 草稿未写入或发送", "FOCUSED_TEXT_INPUT_UNAVAILABLE");
+            return;
+        }
         let target = context
             .focused_text_target
             .lock()
@@ -1663,8 +1696,10 @@ fn finalize_device_voice_final(
                 .lock()
                 .map(|value| value.clone())
                 .unwrap_or_default();
+            crate::realtime_chat_log::record("", "mimo_voice_target",
+                serde_json::json!({"stage":"insert", "ok":false, "reason":"target_unavailable"}));
             let unavailable =
-                "MiMoCode 当前光标未定位，本次语音未写入；请先点击终端输入位置".to_string();
+                "MiMo Desktop / MiMoCode 当前光标未定位，本次语音未写入；请先点击 MiMo Desktop 输入框或 MiMoCode 终端输入位置".to_string();
             report_device_voice_delivery_failure(
                 &context,
                 revision,
@@ -1681,13 +1716,19 @@ fn finalize_device_voice_final(
         };
         thread::spawn(move || {
             if !device_voice_target_is_current(&context) {
+                crate::realtime_chat_log::record("", "mimo_voice_target",
+                    serde_json::json!({"stage":"insert", "ok":false, "reason":"target_changed"}));
                 cancel_device_voice_context(
                     &context,
                     "voice target changed before MiMoCode draft insertion",
                 );
                 return;
             }
-            match codex_composer::insert_at_focused_text_target(&target, &text) {
+            let insertion = codex_composer::insert_at_focused_text_target(&target, &text);
+            crate::realtime_chat_log::record("", "mimo_voice_target",
+                serde_json::json!({"stage":"insert", "ok":insertion.is_ok(),
+                    "reason":insertion.as_ref().err().map(|error| mimo_voice_diagnostics::failure_reason(error)).unwrap_or("written")}));
+            match insertion {
                 Ok(()) => {
                     if let Ok(mut composer_error) = context.composer_error.lock() {
                         composer_error.clear();
@@ -1708,7 +1749,7 @@ fn finalize_device_voice_final(
                     revision,
                     &text,
                     &error,
-                    "MiMoCode 当前光标草稿写入失败",
+                    "MiMo Desktop / MiMoCode 当前光标草稿写入失败",
                     "FOCUSED_TEXT_INPUT_FAILED",
                 ),
             }
@@ -1873,8 +1914,12 @@ fn confirm_pending_device_voice_draft(topic: &str, payload: &serde_json::Value) 
     let Some(context) = context else {
         return false;
     };
-    if payload.get("voiceUtteranceId").and_then(serde_json::Value::as_str)
-        .is_some_and(|id| id != context.utterance_id) { return false; }
+    let requested = payload.get("voiceUtteranceId").and_then(serde_json::Value::as_str);
+    if requested.is_some_and(|id| id != context.utterance_id)
+        || (context.wireless_route.is_some() && requested != Some(context.utterance_id.as_str()))
+    {
+        return false;
+    }
     if !context.draft_ready.load(Ordering::SeqCst)
         && context.final_requested.load(Ordering::SeqCst)
         && input_event_matches_device_voice_confirm(topic, payload, &context.board_device_id, true, context.cancelled.load(Ordering::SeqCst)) {
@@ -1924,8 +1969,8 @@ fn confirm_pending_device_voice_draft(topic: &str, payload: &serde_json::Value) 
                 &context,
                 revision,
                 &text,
-                "MiMoCode 语音草稿的光标定位已丢失",
-                "MiMoCode 当前光标未定位，未执行确认发送",
+                "MiMo Desktop / MiMoCode 语音草稿的光标定位已丢失",
+                "MiMo Desktop / MiMoCode 当前光标未定位，未执行确认发送",
                 "FOCUSED_TEXT_INPUT_UNAVAILABLE",
             );
             return true;
@@ -2113,6 +2158,86 @@ fn confirm_pending_device_voice_draft(topic: &str, payload: &serde_json::Value) 
     true
 }
 
+#[cfg(any(windows, target_os = "macos"))]
+fn is_deepseek_draft_send_press(topic: &str, payload: &serde_json::Value) -> bool {
+    topic == "input/event"
+        && payload["event"] == "button.sw1.short_press"
+        && payload["action"] == "page_enter"
+        && payload["context"] == "main"
+        && payload["handledLocally"] == false
+        && payload.get("voiceUtteranceId").is_none()
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn confirm_current_deepseek_draft(
+    emitter: &tauri::AppHandle,
+    topic: &str,
+    payload: &serde_json::Value,
+) -> bool {
+    use codex_composer::CodexComposerBridge;
+    const AGENT: &str = "deepseek-harness";
+    if !is_deepseek_draft_send_press(topic, payload)
+        || !active_device_voice_context().lock().is_ok_and(|active| active.is_none())
+    {
+        return false;
+    }
+    let Some(board) = payload["boardDeviceId"].as_str().filter(|id| !id.is_empty()) else {
+        return false;
+    };
+    let manager = emitter.state::<usb_serial::UsbSerialManager>();
+    let expected = manager.status();
+    if !expected.connected || expected.board_device_id != board || expected.connection_id.is_empty()
+        || resolve_usb_inject_target(board).0 != AGENT
+    {
+        return false;
+    }
+    let emitter = emitter.clone();
+    thread::spawn(move || {
+        let manager = emitter.state::<usb_serial::UsbSerialManager>();
+        let target_current = || {
+            let status = manager.status();
+            status.connected && status.board_device_id == expected.board_device_id
+                && status.connection_id == expected.connection_id && status.boot_id == expected.boot_id
+                && resolve_usb_inject_target(&expected.board_device_id).0 == AGENT
+                && manager.session_follow_target_is_current(&expected.board_device_id, &expected.connection_id, AGENT)
+                && CodexComposerBridge::is_agent_frontmost(AGENT)
+        };
+        let result = (|| -> Result<(), String> {
+            let _gate = desktop_agent::try_composer_gate().map_err(|_| "桌面输入通道忙，本次未发送")?;
+            if !target_current() || !active_device_voice_context().lock().is_ok_and(|active| active.is_none()) {
+                return Err("请保持 DeepSeek 目标对话在前台，当前输入框未确认".into());
+            }
+            ensure_pending_voice_writer_released()?;
+            if !target_current() {
+                return Err("DeepSeek 目标已变化，本次未发送".into());
+            }
+            // Open the existing visible-composer adapter without recording or
+            // replacing text. The explicit Confirm reads the live editor.
+            desktop_agent::with_current_deepseek_writer(|bridge| {
+                if !target_current() {
+                    return Err("DeepSeek 目标已变化，本次未发送".into());
+                }
+                match classify_visible_composer_submit(bridge.confirm(0, "").wait(
+                    VISIBLE_COMPOSER_START_TIMEOUT, VISIBLE_COMPOSER_SUBMIT_TIMEOUT,
+                )) {
+                    VisibleComposerSubmitOutcome::Submitted => Ok(()),
+                    VisibleComposerSubmitOutcome::ExplicitFailure(error) => Err(error),
+                    VisibleComposerSubmitOutcome::Unconfirmed(_) =>
+                        Err("DeepSeek 提交结果未确认，请查看当前对话".into()),
+                }
+            })
+        })();
+        let _ = emitter.emit("usb-input-action-result", serde_json::json!({
+            "ok": result.is_ok(),
+            "pending": false,
+            "view": "voice_input",
+            "agentId": AGENT,
+            "message": result.err().unwrap_or_else(|| "已触发 DeepSeek 输入框提交".into()),
+        }));
+    });
+    true
+}
+
 fn schedule_device_voice_cleanup(context: &Arc<DeviceVoiceContext>, _error: &str) {
     if context.cleanup_started.swap(true, Ordering::SeqCst) { return; }
     let cleanup_context = context.clone();
@@ -2191,37 +2316,21 @@ fn start_device_voice_context(
     connection_id: &str,
     boot_id: &str,
     session_queue_empty_at_start: bool,
+    wireless_route: Option<lan_agent::voice::Route>,
 ) {
-    let target = device_voice_target_snapshot(board_device_id);
-    /* Device dictation writes into the target client, so bring it forward before
-     * the composer bridge is created. Doing it here (USB event thread) instead of
-     * inside the composer worker keeps the worker responsive: activating there
-     * made the first draft write time out. */
-    #[cfg(target_os = "macos")]
-    {
-        let front_before = codex_composer::CodexComposerBridge::is_agent_frontmost(&target.agent_id);
-        let mut act_pids = 0usize;
-        let mut front_after = front_before;
-        if !front_before {
-            codex_composer::CodexComposerBridge::activate_agent(&target.agent_id);
-            for _ in 0..6 {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                front_after = codex_composer::CodexComposerBridge::is_agent_frontmost(&target.agent_id);
-                if front_after { break; }
-            }
+    let target = if wireless_route.is_some() {
+        P4SessionBinding {
+            board_device_id: board_device_id.to_string(),
+            agent_id: resolve_usb_inject_agent_id(),
+            ..P4SessionBinding::default()
         }
-        if let Some(agent) = codex_composer::CodexComposerBridge::agent_diagnostics(&target.agent_id) {
-            act_pids = agent.pids;
-        }
-        crate::realtime_chat_log::record("", "voice_focus",
-            serde_json::json!({"stage":"start","reason":if front_after {"ok"} else {"not_frontmost"},
-                "ok":front_after,"count":act_pids as u64,
-                "agent":target.agent_id.clone()}));
-    }
-    let agent_is_frontmost =
-        codex_composer::CodexComposerBridge::is_agent_frontmost(&target.agent_id);
+    } else {
+        device_voice_target_snapshot(board_device_id)
+    };
+    // Publish the capture before doing any desktop work. The USB reader can
+    // then drain incoming PCM into the existing bounded pending queue.
     let use_current_visible_session = voice_needs_current_composer(
-        &target, agent_is_frontmost, session_queue_empty_at_start,
+        &target, false, session_queue_empty_at_start,
     );
     let context = Arc::new(DeviceVoiceContext {
         emitter: emitter.clone(),
@@ -2230,6 +2339,7 @@ fn start_device_voice_context(
         capture_id: capture_id.to_string(),
         connection_id: connection_id.to_string(),
         boot_id: boot_id.to_string(),
+        wireless_route,
         target,
         session_queue_empty_at_start,
         use_current_visible_session: AtomicBool::new(use_current_visible_session),
@@ -2316,12 +2426,64 @@ fn start_device_voice_context(
                     return;
                 }
             }
+            let agent_is_frontmost = prepare_device_voice_agent(&startup_context);
+            if !device_voice_round_is_current(&startup_context) {
+                if !startup_context.cancelled.load(Ordering::SeqCst)
+                    && !startup_context.final_handled.load(Ordering::SeqCst) {
+                    cancel_device_voice_context(&startup_context, "语音目标已变化，请重新长按录音");
+                }
+                return;
+            }
+            startup_context.use_current_visible_session.store(
+                voice_needs_current_composer(&startup_context.target, agent_is_frontmost,
+                    startup_context.session_queue_empty_at_start),
+                Ordering::SeqCst,
+            );
             continue_device_voice_context_start(startup_context, agent_is_frontmost);
         })
         .is_err()
     {
         fail_device_voice_context(&context, "无法启动本次录音处理；未重试或发送音频");
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[path = "mimo_voice_diagnostics.rs"]
+mod mimo_voice_diagnostics;
+
+fn prepare_device_voice_agent(context: &DeviceVoiceContext) -> bool {
+    if !device_voice_target_is_current(context) {
+        return false;
+    }
+    let agent_id = &context.target.agent_id;
+    #[cfg(target_os = "macos")]
+    if agent_id == "mimocode" {
+        // MiMo has dedicated Desktop activation/unique-editor preparation below;
+        // the generic agent lookup does not support MiMo and must not run.
+        crate::realtime_chat_log::record("", "mimo_voice_target",
+            serde_json::json!({"stage":"prepare", "reason":"desktop_or_verified_cli"}));
+        return false; // No generic foreground assertion; capture validates the target.
+    }
+    let frontmost = codex_composer::CodexComposerBridge::is_agent_frontmost(agent_id);
+    #[cfg(target_os = "macos")]
+    {
+        let mut active = frontmost;
+        if !active && device_voice_target_is_current(context) {
+            codex_composer::CodexComposerBridge::activate_agent(agent_id);
+            for _ in 0..6 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if !device_voice_target_is_current(context) { break; }
+                active = codex_composer::CodexComposerBridge::is_agent_frontmost(agent_id);
+                if active { break; }
+            }
+        }
+        crate::realtime_chat_log::record("", "voice_focus",
+            serde_json::json!({"stage":"start","reason":if active {"ok"} else {"not_frontmost"},
+                "ok":active,"agent":agent_id}));
+        active
+    }
+    #[cfg(not(target_os = "macos"))]
+    frontmost
 }
 
 fn device_voice_round_is_current(context: &Arc<DeviceVoiceContext>) -> bool {
@@ -2355,22 +2517,48 @@ fn continue_device_voice_context_start(context: Arc<DeviceVoiceContext>, agent_i
 
     #[cfg(target_os = "macos")]
     if context.target.agent_id == "mimocode" {
-        match codex_composer::capture_focused_text_target() {
-            Ok(target) => {
-                if let Ok(mut slot) = context.focused_text_target.lock() {
-                    *slot = Some(target);
-                }
-                if let Ok(mut composer_error) = context.composer_error.lock() {
-                    composer_error.clear();
+        let permit = match register_device_voice_writer_startup(&context) {
+            Ok(permit) => permit,
+            Err(error) => { fail_device_voice_context(&context, &error); return; }
+        };
+        let permit = Arc::new(Mutex::new(Some(permit)));
+        let worker_permit = permit.clone();
+        let startup = context.clone();
+        if thread::Builder::new().name("pet-mimo-composer-startup".into()).spawn(move || {
+            let permit = match worker_permit.lock() {
+                Ok(mut slot) => match slot.take() { Some(permit) => permit, None => return },
+                Err(_) => return,
+            };
+            let capture = codex_composer::prepare_mimo_text_target(|| device_voice_target_is_current(&startup));
+            crate::realtime_chat_log::record("", "mimo_voice_target",
+                serde_json::json!({"stage":"capture", "ok":capture.is_ok(),
+                    "reason":capture.as_ref().err().map(|error| mimo_voice_diagnostics::failure_reason(error)).unwrap_or("ready")}));
+            if device_voice_target_is_current(&startup) {
+                match capture {
+                    Ok(target) => {
+                        if let Ok(mut slot) = startup.focused_text_target.lock() { *slot = Some(target); }
+                        if let Ok(mut error) = startup.composer_error.lock() { error.clear(); }
+                    }
+                    Err(error) => {
+                        if let Ok(mut slot) = startup.composer_error.lock() { *slot = error; }
+                    }
                 }
             }
-            Err(error) => {
-                if let Ok(mut composer_error) = context.composer_error.lock() {
-                    *composer_error = error;
-                }
+            // Preparation only focuses; no persistent writer/Bridge exists.
+            // Keep startup registered until this thread's last UI operation ends.
+            let _ = permit.finish_startup(device_voice_lifecycle::WriterState::NoWriter);
+            mark_visible_composer_startup_complete(&startup);
+            if device_voice_target_is_current(&startup) && !startup.final_handled.load(Ordering::SeqCst) {
+                emit_device_voice_transcript(&startup, "listening", 0, "", false, true, "");
             }
+        }).is_err() {
+            if let Ok(mut slot) = permit.lock() {
+                if let Some(permit) = slot.take() { let _ = permit.finish_startup(device_voice_lifecycle::WriterState::NoWriter); }
+            }
+            mark_visible_composer_startup_complete(&context);
+            fail_device_voice_context(&context, "无法启动 MiMo 输入框准备线程，未写入或发送");
+            return;
         }
-        emit_device_voice_transcript(&context, "listening", 0, "", false, true, "");
     }
 
     if device_voice_uses_current_visible_session(&context) {
@@ -2462,7 +2650,7 @@ fn continue_device_voice_context_start(context: Arc<DeviceVoiceContext>, agent_i
                 let start_bound = |callback: Arc<
                     dyn Fn(codex_composer::CodexComposerEvent) + Send + Sync,
                 >| {
-                    if matches!(startup_context.target.agent_id.as_str(), "workbuddy" | "deepseek-harness") {
+                    if matches!(startup_context.target.agent_id.as_str(), "workbuddy" | "devin" | "deepseek-harness") {
                         Err(format!("请打开 {} 的目标对话后再开始语音输入", visible_composer_agent_label(&startup_context.target.agent_id)))
                     } else if startup_context.target.agent_id == "claude-code" {
                         codex_composer::CodexComposerBridge::start_claude(
@@ -2593,7 +2781,7 @@ fn continue_device_voice_context_start(context: Arc<DeviceVoiceContext>, agent_i
             };
         }
         mark_visible_composer_startup_complete(&context);
-    } else {
+    } else if context.target.agent_id != "mimocode" {
         mark_visible_composer_startup_complete(&context);
     }
 
@@ -2723,6 +2911,10 @@ fn push_device_voice_chunk(chunk: usb_audio::ValidatedUsbAudioChunk) {
     {
         return;
     }
+    push_device_voice_pcm(&context, chunk.sequence, chunk.pcm);
+}
+
+fn push_device_voice_pcm(context: &Arc<DeviceVoiceContext>, sequence: u64, pcm: Vec<u8>) {
     if context.final_handled.load(Ordering::SeqCst) { return; }
     let dsh = context.target.agent_id == "deepseek-harness";
     if dsh && !device_voice_round_is_current(&context) {
@@ -2734,26 +2926,26 @@ fn push_device_voice_chunk(chunk: usb_audio::ValidatedUsbAudioChunk) {
         if input.closed || context.cancelled.load(Ordering::SeqCst)
             || context.final_handled.load(Ordering::SeqCst)
             || context.final_requested.load(Ordering::SeqCst) { return Ok(()); }
-        if chunk.sequence != input.next_sequence {
+        if sequence != input.next_sequence {
             input.discard();
             return Err("当前语音分片顺序不一致；本段已丢弃，请重新按住说话".into());
         }
         input.next_sequence += 1;
         if let Some(recognizer) = input.recognizer.as_ref() {
-            return recognizer.push_pcm(&chunk.pcm);
+            return recognizer.push_pcm(&pcm);
         }
-        if input.pending_bytes.saturating_add(chunk.pcm.len()) > DSH_PENDING_PCM_BYTES
+        if input.pending_bytes.saturating_add(pcm.len()) > DSH_PENDING_PCM_BYTES
             || input.pending_pcm.len() >= DSH_PENDING_PCM_CHUNKS {
             input.discard();
             return Err("输入准备超过当前语音缓冲上限；本段已丢弃，请重新按住说话".into());
         }
-        input.pending_bytes += chunk.pcm.len();
-        input.pending_pcm.push(chunk.pcm);
+        input.pending_bytes += pcm.len();
+        input.pending_pcm.push(pcm);
         Ok(())
     })();
     let push_error = pushed.err();
     if let Some(error) = push_error {
-        let error = format!("云端音频分片 {} 发送失败: {error}", chunk.sequence);
+        let error = format!("云端音频分片 {sequence} 发送失败: {error}");
         if let Ok(mut streaming_error) = context.streaming_error.lock() {
             *streaming_error = error.clone();
         }
@@ -2778,11 +2970,15 @@ fn finish_device_voice_context(completed: usb_audio::CompletedUsbAudio) {
         // A late completion has no authority over a newer active capture.
         return;
     }
+    finish_device_voice_capture(&context, !completed.pcm.is_empty());
+}
+
+fn finish_device_voice_capture(context: &Arc<DeviceVoiceContext>, has_pcm: bool) {
     // A normal early Final/draft must survive a later audio/end. Likewise a
     // prior Error/Cancelled remains this round's first terminal cause.
     if context.final_handled.load(Ordering::SeqCst) || context.cancelled.load(Ordering::SeqCst) { return; }
-    record_device_voice_timing(&context, "audio_end", !completed.pcm.is_empty());
-    if completed.pcm.is_empty() {
+    record_device_voice_timing(context, "audio_end", has_pcm);
+    if !has_pcm {
         fail_device_voice_context(&context, "设备没有返回可识别的麦克风音频");
         return;
     }
@@ -3192,23 +3388,20 @@ fn forward_usb_agent_input_to_bridge(
     // Only target the managed bridge; a stale legacy bridge cannot share the
     // agent-session-bus port and would report misleading injection failures.
     for attempt in 1..=8 {
-        let url = format!(
-            "http://127.0.0.1:{}/mock-button-inject",
-            DEFAULT_BRIDGE_PORT
-        );
-        let client = lan_http_client(Duration::from_secs(150))?;
-        let response = match client.post(&url).json(&body).send() {
+        let cap = match bridge_capability::load("control") {
+            Ok(cap) => cap,
+            Err(_) if attempt < 8 => { thread::sleep(Duration::from_millis(250)); continue; }
+            Err(e) => return Err(e),
+        };
+        let url = format!("{}/mock-button-inject", cap.base_url);
+        let client = bridge_capability::blocking_client(Duration::from_secs(150))?;
+        let response = match client.post(&url).bearer_auth(&cap.token).json(&body).send() {
             Ok(resp) => resp,
             Err(error) if error.is_connect() && attempt < 8 => {
                 thread::sleep(Duration::from_millis(250));
                 continue;
             }
-            Err(error) => {
-                return Err(format!(
-                    "usb device input inject request failed on {}: {}",
-                    DEFAULT_BRIDGE_PORT, error
-                ));
-            }
+            Err(_) => return Err("usb input delivery unknown; not resent".into()),
         };
         let status = response.status();
         let response_text = response.text().unwrap_or_default();
@@ -3218,7 +3411,7 @@ fn forward_usb_agent_input_to_bridge(
                 status, DEFAULT_BRIDGE_PORT, response_text
             ));
         }
-        println!("[usb-device-input] bridge response {}", response_text);
+        println!("[usb-device-input] bridge response status {}", status);
 
         let parsed =
             serde_json::from_str::<serde_json::Value>(&response_text).unwrap_or_else(|_| {
@@ -3249,6 +3442,10 @@ fn handle_incoming_usb_message(
     topic: String,
     payload: serde_json::Value,
 ) {
+    if topic == "input/voice-shortcut-result" {
+        let _ = emitter.emit("usb-voice-shortcut-result", payload);
+        return;
+    }
     resolve_button_config_ack(&topic, &payload);
     if topic == "approval/decision" {
         dsh_approval::handle_device_decision(&payload);
@@ -3339,6 +3536,7 @@ fn handle_incoming_usb_message(
                     event["connectionId"].as_str().unwrap_or_default(),
                     event["bootId"].as_str().unwrap_or_default(),
                     audio_begin_session_queue_empty(&payload),
+                    None,
                 );
             } else if event["ok"] == false {
                 let active = active_device_voice_context()
@@ -3456,6 +3654,10 @@ fn handle_incoming_usb_message(
 
     if topic == "input/action" || topic == "input/event" {
         if realtime_chat::handle_input_event(emitter, &payload) {
+            return;
+        }
+        #[cfg(any(windows, target_os = "macos"))]
+        if confirm_current_deepseek_draft(emitter, &topic, &payload) {
             return;
         }
         if payload.get("action").and_then(|value| value.as_str()) == Some("dsh_interrupt")
@@ -3680,13 +3882,15 @@ const BRIDGE_LAUNCH_AGENT_LABEL: &str = "com.petmanager.status-bridge";
 const BRIDGE_WINDOWS_STARTUP_SCRIPT_NAME: &str = "Pet Manager Status Bridge.cmd";
 const USB_STATE_MAX_AGE_MS: u64 = 10 * 60 * 1000;
 const USB_BRIDGE_SCAN_MAX_FILES: usize = 64;
-const KNOWN_USB_STATE_SOURCES: [&str; 6] = [
+const KNOWN_USB_STATE_SOURCES: [&str; 8] = [
     "claude-code",
     "codex",
     "openclaw",
     "mimocode",
     "deepseek-harness",
     "workbuddy",
+    "devin",
+    "hermes",
 ];
 #[cfg(windows)]
 const CREATE_NO_WINDOW_FLAG: u32 = 0x08000000;
@@ -4743,7 +4947,7 @@ fn audio_bridge_signal_blocking(
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ButtonConfigBinding {
+pub(crate) struct ButtonConfigBinding {
     event: String,
     action: String,
     value: Option<String>,
@@ -4758,12 +4962,15 @@ fn is_allowed_button_config_event(event: &str) -> bool {
             | "screen.region.tap"
             | "screen.region.long_press"
             | "button.sw1.short_press"
+            | "button.sw1.double_press"
             | "button.sw1.long_press"
             | "button.sw1.hold"
             | "button.sw2.short_press"
+            | "button.sw2.double_press"
             | "button.sw2.long_press"
             | "button.sw2.hold"
             | "button.sw3.short_press"
+            | "button.sw3.double_press"
             | "button.sw3.long_press"
             | "button.sw3.hold"
             | "button.encoder.hold"
@@ -4778,8 +4985,10 @@ fn is_allowed_button_config_action(action: &str) -> bool {
     matches!(
         action,
         "voice_ptt"
+            | "voice_key_forward"
             | realtime_chat::ACTION_ID
             | "system_page"
+            | "system_settings"
             | "system_reset"
             | "volume_adjust"
             | "agent_enter"
@@ -5070,6 +5279,7 @@ fn set_p4_session_binding_blocking(
 fn send_button_config_and_wait_for_ack(
     usb_manager: &usb_serial::UsbSerialManager,
     expected_board_device_id: &str,
+    expected_connection_id: Option<u64>,
     topic: &str,
     request_id: &str,
     command_payload: &serde_json::Value,
@@ -5080,8 +5290,11 @@ fn send_button_config_and_wait_for_ack(
         topic, request_id
     );
     let ack_receiver = register_button_config_ack_waiter(request_id)?;
-    if let Err(error) = usb_manager.send_to_board(expected_board_device_id, topic, command_payload)
-    {
+    let send = match expected_connection_id {
+        Some(generation) => usb_manager.send_button_config_to_generation(expected_board_device_id, generation, command_payload),
+        None => usb_manager.send_to_board(expected_board_device_id, topic, command_payload),
+    };
+    if let Err(error) = send {
         remove_button_config_ack_waiter(request_id);
         return Err(format!("USB OTA 下发按钮配置失败: {error}"));
     }
@@ -5110,6 +5323,53 @@ fn send_button_config_and_wait_for_ack(
     Ok((ack_payload, binding_count))
 }
 
+fn valid_bluetooth_shortcut_chord(value: &str) -> bool {
+    let [b'h', b'i', b'd', b'-', b'0', modifier, b'-', high, low] = value.as_bytes() else {
+        return false;
+    };
+    fn hex(digit: u8) -> Option<u8> {
+        match digit {
+            b'0'..=b'9' => Some(digit - b'0'),
+            b'a'..=b'f' => Some(digit - b'a' + 10),
+            _ => None,
+        }
+    }
+    matches!(hex(*modifier), Some(1..=15))
+        && matches!(hex(*high).zip(hex(*low)).map(|(hi, lo)| (hi << 4) | lo), Some(0x04..=0x52 | 0x65))
+}
+
+fn normalize_button_config_bindings(
+    bindings: Vec<ButtonConfigBinding>, supports_bluetooth_chords: bool,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut normalized_bindings = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        let event = binding.event.trim();
+        let action = binding.action.trim();
+        if !is_allowed_button_config_event(event) {
+            return Err(format!("invalid button event '{event}'"));
+        }
+        if !is_allowed_button_config_action(action) {
+            return Err(format!("invalid button action '{action}'"));
+        }
+        let value = binding.value.as_deref().unwrap_or("").trim();
+        if action == "voice_key_forward" && (!event.starts_with("button.") || event.ends_with(".hold")
+            || !(matches!(value, "win-ctrl" | "win-h" | "mac-ctrl-alt-d")
+                || (supports_bluetooth_chords
+                    && valid_bluetooth_shortcut_chord(value)))) {
+            return Err("请选择支持的电脑语音快捷键与实体按键手势".into());
+        }
+        if value.len() >= 160 {
+            return Err("button action value exceeds 159 UTF-8 bytes".to_string());
+        }
+        normalized_bindings.push(serde_json::json!({
+            "event": event,
+            "action": action,
+            "value": value,
+        }));
+    }
+    Ok(normalized_bindings)
+}
+
 #[tauri::command]
 #[allow(non_snake_case)]
 async fn button_config_signal(
@@ -5119,6 +5379,7 @@ async fn button_config_signal(
     requestId: Option<String>,
     voiceButton: Option<String>,
     voiceEnabled: Option<bool>,
+    expectedConnectionId: Option<String>,
     usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
 ) -> Result<serde_json::Value, String> {
     let usb_status = usb_manager.status();
@@ -5134,26 +5395,18 @@ async fn button_config_signal(
     } else {
         "control/command"
     };
-    let mut normalized_bindings = Vec::with_capacity(bindings.len());
-    for binding in bindings {
-        let event = binding.event.trim();
-        let action = binding.action.trim();
-        if !is_allowed_button_config_event(event) {
-            return Err(format!("invalid button event '{event}'"));
+    let expected_generation = expectedConnectionId.map(|connection| {
+        if command_topic != "input/config" || connection != usb_status.connection_id
+            || boardDeviceId != usb_status.board_device_id
+        {
+            return Err("USB 连接已变化，请重新读取设备按键配置".to_owned());
         }
-        if !is_allowed_button_config_action(action) {
-            return Err(format!("invalid button action '{action}'"));
-        }
-        let value = binding.value.as_deref().unwrap_or("").trim();
-        if value.len() >= 160 {
-            return Err("button action value exceeds 159 UTF-8 bytes".to_string());
-        }
-        normalized_bindings.push(serde_json::json!({
-            "event": event,
-            "action": action,
-            "value": value,
-        }));
-    }
+        connection.parse::<u64>().ok().filter(|id| *id != 0)
+            .ok_or_else(|| "无法确认设备连接".to_owned())
+    }).transpose()?;
+    let normalized_bindings = normalize_button_config_bindings(
+        bindings, usb_status.capabilities["bluetoothShortcutKeys"] == "hid-usage-v1",
+    )?;
     let request_id = requestId
         .as_deref()
         .map(str::trim)
@@ -5181,6 +5434,7 @@ async fn button_config_signal(
             match send_button_config_and_wait_for_ack(
                 &manager,
                 &wait_board_device_id,
+                expected_generation,
                 command_topic,
                 &wait_request_id,
                 &wait_command_payload,
@@ -5757,6 +6011,17 @@ fn ensure_bridge_runtime_blocking(
             }));
             let payload = serde_json::to_vec_pretty(&profile).map_err(|e| e.to_string())?;
             let _ = write_private_file(&config_path, &payload);
+        } else if lan_agent::paired() {
+            // An authenticated LAN pairing can establish the desktop profile
+            // without fabricating a USB device binding.
+            profile.version = 1;
+            profile.updated_at = current_timestamp_ms();
+            profile.desktop_device_id = get_or_create_desktop_device_id_inner()?;
+            let payload = serde_json::to_vec_pretty(&profile).map_err(|e| e.to_string())?;
+            if let Some(parent_dir) = config_path.parent() {
+                ensure_private_directory(parent_dir)?;
+            }
+            write_private_file(&config_path, &payload)?;
         } else {
             return Ok(build_bridge_runtime_status(
                 &profile,
@@ -5817,7 +6082,7 @@ fn ensure_bridge_runtime_blocking(
     // stop it before replacement if it remains unhealthy.
     if !running {
         if let Some(existing_pid) = pid.filter(|candidate| process_exists(*candidate)) {
-            running = wait_for_bridge_ready(DEFAULT_BRIDGE_PORT, 6, 250);
+            running = wait_for_bridge_ready(DEFAULT_BRIDGE_PORT, existing_pid, 6, 250);
             if !running {
                 eprintln!(
                     "[bridge-runtime] managed bridge {existing_pid} is alive but unresponsive; replacing it"
@@ -5829,19 +6094,9 @@ fn ensure_bridge_runtime_blocking(
         }
     }
 
-    // If a bridge is already running but it's an old external process (not ours),
-    // kill it so we can start the bundled version with all endpoints.
+    // Do not adopt or terminate an external runtime based on its port/health text.
     if pid.is_none() && (bridge_http_running || agent_bus_running) {
-        // A recognized Bridge endpoint without our PID file is an external/old
-        // runtime. Replace the complete stack so 23333 and 8181 stay in sync.
-        if bridge_http_running {
-            stop_process_on_port(DEFAULT_BRIDGE_PORT);
-        }
-        if agent_bus_running {
-            stop_process_on_port(DEFAULT_AGENT_BUS_PORT);
-        }
-        thread::sleep(Duration::from_millis(300));
-        running = false;
+        return Err("本地服务端口被其他实例占用，请关闭旧实例后重试；未终止其他程序。".into());
     }
 
     let mut mode = if running { "ready" } else { "launching" };
@@ -5852,14 +6107,15 @@ fn ensure_bridge_runtime_blocking(
     };
 
     if !running {
-        (running, pid) =
-            launch_bridge_runtime(&node_path, &bridge_assets, &profile, &runtime_paths)?;
+        let launch = launch_bridge_runtime(&node_path, &bridge_assets, &profile, &runtime_paths)?;
+        (running, pid) = (launch.pid.is_some(), launch.pid);
         mode = if running { "ready" } else { "error" };
         message = if running {
             format!("bridge 已启动，正在发布到 {}。", build_topic_base(&profile))
         } else {
             format!(
-                "bridge 已尝试启动，但 Bridge 或 Agent Bus 健康检查未通过。日志：{}",
+                "Bridge 已尝试启动。{} 日志：{}",
+                launch.failure.unwrap_or("本地服务健康检查未通过。"),
                 runtime_paths.log_path.display()
             )
         };
@@ -5874,8 +6130,9 @@ fn ensure_bridge_runtime_blocking(
                 stop_managed_bridge(&runtime_paths.pid_path);
                 stop_process_on_port(DEFAULT_BRIDGE_PORT);
                 thread::sleep(Duration::from_millis(250));
-                (running, pid) =
+                let launch =
                     launch_bridge_runtime(&node_path, &bridge_assets, &profile, &runtime_paths)?;
+                (running, pid) = (launch.pid.is_some(), launch.pid);
                 mode = if running { "ready" } else { "error" };
                 message = if running {
                     format!(
@@ -5884,7 +6141,8 @@ fn ensure_bridge_runtime_blocking(
                     )
                 } else {
                     format!(
-                        "bridge 已尝试自愈重启，但进程未能连接本地状态端口。日志：{}",
+                        "Bridge 已尝试重新启动。{} 日志：{}",
+                        launch.failure.unwrap_or("本地服务健康检查未通过。"),
                         runtime_paths.log_path.display()
                     )
                 };
@@ -6153,9 +6411,7 @@ fn ensure_voice_runtime_blocking(
     }
 
     if running && pid.is_none() {
-        stop_process_on_port(DEFAULT_VOICE_SERVICE_PORT);
-        thread::sleep(Duration::from_millis(180));
-        running = false;
+        return Err("语音服务端口被其他实例占用，请关闭旧实例后重试；未终止其他程序。".into());
     }
 
     if !running {
@@ -6974,8 +7230,33 @@ fn detect_openclaw() -> DetectedAgent {
     }
 }
 
+fn find_mimo_desktop(home: Option<&Path>) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        for app in macos_app_bundle_candidates(home, &["Xiaomi MiMo.app"], &["com.xiaomi.mimo.desktop"]) {
+            if app.join("Contents/MacOS/Xiaomi MiMo").is_file() {
+                return Some(app);
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        for directory in [std::env::var_os("LOCALAPPDATA").map(|path| PathBuf::from(path).join("Programs")),
+            std::env::var_os("ProgramFiles").map(PathBuf::from)].into_iter().flatten() {
+            for folder in ["Xiaomi MiMo", "xiaomi-mimo-desktop"] {
+                let executable = directory.join(folder).join("Xiaomi MiMo.exe");
+                if executable.is_file() {
+                    return Some(executable);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn detect_mimocode() -> DetectedAgent {
     let home = get_home_dir().ok();
+    let desktop = find_mimo_desktop(home.as_deref());
     let cli_path = find_agent_executable(
         "mimo",
         home.as_deref(),
@@ -7010,7 +7291,13 @@ fn detect_mimocode() -> DetectedAgent {
         .unwrap_or_default();
     let plugin_ready = !config_path.is_empty() && Path::new(&config_path).is_file();
 
-    let (detected, status, detail) = match &cli_path {
+    let desktop_path = desktop.as_ref().map(|path| path.to_string_lossy().into_owned());
+    let (detected, status, detail) = match desktop_path.as_ref().or(cli_path.as_ref()) {
+        Some(_) if desktop.is_some() => (true, "ready".into(), if plugin_ready {
+            "已检测到 MiMo Desktop，支持桌面状态跟随；MiMoCode 命令行状态插件也已安装。"
+        } else {
+            "已检测到 MiMo Desktop，启用后可同步桌面会话状态。"
+        }.into()),
         Some(path) if plugin_ready => (
             true,
             "ready".to_string(),
@@ -7030,21 +7317,30 @@ fn detect_mimocode() -> DetectedAgent {
 
     DetectedAgent {
         id: "mimocode".to_string(),
-        label: "MiMoCode".to_string(),
+        label: "MiMo Desktop / MiMoCode".to_string(),
         detected,
         ready: status == "ready",
         status,
         detail,
-        command_path: cli_path.unwrap_or_default(),
+        command_path: cli_path.or(desktop_path).unwrap_or_default(),
         config_path,
         activity_path,
         can_sync_hook: detected,
     }
 }
 
-fn workbuddy_config_dir(home: &Path) -> PathBuf {
-    std::env::var("WORKBUDDY_CONFIG_DIR").ok().filter(|s| !s.trim().is_empty())
-        .map(|s| PathBuf::from(s.trim())).unwrap_or_else(|| home.join(".workbuddy"))
+fn workbuddy_config_dir(home: &Path) -> Result<PathBuf, String> {
+    workbuddy_paths::config_dir(home)
+}
+
+fn devin_config_dir(home: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(app_data) = env::var_os("APPDATA") {
+            return PathBuf::from(app_data).join("devin");
+        }
+    }
+    home.join(".config").join("devin")
 }
 
 fn detect_workbuddy() -> DetectedAgent {
@@ -7062,8 +7358,8 @@ fn detect_workbuddy() -> DetectedAgent {
         apps.push(PathBuf::from(dir).join(if cfg!(windows) { "WorkBuddy.exe" } else { "WorkBuddy" }));
     }
     let app = apps.into_iter().find(|p| p.exists());
-    let detected = app.is_some() || root.is_dir();
-    let ready = detected && root.is_dir();
+    let ready = root.as_ref().is_ok_and(|path| path.is_dir());
+    let detected = app.is_some() || ready;
     DetectedAgent {
         id: "workbuddy".into(), label: "WorkBuddy".into(), detected, ready,
         status: if ready { "ready" } else if detected { "needs_setup" } else { "not_found" }.into(),
@@ -7071,8 +7367,72 @@ fn detect_workbuddy() -> DetectedAgent {
             else if detected { "已安装 WorkBuddy；请先启动一次，再重新扫描并启用状态跟随" }
             else { "未检测到 WorkBuddy" }.into(),
         command_path: app.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
-        config_path: root.join("settings.json").to_string_lossy().into_owned(),
+        config_path: root.map(|path| path.join("settings.json").to_string_lossy().into_owned()).unwrap_or_default(),
         activity_path: String::new(), can_sync_hook: ready,
+    }
+}
+
+fn detect_devin(cloud_enabled: bool) -> DetectedAgent {
+    let home = get_home_dir().unwrap_or_default();
+    let root = devin_config_dir(&home);
+    let cli = find_agent_executable(
+        "devin",
+        Some(&home),
+        &[".local/bin/devin"],
+        codex_composer::DEVIN_DESKTOP_EXE_NAME,
+    );
+    #[cfg(windows)]
+    let desktop = {
+        let mut desktop_candidates = Vec::new();
+        if let Some(local) = env::var_os("LOCALAPPDATA") {
+            desktop_candidates.push(
+                PathBuf::from(&local)
+                    .join("Programs")
+                    .join("Devin")
+                    .join(codex_composer::DEVIN_DESKTOP_EXE_NAME),
+            );
+            desktop_candidates.push(
+                PathBuf::from(local)
+                    .join("Devin")
+                    .join(codex_composer::DEVIN_DESKTOP_EXE_NAME),
+            );
+        }
+        if let Some(programs) = env::var_os("ProgramFiles") {
+            desktop_candidates.push(
+                PathBuf::from(programs)
+                    .join("Devin")
+                    .join(codex_composer::DEVIN_DESKTOP_EXE_NAME),
+            );
+        }
+        desktop_candidates.into_iter().find(|candidate| candidate.is_file())
+    };
+    #[cfg(not(windows))]
+    let desktop: Option<PathBuf> = None;
+    let config_found = root.is_dir();
+    let detected = cloud_enabled || config_found || cli.is_some() || desktop.is_some();
+    let command_path = cli
+        .or_else(|| desktop.map(|path| path.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    let detail = if cloud_enabled {
+        "已启用 Devin 云端会话状态同步".to_string()
+    } else if !command_path.is_empty() {
+        format!("已检测到 Devin Desktop 或 CLI: {command_path}")
+    } else if config_found {
+        format!("已检测到 Devin 配置目录: {}", root.display())
+    } else {
+        "未检测到 Devin Desktop、CLI 或已启用的云端配置".to_string()
+    };
+    DetectedAgent {
+        id: "devin".to_string(),
+        label: "Devin".to_string(),
+        detected,
+        ready: detected,
+        status: if detected { "ready" } else { "not_found" }.to_string(),
+        detail,
+        command_path,
+        config_path: root.to_string_lossy().into_owned(),
+        activity_path: String::new(),
+        can_sync_hook: false,
     }
 }
 
@@ -7225,12 +7585,13 @@ fn find_dsh_cli(home: Option<&Path>, app_path: Option<&Path>) -> Option<PathBuf>
 }
 
 fn find_dsh_profile_dir(home: Option<&Path>) -> Option<PathBuf> {
-    let profile = home?.join(".dsh").join("profiles").join("desktop");
+    let profile = dsh_paths::profile_dir(home, env::var_os("DSH_HOME").as_deref(), &env::current_dir().ok()?)?;
     profile.is_dir().then_some(profile)
 }
 
 fn detect_dsh() -> DetectedAgent {
-    detect_dsh_with_home(get_home_dir().ok().as_deref())
+    let home = dsh_paths::user_home(cfg!(windows), env::var_os("HOME").as_deref(), env::var_os("USERPROFILE").as_deref());
+    detect_dsh_with_home(home.as_deref())
 }
 
 fn detect_dsh_with_home(home: Option<&Path>) -> DetectedAgent {
@@ -7268,7 +7629,26 @@ fn detect_dsh_with_home(home: Option<&Path>) -> DetectedAgent {
     }
 }
 
-fn detect_local_agents_inner() -> Result<AgentDiscoveryResponse, String> {
+fn detect_hermes() -> DetectedAgent {
+    let path = std::env::var_os("HERMES_HOME").map(PathBuf::from)
+        .or_else(|| get_home_dir().ok().map(|home| home.join(".hermes")))
+        .map(|home| home.join("state.db"));
+    let detected = path.as_ref().is_some_and(|path| path.is_file());
+    DetectedAgent {
+        id: "hermes".into(),
+        label: "Hermes Agent".into(),
+        detected,
+        ready: detected,
+        status: if detected { "ready" } else { "not_found" }.into(),
+        detail: if detected { "跟随 Hermes 会话状态" } else { "尚未找到 Hermes 会话数据库" }.into(),
+        command_path: String::new(),
+        config_path: String::new(),
+        activity_path: path.map(|path| path.to_string_lossy().into_owned()).unwrap_or_default(),
+        can_sync_hook: false,
+    }
+}
+
+fn detect_local_agents_inner(devin_cloud_enabled: bool) -> Result<AgentDiscoveryResponse, String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -7281,6 +7661,8 @@ fn detect_local_agents_inner() -> Result<AgentDiscoveryResponse, String> {
         detect_mimocode(),
         detect_dsh(),
         detect_workbuddy(),
+        detect_devin(devin_cloud_enabled),
+        detect_hermes(),
     ];
 
     Ok(AgentDiscoveryResponse {
@@ -7290,10 +7672,59 @@ fn detect_local_agents_inner() -> Result<AgentDiscoveryResponse, String> {
 }
 
 #[tauri::command]
-async fn detect_local_agents() -> Result<AgentDiscoveryResponse, String> {
-    tauri::async_runtime::spawn_blocking(detect_local_agents_inner)
+async fn detect_local_agents(
+    app: tauri::AppHandle,
+) -> Result<AgentDiscoveryResponse, String> {
+    let devin_cloud_enabled = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .is_some_and(|path| devin_cloud::config_enabled(&path));
+    tauri::async_runtime::spawn_blocking(move || detect_local_agents_inner(devin_cloud_enabled))
         .await
         .map_err(|error| format!("Agent detection worker failed: {error}"))?
+}
+
+#[tauri::command]
+async fn devin_cloud_get_config(
+    app: tauri::AppHandle,
+) -> Result<devin_cloud::ConfigResponse, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "配置目录不可用".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || devin_cloud::get_config(&app_data_dir))
+        .await
+        .map_err(|_| "Devin 配置读取失败".to_string())?
+}
+
+#[tauri::command]
+async fn devin_cloud_save_config(
+    app: tauri::AppHandle,
+    token: Option<String>,
+    org_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "配置目录不可用".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        devin_cloud::save_config(&app_data_dir, token, org_id, enabled)
+    })
+    .await
+    .map_err(|_| "Devin 配置保存失败".to_string())?
+}
+
+#[tauri::command]
+async fn devin_cloud_test(app: tauri::AppHandle) -> Result<devin_cloud::TestResponse, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "配置目录不可用".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || devin_cloud::test_connection(&app_data_dir))
+        .await
+        .map_err(|_| "Devin 连接测试失败".to_string())
 }
 
 /// Download raw bytes from a URL on the Rust side, bypassing plugin-http's
@@ -7498,6 +7929,29 @@ async fn usb_connect(
 }
 
 #[tauri::command]
+fn usb_appearance_serial_reset_required(
+    usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
+    expected_board_device_id: String,
+) -> Result<bool, String> {
+    usb_manager.appearance_serial_reset_required(&expected_board_device_id)
+}
+
+#[tauri::command]
+async fn usb_recover_appearance_serial(
+    app_handle: tauri::AppHandle,
+    usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
+    expected_board_device_id: String,
+) -> Result<usb_serial::UsbConnectionStatus, String> {
+    let manager = usb_manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        manager.recover_appearance_serial(&expected_board_device_id, move |topic, payload| {
+            handle_incoming_usb_message(&app_handle, topic, payload);
+        })?;
+        Ok(manager.status())
+    }).await.map_err(|_| "appearance_recovery_worker_failed".to_owned())?
+}
+
+#[tauri::command]
 async fn usb_disconnect(
     usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
 ) -> Result<(), String> {
@@ -7574,7 +8028,8 @@ fn usb_bubble_pixels_ready(
     } else {
         None
     };
-    let changed = usb_manager.set_bubble_renderer(&instance, sink);
+    let changed = usb_manager.set_bubble_renderer(&instance, sink.clone());
+    if changed { lan_agent::bubble_pixels::set_renderer(&instance, sink); }
     if ready && !changed { return Err("Invalid bubble renderer instance".into()); }
     Ok(())
 }
@@ -7591,7 +8046,11 @@ async fn usb_send_bubble_pixels(
     let lease = manager.reserve_bubble_worker(&frame)?;
     tauri::async_runtime::spawn_blocking(move || {
         let _lease = lease;
-        manager.send_bubble_pixels(frame)
+        if frame.wifi {
+            lan_agent::bubble_pixels::send(&manager, frame)
+        } else {
+            manager.send_bubble_pixels(frame)
+        }
     })
     .await
     .map_err(|_| "BUBBLE_FALLBACK: worker stopped".to_string())?
@@ -7657,8 +8116,12 @@ async fn usb_device_volume(
 async fn usb_set_screen_page(
     usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
     page: String,
+    expected_board_device_id: Option<String>,
 ) -> Result<(), String> {
     let payload = serde_json::json!({ "page": page });
+    if let Some(board) = expected_board_device_id.as_deref() {
+        return usb_manager.send_to_board(board, "control/screen-page", &payload);
+    }
     usb_manager.send("control/screen-page", &payload)
 }
 
@@ -7714,6 +8177,41 @@ async fn usb_get_diagnostics(
         object.insert("desktopBuild".to_string(), desktop_build_info());
     }
     Ok(report)
+}
+
+fn bluetooth_keyboard_payload(
+    enabled: Option<bool>,
+    slot: Option<u8>,
+    chord: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let payload = match (enabled, slot, chord) {
+        (None, None, None) => serde_json::json!({}),
+        (Some(enabled), None, None) => serde_json::json!({"enabled": enabled}),
+        (None, Some(slot @ 0..=19), Some(chord)) =>
+            serde_json::json!({"slot": slot, "chord": chord}),
+        _ => return Err("蓝牙快捷键配置无效".into()),
+    };
+    Ok(payload)
+}
+
+#[tauri::command]
+async fn usb_bluetooth_keyboard_config(
+    usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
+    board_device_id: String,
+    connection_id: String,
+    enabled: Option<bool>,
+    slot: Option<u8>,
+    chord: Option<u16>,
+) -> Result<serde_json::Value, String> {
+    let payload = bluetooth_keyboard_payload(enabled, slot, chord)?;
+    let connection_id = connection_id.parse::<u64>().ok().filter(|id| *id != 0)
+        .ok_or_else(|| "无法确认设备连接".to_owned())?;
+    let manager = usb_manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        manager.bluetooth_keyboard_config(&board_device_id, connection_id, payload)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -7815,23 +8313,104 @@ fn bundled_p4_firmware_path(app_handle: &tauri::AppHandle, resource: &str) -> Re
         })
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BundledFirmwareInfo {
+    board_model: Option<&'static str>,
+    current_version: String,
+    version: String,
+    rollback_blocked: bool,
+}
+
+async fn resolve_bundled_firmware(
+    app_handle: &tauri::AppHandle,
+    manager: &usb_serial::UsbSerialManager,
+    expected_board_device_id: &str,
+    expected_connection_id: &str,
+    confirmed_board_model: Option<&str>,
+    preview_only: bool,
+) -> Result<(Option<PathBuf>, BundledFirmwareInfo), String> {
+    let matches_connection = |status: &usb_serial::UsbConnectionStatus| {
+        status.connected && status.runtime == "esp-p4"
+            && !expected_board_device_id.is_empty()
+            && status.board_device_id == expected_board_device_id
+            && !expected_connection_id.is_empty()
+            && status.connection_id == expected_connection_id
+    };
+    let initial = manager.status();
+    if !matches_connection(&initial) {
+        return Err("USB 设备连接已切换".into());
+    }
+    let chip_manager = manager.clone();
+    let chip_board_id = expected_board_device_id.to_owned();
+    let target = tauri::async_runtime::spawn_blocking(move || {
+        chip_manager.firmware_chip_target(&chip_board_id)
+    }).await.map_err(|error| error.to_string())??;
+    let board = match usb_serial::board_model_from_device(&initial.capabilities, confirmed_board_model) {
+        Ok(board) => Some(board),
+        Err(error) if preview_only && error == usb_serial::BOARD_MODEL_REQUIRED => None,
+        Err(error) => return Err(error),
+    };
+    let inspect = |board: usb_serial::P4BoardModel| {
+        let path = bundled_p4_firmware_path(app_handle, usb_serial::bundled_resource_for_device(board, target))?;
+        let info = usb_serial::inspect_firmware_image(&path, target)?;
+        if !board.image_version_matches(&info.version) {
+            return Err("内置固件的板型标记不匹配".into());
+        }
+        Ok::<_, String>((path, info))
+    };
+    let (path, version, rollback_blocked) = if let Some(board) = board {
+        let (path, info) = inspect(board)?;
+        let directory = firmware_rollback::directory(&app_handle.path().app_data_dir().map_err(|e| e.to_string())?);
+        let blocked = firmware_rollback::is_blocked(&directory, expected_board_device_id, &info.sha256)?;
+        (Some(path), info.version, blocked)
+    } else {
+        // Without a board identity we can still rule out updates if neither
+        // compatible image is newer. There is no write path for this result.
+        let wifi6 = inspect(usb_serial::P4BoardModel::Wifi6)?.1.version;
+        let pico = inspect(usb_serial::P4BoardModel::Pico)?.1.version;
+        let newest = if compare_firmware_versions(&wifi6, &pico)? == VersionOrdering::Less {
+            pico
+        } else {
+            wifi6
+        };
+        (None, newest, false)
+    };
+    let status = manager.status();
+    if !matches_connection(&status) {
+        return Err("USB 设备连接已切换".into());
+    }
+    match (board, usb_serial::board_model_from_device(&status.capabilities, confirmed_board_model)) {
+        (Some(expected), Ok(actual)) if expected == actual => {}
+        (None, Err(error)) if error == usb_serial::BOARD_MODEL_REQUIRED => {
+            if compare_firmware_versions(&status.firmware, &version)? == VersionOrdering::Less {
+                return Err(error);
+            }
+        }
+        _ => return Err("USB 设备板型已切换".into()),
+    }
+    Ok((path, BundledFirmwareInfo {
+        board_model: board.map(usb_serial::P4BoardModel::as_str),
+        current_version: status.firmware,
+        version,
+        rollback_blocked,
+    }))
+}
+
 #[tauri::command]
-fn usb_get_bundled_firmware_info(
+async fn usb_get_bundled_firmware_info(
     app_handle: tauri::AppHandle,
     usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
-) -> Result<usb_serial::FirmwareImageInfo, String> {
-    let status = usb_manager.status();
-    let target = if status.connected && status.runtime.eq_ignore_ascii_case("esp-p4")
-        && status.capabilities.pointer("/firmwareUpdate/chipRevision").is_some() {
-        usb_serial::chip_target_from_device(&status.capabilities, None)?
-    } else {
-        // Both bundles must have the same version. Read common metadata without
-        // a serial query while discovery/appearance sync may be using the port.
-        // This is not an upgrade decision: the update command verifies the chip.
-        usb_serial::P4ChipTarget::LegacyV1
-    };
-    let path = bundled_p4_firmware_path(&app_handle, usb_serial::bundled_resource_for_chip(target))?;
-    usb_serial::inspect_firmware_image(&path)
+    expected_board_device_id: String,
+    expected_connection_id: String,
+) -> Result<Option<BundledFirmwareInfo>, String> {
+    match resolve_bundled_firmware(
+        &app_handle, usb_manager.inner(), &expected_board_device_id, &expected_connection_id, None, true,
+    ).await {
+        Ok((_, info)) => Ok(Some(info)),
+        Err(error) if error == usb_serial::BOARD_MODEL_REQUIRED => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 async fn run_usb_firmware_update(
@@ -7839,15 +8418,22 @@ async fn run_usb_firmware_update(
     manager: usb_serial::UsbSerialManager,
     firmware_path: PathBuf,
     expected_board_device_id: String,
+    expected_connection_id: Option<String>,
+    confirmed_board_model: Option<String>,
 ) -> Result<usb_serial::FirmwareUpdateResult, String> {
     let emitter = app_handle.clone();
     let reconnect_manager = manager.clone();
     let reconnect_app = app_handle.clone();
     let reconnect_board_device_id = expected_board_device_id.clone();
+    let rollback_directory = firmware_rollback::directory(&app_handle.path().app_data_dir().map_err(|e| e.to_string())?);
     tauri::async_runtime::spawn_blocking(move || {
+        let _update = firmware_rollback::start_update()?;
         manager.update_firmware(
             &firmware_path,
             &expected_board_device_id,
+            expected_connection_id.as_deref(),
+            confirmed_board_model.as_deref(),
+            Some(&rollback_directory),
             |bytes_sent, bytes_total, stage| {
                 let percent = if bytes_total == 0 {
                     0
@@ -7901,6 +8487,8 @@ async fn usb_update_firmware(
         usb_manager.inner().clone(),
         path,
         expected_board_device_id,
+        None,
+        None,
     )
     .await
 }
@@ -7910,30 +8498,29 @@ async fn usb_update_bundled_firmware(
     app_handle: tauri::AppHandle,
     usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
     expected_board_device_id: String,
+    expected_connection_id: String,
+    confirmed_board_model: Option<String>,
 ) -> Result<usb_serial::FirmwareUpdateResult, String> {
     let manager = usb_manager.inner().clone();
-    let chip_manager = manager.clone();
-    let chip_board_id = expected_board_device_id.clone();
-    let target = tauri::async_runtime::spawn_blocking(move || {
-        chip_manager.firmware_chip_target(&chip_board_id)
-    }).await.map_err(|error| error.to_string())??;
-    let firmware_path = bundled_p4_firmware_path(&app_handle, usb_serial::bundled_resource_for_chip(target))?;
-    let firmware_info = usb_serial::inspect_firmware_image(&firmware_path)?;
+    let (firmware_path, firmware_info) = resolve_bundled_firmware(
+        &app_handle, &manager, &expected_board_device_id, &expected_connection_id,
+        confirmed_board_model.as_deref(), false,
+    ).await?;
+    let firmware_path = firmware_path.ok_or(usb_serial::BOARD_MODEL_REQUIRED)?;
     let status = manager.status();
-    if !status.connected || status.board_device_id != expected_board_device_id {
-        return Err("connected USB board changed before bundled firmware update".to_string());
-    }
-    if !status.runtime.eq_ignore_ascii_case("esp-p4") {
-        return Err("bundled firmware update is only supported by ESP32-P4".to_string());
+    if !status.connected || status.board_device_id != expected_board_device_id
+        || status.connection_id != expected_connection_id
+    {
+        return Err("USB 设备连接已切换".into());
     }
     if compare_firmware_versions(&status.firmware, &firmware_info.version)? != VersionOrdering::Less
     {
-        return Err(format!(
-            "device firmware {} is already newer than or equal to bundled firmware {}",
-            status.firmware, firmware_info.version
-        ));
+        return Err("firmware_already_latest".into());
     }
-    run_usb_firmware_update(app_handle, manager, firmware_path, expected_board_device_id).await
+    run_usb_firmware_update(
+        app_handle, manager, firmware_path, expected_board_device_id,
+        Some(expected_connection_id), confirmed_board_model,
+    ).await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8488,6 +9075,10 @@ const SKILL_TARGETS: &[SkillTarget] = &[
         agent: "Cursor",
         home_dir: ".cursor",
     },
+    SkillTarget {
+        agent: "Devin",
+        home_dir: "devin",
+    },
 ];
 
 const SKILL_NAME: &str = "petui";
@@ -8559,6 +9150,28 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
     Ok(count)
 }
 
+fn petui_skill_matches(source: &Path, installed: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(source) else { return false };
+    entries.into_iter().all(|entry| {
+        let Ok(entry) = entry else { return false };
+        let name = entry.file_name();
+        if name == "__pycache__" || name == ".DS_Store" || Path::new(&name).extension().is_some_and(|ext| ext == "pyc") {
+            return true;
+        }
+        let target = installed.join(name);
+        let Ok(kind) = entry.file_type() else { return false };
+        if kind.is_dir() {
+            fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_dir())
+                && petui_skill_matches(&entry.path(), &target)
+        } else if kind.is_file() {
+            fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_file())
+                && fs::read(entry.path()).is_ok_and(|source| fs::read(target).is_ok_and(|bytes| bytes == source))
+        } else {
+            true
+        }
+    })
+}
+
 fn install_skill_into_agent(
     src: &std::path::Path,
     agent_home: &std::path::Path,
@@ -8567,7 +9180,8 @@ fn install_skill_into_agent(
     let skills_root = agent_home.join("skills");
     std::fs::create_dir_all(&skills_root).map_err(|e| format!("create skills root: {}", e))?;
     let dst = skills_root.join(SKILL_NAME);
-    let overwrote = dst.exists()
+    let has_previous = fs::symlink_metadata(&dst).is_ok();
+    let overwrote = has_previous
         || LEGACY_SKILL_NAMES
             .iter()
             .any(|legacy_name| skills_root.join(legacy_name).exists());
@@ -8581,14 +9195,14 @@ fn install_skill_into_agent(
             return Err(format!("拷贝到临时目录失败: {error}"));
         }
     };
-    if dst.exists() {
+    if has_previous {
         std::fs::rename(&dst, &backup).map_err(|error| {
             let _ = std::fs::remove_dir_all(&staging);
             format!("备份旧 skill 目录失败: {error}")
         })?;
     }
     if let Err(error) = std::fs::rename(&staging, &dst) {
-        let restore_error = if backup.exists() {
+        let restore_error = if has_previous {
             std::fs::rename(&backup, &dst).err()
         } else {
             None
@@ -8601,9 +9215,10 @@ fn install_skill_into_agent(
             None => format!("切换新版 skill 失败，已保留旧版: {error}"),
         });
     }
-    if backup.exists() {
-        std::fs::remove_dir_all(&backup)
-            .map_err(|error| format!("新版已安装，但清理旧 skill 备份失败: {error}"))?;
+    if has_previous {
+        let previous = fs::symlink_metadata(&backup).map_err(|e| e.to_string())?;
+        let result = if previous.is_dir() { fs::remove_dir_all(&backup) } else { fs::remove_file(&backup) };
+        result.map_err(|error| format!("新版已安装，但清理旧 skill 备份失败: {error}"))?;
     }
     for legacy_name in LEGACY_SKILL_NAMES {
         let legacy = skills_root.join(legacy_name);
@@ -8625,19 +9240,27 @@ fn install_skill_into_agent(
     })
 }
 
-#[tauri::command]
-async fn install_widget_skill(
-    app_handle: tauri::AppHandle,
-) -> Result<InstallWidgetSkillResult, String> {
-    let src = resolve_skill_source_dir(&app_handle)?;
-    let home = get_home_dir().map_err(|e| e.to_string())?;
+fn sync_widget_skills(src: &Path, home: &Path) -> Result<InstallWidgetSkillResult, String> {
+    static SYNC: Mutex<()> = Mutex::new(());
+    let _lock = SYNC.lock().map_err(|_| "PetUI Skill 正在更新")?;
+    fs::create_dir_all(home.join(".agents")).map_err(|e| e.to_string())?;
 
     let mut installed: Vec<SkillInstallEntry> = Vec::new();
     let mut skipped: Vec<SkillSkipEntry> = Vec::new();
 
     for target in SKILL_TARGETS {
         let home_subdir = if target.agent == "WorkBuddy" {
-            workbuddy_config_dir(&home)
+            match workbuddy_config_dir(home) {
+                Ok(path) => path,
+                Err(reason) => {
+                    skipped.push(SkillSkipEntry {
+                        agent: target.agent.into(), home_dir: target.home_dir.into(), reason,
+                    });
+                    continue;
+                }
+            }
+        } else if target.agent == "Devin" {
+            devin_config_dir(home)
         } else {
             home.join(target.home_dir)
         };
@@ -8649,22 +9272,26 @@ async fn install_widget_skill(
             });
             continue;
         }
-        match install_skill_into_agent(&src, &home_subdir, target.agent) {
+        let skills = home_subdir.join("skills");
+        let current = skills.join(SKILL_NAME);
+        if fs::symlink_metadata(&current).is_ok_and(|meta| meta.is_dir())
+            && !LEGACY_SKILL_NAMES.iter().any(|name| skills.join(name).exists())
+            && petui_skill_matches(src, &current)
+            && petui_skill_matches(&current, src)
+        {
+            installed.push(SkillInstallEntry {
+                agent: target.agent.into(), home_dir: target.home_dir.into(),
+                target_path: current.display().to_string(), file_count: 0, overwrote: false,
+            });
+            continue;
+        }
+        match install_skill_into_agent(src, &home_subdir, target.agent) {
             Ok(entry) => installed.push(entry),
             Err(e) => skipped.push(SkillSkipEntry {
                 agent: target.agent.to_string(),
                 home_dir: target.home_dir.to_string(),
                 reason: format!("拷贝失败: {}", e),
             }),
-        }
-    }
-
-    // Fallback: nothing detected -> force-install to Claude's standard home.
-    if installed.is_empty() {
-        let fallback_home = home.join(".claude");
-        match install_skill_into_agent(&src, &fallback_home, "Claude (fallback)") {
-            Ok(entry) => installed.push(entry),
-            Err(e) => return Err(format!("fallback 安装也失败: {}", e)),
         }
     }
 
@@ -8677,10 +9304,69 @@ async fn install_widget_skill(
     })
 }
 
+#[tauri::command]
+async fn install_widget_skill(app_handle: tauri::AppHandle) -> Result<InstallWidgetSkillResult, String> {
+    let src = resolve_skill_source_dir(&app_handle)?;
+    let home = get_home_dir()?;
+    tauri::async_runtime::spawn_blocking(move || sync_widget_skills(&src, &home))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[doc(hidden)]
+pub fn run_petui_cli(args: &[std::ffi::OsString]) -> Result<String, String> {
+    petui_authoring::cli(args)
+}
+
+#[tauri::command]
+async fn prepare_petui_authoring(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let skill = resolve_skill_source_dir(&app)?;
+    let home = get_home_dir()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let skills = sync_widget_skills(&skill, &home)?;
+        if !skills.installed.iter().any(|entry| entry.home_dir == ".agents") {
+            return Err("无法更新共享 PetUI Skill".into());
+        }
+        let command = petui_authoring::install_launcher(&home, &skill)?;
+        petui_authoring::ensure_healthy(&skill)?;
+        Ok(serde_json::json!({
+            "command": command,
+            "skillPath": home.join(".agents/skills/petui"),
+            "skillWarnings": skills.skipped.iter().filter(|entry| entry.reason.starts_with("拷贝失败"))
+                .map(|entry| format!("{}：{}", entry.agent, entry.reason)).collect::<Vec<_>>(),
+        }))
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn build_petui_project(
+    app: tauri::AppHandle,
+    usb_manager: tauri::State<'_, usb_serial::UsbSerialManager>,
+    project: String,
+) -> Result<serde_json::Value, String> {
+    let skill = resolve_skill_source_dir(&app)?;
+    let home = get_home_dir()?;
+    let resources = app.path().resource_dir().map_err(|e| e.to_string())?;
+    let manager = usb_manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let archive = directory.path().join("component.hachiapp");
+        petui_authoring::build_project(&resources, &skill, Path::new(&project), &archive)?;
+        let entry = component_library::import_hachiapp(&home, &archive)?;
+        let delivery = match manager.check_petui_delivery(&entry.id, Path::new(&entry.path)) {
+            Ok(Some(())) => serde_json::json!({"state":"ready"}),
+            Ok(None) => serde_json::json!({"state":"offline"}),
+            Err(error) => serde_json::json!({"state":"blocked","message":error}),
+        };
+        Ok(serde_json::json!({"entry":entry,"delivery":delivery}))
+    }).await.map_err(|e| e.to_string())?
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InstallClawpkgInput {
     clawpkg_path: String,
+    #[serde(default)]
+    expected_version_hash: Option<String>,
     #[serde(default)]
     expected_board_device_id: Option<String>,
     /// Optional footer slot override — generated client-side from the user's
@@ -8688,6 +9374,8 @@ struct InstallClawpkgInput {
     /// the install payload. Only used for legacy zip-based static dashboards.
     #[serde(default)]
     footer_override: Option<String>,
+    #[serde(default)]
+    center_title: Option<usb_serial::ComponentCenterTitle>,
     /// Action-id → new-control map from ComponentCenter's "按钮功能" UI.
     /// Used by the new widget OTA path (directory clawpkg) to rewrite
     /// buttons.json before pushing. Empty for legacy zip flow.
@@ -9236,15 +9924,6 @@ async fn install_clawpkg_over_usb(
     }
     if input.expected_board_device_id.as_deref().is_some_and(|id|id!=status.board_device_id){return Err("设备已切换，请重新确认安装目标".into());}
 
-    // Recheck immediately before any transaction. UI preflight alone is not a grant.
-    let manager = usb_manager.inner().clone();
-    let board = status.board_device_id.clone();
-    let audio = tauri::async_runtime::spawn_blocking(move || manager.component_sync_audio_status(&board))
-        .await.map_err(|e|e.to_string())??;
-    if audio["blocked"] == true {
-        return Err(audio["message"].as_str().unwrap_or("请先停止播放或结束语音，再重新检查并同步。").into());
-    }
-
     /* validate */
     let path = std::path::PathBuf::from(&input.clawpkg_path);
     let validation = crate::clawpkg::validate_clawpkg_at_path(&path)?;
@@ -9260,6 +9939,20 @@ async fn install_clawpkg_over_usb(
         .manifest
         .clone()
         .ok_or_else(|| "manifest 缺失".to_string())?;
+    manifest.sync_requirements.check_usb(&status.capabilities)?;
+    if !path.is_dir() && manifest.sync_requirements.requires_usb_capabilities() {
+        return Err("请先导入组件包，再从「我的组件」同步服务桥组件。".into());
+    }
+
+    // Recheck immediately before any transaction. UI preflight alone is not a grant.
+    let manager = usb_manager.inner().clone();
+    let board = status.board_device_id.clone();
+    let audio = tauri::async_runtime::spawn_blocking(move || manager.component_sync_audio_status(&board))
+        .await.map_err(|e|e.to_string())??;
+    if audio["blocked"] == true {
+        return Err(audio["message"].as_str().unwrap_or("请先停止播放或结束语音，再重新检查并同步。").into());
+    }
+
     let widget_id = manifest.id.clone();
 
     /* Dispatch on clawpkg shape:
@@ -9275,11 +9968,17 @@ async fn install_clawpkg_over_usb(
         let mgr = usb_manager.inner().clone();
         let src = path.clone();
         let overrides = input.binding_overrides.clone();
+        let center_title = input.center_title;
         let wid = widget_id.clone();
         let expected_board=input.expected_board_device_id.clone().unwrap_or(status.board_device_id);
         let (files, bytes) =
             tauri::async_runtime::spawn_blocking(move || -> Result<(u32, u64), String> {
-                mgr.install_widget_clawpkg_on_board(&expected_board,&wid,&src,&overrides,|current,total,sent|{
+                if let Some(expected) = input.expected_version_hash.as_deref() {
+                    if component_library::package_content_hash(&src)? != expected {
+                        return Err("组件内容与打开的试玩版本不一致，请刷新组件详情后同步".into());
+                    }
+                }
+                mgr.install_widget_clawpkg_with_title(&expected_board,&wid,&src,&overrides,center_title.as_ref(),|current,total,sent|{
                     let _=app.emit("component-install-progress",serde_json::json!({"componentId":wid,"boardDeviceId":expected_board,"current":current,"total":total,"bytes":sent}));
                 })
             })
@@ -9364,6 +10063,8 @@ struct InstallClawpkgSshInput {
     /// agent — we don't accept passwords here (privacy / one-off PAT semantics
     /// don't apply to long-lived SSH sessions).
     ssh_host: String,
+    #[serde(default)]
+    expected_version_hash: Option<String>,
     /// Action-id → new-control map from ComponentCenter's "按钮功能" UI.
     /// Empty map = no overrides, use buttons.json as-shipped.
     #[serde(default)]
@@ -9388,6 +10089,7 @@ async fn install_clawpkg_over_ssh(
         .manifest
         .clone()
         .ok_or_else(|| "manifest 缺失".to_string())?;
+    manifest.sync_requirements.check_unnegotiated_transport()?;
     let widget_id = manifest.id.clone();
 
     let ssh_host = normalize_widget_ssh_host(&input.ssh_host)?
@@ -9408,6 +10110,9 @@ async fn install_clawpkg_over_ssh(
             std::fs::create_dir_all(&stage_widget).map_err(|e| e.to_string())?;
             let f = std::fs::File::open(&src).map_err(|e| format!("open zip: {}", e))?;
             let mut archive = zip::ZipArchive::new(f).map_err(|e| format!("read zip: {}", e))?;
+            if archive.has_duplicate_names() {
+                return Err("clawpkg 含重复路径".into());
+            }
             if archive.len() > crate::clawpkg::CLAWPKG_MAX_ENTRIES {
                 return Err("clawpkg 文件数超过安全上限".to_string());
             }
@@ -9416,16 +10121,16 @@ async fn install_clawpkg_over_ssh(
                 let entry = archive.by_index(i).map_err(|e| e.to_string())?;
                 let relative_path = entry
                     .enclosed_name()
-                    .ok_or_else(|| format!("clawpkg 含不安全路径: {}", entry.name()))?
+                    .ok_or("clawpkg 含不安全路径")?
                     .to_path_buf();
                 if entry
                     .unix_mode()
                     .is_some_and(|mode| mode & 0o170000 == 0o120000)
                 {
-                    return Err(format!("clawpkg 不允许符号链接: {}", entry.name()));
+                    return Err("clawpkg 不允许符号链接".into());
                 }
                 if entry.size() > crate::clawpkg::CLAWPKG_MAX_ENTRY_BYTES {
-                    return Err(format!("clawpkg 文件过大: {}", entry.name()));
+                    return Err("clawpkg 文件过大".into());
                 }
                 expanded_bytes = expanded_bytes
                     .checked_add(entry.size())
@@ -9449,6 +10154,19 @@ async fn install_clawpkg_over_ssh(
                     }
                 }
             }
+        }
+
+        if let Some(expected) = input.expected_version_hash.as_deref() {
+            if component_library::package_content_hash(&stage_widget)? != expected {
+                return Err("组件内容与打开的试玩版本不一致，请刷新组件详情后同步".into());
+            }
+        }
+        let wasm = stage_widget.join("runtime/app.wasm");
+        if wasm.is_file() {
+            let validation = crate::clawpkg::validate_clawpkg_at_path(&stage_widget)?;
+            if !validation.ok { return Err(validation.errors.join("；")); }
+            let bytes = crate::clawpkg::read_clawpkg_source_file(&wasm, crate::clawpkg::HACHI_MAX_MODULE_BYTES as u64)?;
+            petui_authoring::validate_wasm(&bytes)?;
         }
 
         // Step 2: apply binding overrides to staged buttons.json
@@ -9774,9 +10492,12 @@ fn canonical_binding_for_control(control: &str) -> Option<(&'static str, &'stati
         "屏幕点击" => ("屏幕区域", "screen.region.tap"),
         "屏幕长按" => ("屏幕区域", "screen.region.long_press"),
         "SW1 短按" => ("SW1", "button.sw1.short_press"),
+        "SW1 双击" => ("SW1", "button.sw1.double_press"),
         "SW1 长按" => ("SW1", "button.sw1.long_press"),
         "SW2 短按" => ("SW2", "button.sw2.short_press"),
+        "SW2 双击" => ("SW2", "button.sw2.double_press"),
         "SW3 短按" => ("SW3", "button.sw3.short_press"),
+        "SW3 双击" => ("SW3", "button.sw3.double_press"),
         "摇杆中按短按" => ("前方摇杆", "button.encoder.short_press"),
         "摇杆中按长按" => ("前方摇杆", "button.encoder.long_press"),
         "摇杆向上" => ("前方摇杆", "joystick.up"),
@@ -10000,6 +10721,43 @@ async fn list_component_library(app: tauri::AppHandle) -> Result<component_libra
         .map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+async fn import_hachiapp(path: String) -> Result<component_library::ComponentLibraryEntry, String> {
+    let home = get_home_dir()?;
+    tauri::async_runtime::spawn_blocking(move || component_library::import_hachiapp(&home, &PathBuf::from(path)))
+        .await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn read_component_wasm_preview(id: String, version_hash: String, sha256: String) -> Result<Vec<u8>, String> {
+    let home = get_home_dir()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let module = component_library::wasm_preview_module(&home, &id, &version_hash, &sha256)?;
+        petui_authoring::validate_wasm(&module)?;
+        Ok(module)
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn open_wasm_preview(bytes: Vec<u8>, epoch: u64, offset: i32) -> Result<String,String> {
+    tauri::async_runtime::spawn_blocking(move || wasm_preview_session::open(bytes,epoch,offset)).await.map_err(|e|e.to_string())?
+}
+#[tauri::command]
+async fn tick_wasm_preview(id: String, dt: u32, events: Vec<[i32;3]>, epoch: u64, offset: i32) -> Result<Vec<serde_json::Value>,String> {
+    tauri::async_runtime::spawn_blocking(move || wasm_preview_session::tick(&id,dt,events,epoch,offset)).await.map_err(|e|e.to_string())?
+}
+#[tauri::command]
+async fn close_wasm_preview(id: String) { let _=tauri::async_runtime::spawn_blocking(move || wasm_preview_session::close(&id)).await; }
+
+#[tauri::command]
+async fn read_component_wasm_audio(id: String, version_hash: String, sha256: String) -> Result<tauri::ipc::Response, String> {
+    let home = get_home_dir()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        component_library::wasm_preview_audio(&home, &id, &version_hash, &sha256)
+            .map(tauri::ipc::Response::new)
+    }).await.map_err(|error| error.to_string())?
+}
+
 /// Inspect an arbitrary package for sync preflight without publishing it.
 #[tauri::command]
 async fn inspect_clawpkg(path: String) -> Result<component_library::ComponentLibraryEntry, String> {
@@ -10083,6 +10841,7 @@ fn normalize_agent_id(value: &str) -> Option<String> {
         "mimo" | "mimo-code" | "mimocode" => Some("mimocode".to_string()),
         "deepseek-harness" | "deepseek" | "dsh" => Some("deepseek-harness".to_string()),
         "workbuddy" | "work-buddy" => Some("workbuddy".to_string()),
+        "devin" | "devin-desktop" | "devin desktop" => Some("devin".to_string()),
         "copilot" | "copilot-cli" => Some("copilot-cli".to_string()),
         "gemini" | "gemini-cli" => Some("gemini-cli".to_string()),
         "cursor" => Some("cursor".to_string()),
@@ -10553,7 +11312,7 @@ fn score_usb_state(state: &str) -> i32 {
         "speaking" => 40,
         "waiting_user" => 30,
         "done" => 15,
-        "idle" => 10,
+        "idle" | "sleeping" => 10,
         _ => 5,
     }
 }
@@ -10622,6 +11381,8 @@ fn usb_source_display_name(source: &str) -> String {
         "mimo" | "mimo-code" | "mimocode" => "MiMoCode".to_string(),
         "deepseek-harness" | "deepseek" | "dsh" => "DeepSeek Harness".to_string(),
         "workbuddy" | "work-buddy" => "WorkBuddy".to_string(),
+        "devin" | "devin-desktop" | "devin desktop" => "Devin".to_string(),
+        "hermes" => "Hermes Agent".to_string(),
         other if !other.is_empty() => other.to_string(),
         _ => "桌宠".to_string(),
     }
@@ -10635,6 +11396,7 @@ fn usb_state_display_text(state: &str) -> Option<&'static str> {
         "waiting_user" => Some("等待操作"),
         "done" => Some("已完成"),
         "error" => Some("出错了"),
+        "sleeping" => Some("已暂停"),
         _ => None,
     }
 }
@@ -10688,6 +11450,9 @@ fn pick_best_usb_bridge_state(
     exclude_speaking: bool,
     board_device_id: &str,
 ) -> Option<(String, serde_json::Value)> {
+    pick_best_bridge_state(exclude_speaking, |source,payload| usb_session_binding_allows(board_device_id,source,payload))
+}
+fn pick_best_bridge_state(exclude_speaking:bool, allows:impl Fn(&str,&serde_json::Value)->bool)->Option<(String,serde_json::Value)>{
     let tmp = env::var("TMPDIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| env::temp_dir());
@@ -10724,7 +11489,7 @@ fn pick_best_usb_bridge_state(
         if !retain_fresh_usb_state_payload(&path, &payload, now_ms) {
             continue;
         }
-        if !usb_session_binding_allows(board_device_id, &source, &payload) {
+        if !allows(&source, &payload) {
             continue;
         }
 
@@ -10971,17 +11736,48 @@ fn forward_usb_speech_updates(
 
 /// Keep the board's host lease alive independently from state and speech scans.
 fn start_usb_host_heartbeat(usb_manager: usb_serial::UsbSerialManager) {
-    thread::spawn(move || loop {
-        thread::sleep(Duration::from_secs(2));
-        retire_changed_device_voice_transport(&usb_manager);
-        if !usb_manager.status().connected {
-            continue;
-        }
-        if let Err(error) = usb_manager.send(
-            "system/heartbeat",
-            &serde_json::json!({ "tsMs": current_timestamp_ms() }),
-        ) {
-            eprintln!("[usb-heartbeat] send failed: {}", error);
+    thread::spawn(move || {
+        let mut fail_streak = 0u64;
+        let mut generation = String::new();
+        loop {
+            thread::sleep(Duration::from_secs(2));
+            retire_changed_device_voice_transport(&usb_manager);
+            let status = usb_manager.status();
+            if status.connection_id != generation {
+                generation = status.connection_id;
+                fail_streak = 0;
+            }
+            if !status.connected || usb_manager.board_wedged() {
+                fail_streak = 0;
+                continue;
+            }
+            match usb_manager.send(
+                "system/heartbeat",
+                &serde_json::json!({ "tsMs": current_timestamp_ms() }),
+            ) {
+                Ok(()) => {
+                    fail_streak = 0;
+                }
+                Err(error) => {
+                    fail_streak += 1;
+                    // Wedge detection: repeated write failures combined with a
+                    // fully silent RX path mean the board (or its UART bridge)
+                    // is deadlocked. Stop touching the port; the reader will
+                    // retire the dead connection and auto-reconnect reopens it.
+                    let rx_age_ms =
+                        current_timestamp_ms().saturating_sub(usb_manager.last_rx_activity_ms());
+                    if fail_streak >= 5 && rx_age_ms >= 30_000
+                        && usb_manager.status().connection_id == generation {
+                        usb_manager.mark_board_wedged();
+                        eprintln!(
+                            "[usb-heartbeat] board wedged: {} consecutive failed heartbeats, RX silent {}ms; writes stopped, re-plug USB to recover",
+                            fail_streak, rx_age_ms
+                        );
+                    } else {
+                        eprintln!("[usb-heartbeat] send failed: {}", error);
+                    }
+                }
+            }
         }
     });
 }
@@ -11394,13 +12190,13 @@ fn start_usb_auto_connect(usb_manager: usb_serial::UsbSerialManager, app_handle:
                         continue;
                     }
                     let port_name = dev.port_name.clone();
-                    eprintln!("[usb-auto] probing {}", port_name);
                     let emitter = app_handle.clone();
                     let result = usb_manager.connect_for_auto(&port_name, move |topic, payload| {
                         handle_incoming_usb_message(&emitter, topic, payload);
                     });
                     match result {
-                        Ok(_) => {
+                        Ok(false) => break,
+                        Ok(true) => {
                             failed_probes.remove(&probe_key);
                             program_autostart::native::connected(&usb_manager);
                             let verified = usb_manager.status();
@@ -11460,17 +12256,14 @@ fn frontend_startup_ready(window: tauri::WebviewWindow, supervisor: tauri::State
 }
 
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    if !cfg!(feature = "composer-diagnostic") && !desktop_takeover_macos::prepare_launch() {
+        return;
+    }
     let usb_manager = usb_serial::UsbSerialManager::new();
-    if !cfg!(feature = "composer-diagnostic") {
-    if let Err(error) = sync_usb_desktop_device_id(&usb_manager) {
-        eprintln!("[usb-identity] desktop id unavailable: {}", error);
-    }
-    start_usb_host_heartbeat(usb_manager.clone());
-    start_usb_state_forwarder(usb_manager.clone());
-    dsh_approval::start(usb_manager.clone());
-    }
-
     let usb_for_auto = usb_manager.clone();
+    let owns_runtime = std::sync::Arc::new(AtomicBool::new(false));
+    let owns_runtime_at_setup = owns_runtime.clone();
 
     let app = tauri::Builder::default()
         .manage(startup_supervision::Supervisor::default())
@@ -11503,7 +12296,35 @@ pub fn run() {
                 if let Some(window) = app.get_webview_window("main") { window.show()?; }
                 return Ok(());
             }
+            let usb_transfer_log =
+                app.path().app_local_data_dir().map_err(|error| error.to_string())
+                    .and_then(|dir| usb_serial::configure_transfer_logging(&dir));
+            if usb_transfer_log.is_err() {
+                // Another launch may have won the journal lock after discovery.
+                // Leave the window hidden and do not start USB or the sidecars.
+                eprintln!("[desktop-launch] USB safety storage unavailable");
+                app.handle().exit(1);
+                return Ok(());
+            }
+            owns_runtime_at_setup.store(true, Ordering::Release);
+            let authoring_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = prepare_petui_authoring(authoring_app).await {
+                    eprintln!("[petui-prepare] {error}");
+                }
+            });
+            if let Err(error) = sync_usb_desktop_device_id(&usb_for_auto) {
+                eprintln!("[usb-identity] desktop id unavailable: {error}");
+            }
+            lan_agent::start(app.handle().clone(), usb_for_auto.clone());
+            start_usb_host_heartbeat(usb_for_auto.clone());
+            start_usb_state_forwarder(usb_for_auto.clone());
+            dsh_approval::start(usb_for_auto.clone());
             app.state::<startup_supervision::Supervisor>().start(app.handle().clone())?;
+            #[cfg(target_os = "macos")]
+            if let Err(error) = desktop_window::guard_macos_system_quit(app.handle()) {
+                eprintln!("[desktop-menu] system Quit guard unavailable: {error}");
+            }
             #[cfg(target_os="macos")]
             if let Err(error)=desktop_window::route_macos_quit(app.handle()){
                 eprintln!("[desktop-menu] guarded Quit unavailable: {}",error);
@@ -11518,6 +12339,9 @@ pub fn run() {
             #[cfg(debug_assertions)]
             let bundled=if bundled.is_dir(){bundled}else{PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../builtin-clawpkgs")};
             component_library::configure_bundled_host(get_home_dir().map_err(std::io::Error::other)?,bundled);
+            if let Ok(app_data_dir) = app.path().app_data_dir() {
+                devin_cloud::start_polling(&app_data_dir);
+            }
             // Optional PC-online policy must never propagate a storage/lock/host
             // failure into setup. Always manage the availability wrapper.
             let autostart=match (app.path().app_data_dir(),get_home_dir()){
@@ -11525,13 +12349,6 @@ pub fn run() {
                 _=>program_autostart::ProgramAutostartState::unavailable(),
             };
             app.manage(autostart);
-            let usb_transfer_log =
-                usb_serial::configure_transfer_logging(&app.path().app_local_data_dir()?)
-                    .map_err(std::io::Error::other)?;
-            eprintln!(
-                "[usb-transfer-log] persistent diagnostics={}",
-                usb_transfer_log.display()
-            );
             #[cfg(target_os = "macos")]
             volcengine_asr::configure_storage_dir(app.path().app_data_dir()?)
                 .map_err(std::io::Error::other)?;
@@ -11593,7 +12410,28 @@ pub fn run() {
         })
         .manage(usb_manager)
         .invoke_handler(tauri::generate_handler![
+            local_bridge_request,
+            lan_agent::lan_agent_pair,
+            lan_agent::lan_agent_discover,
+            lan_agent::lan_agent_pair_confirm,
+            lan_agent::lan_agent_forget,
+            lan_agent::lan_agent_pair_status,
+            lan_agent::lan_device_status,
+            lan_agent::lan_follow_agent,
+            lan_agent::appearance::lan_sync_appearance,
+            lan_agent::lan_volume_request,
+            lan_agent::lan_volume_result,
+            lan_agent::lan_bluetooth_keyboard_config,
+            lan_agent::lan_panel_control,
+            lan_agent::component::lan_component_preview,
+            lan_agent::component::lan_component_install,
+            lan_agent::reboot::lan_reboot,
+            lan_agent::ota::lan_update_bundled_firmware,
+            lan_agent::trust::lan_trust_usb,
+            lan_agent::lan_agent_sessions,
             appearance_recovery_ipc::usb_reconcile_appearance_unknown,
+            usb_recover_appearance_serial,
+            usb_appearance_serial_reset_required,
             reference_image::reference_image_mount,
             reference_image::reference_image_action,
             desktop_window::set_exit_reasons,
@@ -11623,6 +12461,7 @@ pub fn run() {
             smart_home::smart_home_cancel,
             smart_home::smart_home_chat,
             realtime_chat::realtime_chat_start,
+            lan_agent::press::lan_realtime_toggle,
             realtime_chat::realtime_chat_stop,
             realtime_chat::realtime_chat_status,
             realtime_chat::persona_voice_preview,
@@ -11633,6 +12472,9 @@ pub fn run() {
             realtime_chat::list_voice_chat_models,
             realtime_chat::save_voice_chat_settings,
             realtime_chat::clear_voice_chat_secret,
+            devin_cloud_get_config,
+            devin_cloud_save_config,
+            devin_cloud_test,
             llm_network::load_llm_network_settings,
             llm_network::save_llm_network_settings,
             llm_network::test_llm_network_settings,
@@ -11712,6 +12554,7 @@ pub fn run() {
             frontend_startup_generation,
             frontend_startup_ready,
             usb_get_button_config,
+            usb_bluetooth_keyboard_config,
             usb_reset_input_config,
             usb_reboot_device,
             usb_get_bundled_firmware_info,
@@ -11726,7 +12569,13 @@ pub fn run() {
             list_device_widgets,
             remove_widget_from_device,
             install_widget_skill,
+            prepare_petui_authoring,
+            build_petui_project,
             list_component_library,
+            import_hachiapp,
+            read_component_wasm_preview,
+            open_wasm_preview, tick_wasm_preview, close_wasm_preview,
+            read_component_wasm_audio,
             load_generation_provider_configs,
             save_generation_provider_config,
             community_request,
@@ -11741,7 +12590,7 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building pet-manager tauri application");
 
-    app.run(|app_handle, event| {
+    app.run(move |app_handle, event| {
         // This process did not start the shared runtime. Exiting it must never
         // stop the user's regular Pet Manager or its voice/USB connection.
         if cfg!(feature = "composer-diagnostic") { return; }
@@ -11759,7 +12608,9 @@ pub fn run() {
             },
             RunEvent::Exit => {
                 app_handle.state::<startup_supervision::Supervisor>().close();
-                stop_background_runtimes_on_exit();
+                if owns_runtime.load(Ordering::Acquire) {
+                    stop_background_runtimes_on_exit();
+                }
             },
             _ => {},
         }
@@ -11802,6 +12653,7 @@ fn stop_background_runtimes_on_exit() {
     if STOPPED.swap(true, Ordering::SeqCst) {
         return;
     }
+    devin_cloud::stop_polling();
     pc_fetch::host::shutdown();
 
     #[cfg(windows)]
@@ -12022,6 +12874,8 @@ fn selected_agent_to_channel_id(value: &str) -> String {
         "mimocode" => "mimocode".to_string(),
         "deepseek-harness" => "deepseek-harness".to_string(),
         "workbuddy" => "workbuddy".to_string(),
+        "devin" => "devin".to_string(),
+        "hermes" => "hermes".to_string(),
         _ => DEFAULT_PET_CHANNEL_ID.to_string(),
     }
 }
@@ -12034,6 +12888,8 @@ fn normalize_pet_channel_id(value: String) -> String {
         "mimocode" => "mimocode".to_string(),
         "deepseek-harness" | "deepseek" | "dsh" => "deepseek-harness".to_string(),
         "workbuddy" => "workbuddy".to_string(),
+        "devin" | "devin-desktop" | "devin desktop" => "devin".to_string(),
+        "hermes" => "hermes".to_string(),
         "cursor" => "cursor".to_string(),
         _ => DEFAULT_PET_CHANNEL_ID.to_string(),
     }
@@ -12330,7 +13186,7 @@ fn write_launch_script(
         shell_quote(&DEFAULT_BRIDGE_PORT.to_string())
     );
     let script = format!(
-        "#!/bin/sh\nset -eu\nunset NODE_OPTIONS\nmkdir -p {logs_dir}\nBRIDGE_ROOT=''\nfor candidate in {bridge_root_candidates}; do\n  if [ -f \"$candidate/{entry_relative_path}\" ]; then\n    BRIDGE_ROOT=\"$candidate\"\n    break\n  fi\ndone\nif [ -z \"$BRIDGE_ROOT\" ]; then\n  printf '%s\\n' 'bridge resources not found in any detected local path' >> {log_path}\n  exit 1\nfi\ncd \"$BRIDGE_ROOT/{workspace_relative_path}\"\nexport PATH={search_path}\nexport NODE_PATH=\"$BRIDGE_ROOT/{workspace_relative_path}/node_modules${{NODE_PATH:+:$NODE_PATH}}\"\n{codex_cli_export}{claude_cli_export}export MQTT_URL={mqtt_url}\nexport MQTT_USERNAME={mqtt_username}\nexport MQTT_PASSWORD={mqtt_password}\nexport STATUS_NAMESPACE={namespace}\nexport STATUS_DEVICE_ID={device_id}\nexport STATUS_BRIDGE_LOCAL_STATE_DIR={local_state_dir}\nexport CLAWD_BRIDGE_PORT={bridge_port}\nexport AGENT_BUS_PORT={agent_bus_port}\nexport CLAWD_ENABLED_AGENTS={enabled_agents}\nexport CLAWD_SELECTED_AGENT_ID={selected_agent_id}\nexport CLAWD_ENABLE_CLAUDE_LOG_MONITOR={claude_enabled}\nexport CLAWD_SYNC_HOOKS={claude_enabled}\nexport CLAWD_ENABLE_CODEX_MONITOR={codex_enabled}\nexport CLAWD_CODEX_SESSION_DIR={codex_session_dir}\nexport OPENCLAW_ENABLE={openclaw_enabled}\nexport CLAWD_ENABLE_MIMOCODE={mimocode_enabled}\nexec {node_path} \"$BRIDGE_ROOT/{entry_relative_path}\" >> {log_path} 2>&1\n",
+        "#!/bin/sh\nset -eu\nunset NODE_OPTIONS\nmkdir -p {logs_dir}\nBRIDGE_ROOT=''\nfor candidate in {bridge_root_candidates}; do\n  if [ -f \"$candidate/{entry_relative_path}\" ]; then\n    BRIDGE_ROOT=\"$candidate\"\n    break\n  fi\ndone\nif [ -z \"$BRIDGE_ROOT\" ]; then\n  printf '%s\\n' 'bridge resources not found in any detected local path' >> {log_path}\n  exit 1\nfi\ncd \"$BRIDGE_ROOT/{workspace_relative_path}\"\nexport PATH={search_path}\nexport NODE_PATH=\"$BRIDGE_ROOT/{workspace_relative_path}/node_modules${{NODE_PATH:+:$NODE_PATH}}\"\n{codex_cli_export}{claude_cli_export}export MQTT_URL={mqtt_url}\nexport MQTT_USERNAME={mqtt_username}\nexport MQTT_PASSWORD={mqtt_password}\nexport STATUS_NAMESPACE={namespace}\nexport STATUS_DEVICE_ID={device_id}\nexport STATUS_BRIDGE_LOCAL_STATE_DIR={local_state_dir}\nexport CLAWD_BRIDGE_PORT={bridge_port}\nexport AGENT_BUS_PORT={agent_bus_port}\nexport PET_MANAGER_MANAGED_BRIDGE=1\nexport CLAWD_ENABLED_AGENTS={enabled_agents}\nexport CLAWD_SELECTED_AGENT_ID={selected_agent_id}\nexport CLAWD_DEVIN_CLOUD_ENABLED={devin_cloud_enabled}\nexport CLAWD_ENABLE_CLAUDE_LOG_MONITOR={claude_enabled}\nexport CLAWD_SYNC_HOOKS={claude_enabled}\nexport CLAWD_ENABLE_CODEX_MONITOR={codex_enabled}\nexport CLAWD_CODEX_SESSION_DIR={codex_session_dir}\nexport OPENCLAW_ENABLE={openclaw_enabled}\nexport CLAWD_ENABLE_MIMOCODE={mimocode_enabled}\nexec {node_path} \"$BRIDGE_ROOT/{entry_relative_path}\" >> {log_path} 2>&1\n",
         logs_dir = shell_quote(
             log_path
                 .parent()
@@ -12357,6 +13213,11 @@ fn write_launch_script(
         agent_bus_port = shell_quote(&DEFAULT_AGENT_BUS_PORT.to_string()),
         enabled_agents = shell_quote(&enabled_agents_csv(profile)),
         selected_agent_id = shell_quote(&profile.selected_agent_id),
+        devin_cloud_enabled = shell_quote(if devin_cloud::enabled_for_bridge() {
+            "true"
+        } else {
+            "false"
+        }),
         claude_enabled = shell_quote(agent_enabled_env(profile, "claude-code")),
         codex_enabled = shell_quote(agent_enabled_env(profile, "codex")),
         codex_session_dir = shell_quote(
@@ -12494,8 +13355,10 @@ $env:STATUS_BRIDGE_LOCAL_STATE_DIR = {local_state_dir}\r\n\
 $env:CLAWD_BRIDGE_PORT = {bridge_port}\r\n\
 $env:CLAWD_BRIDGE_STRICT_PORT = '1'\r\n\
 $env:AGENT_BUS_PORT = {agent_bus_port}\r\n\
+$env:PET_MANAGER_MANAGED_BRIDGE = '1'\r\n\
 $env:CLAWD_ENABLED_AGENTS = {enabled_agents}\r\n\
 $env:CLAWD_SELECTED_AGENT_ID = {selected_agent_id}\r\n\
+$env:CLAWD_DEVIN_CLOUD_ENABLED = {devin_cloud_enabled}\r\n\
 $env:CLAWD_ENABLE_CLAUDE_LOG_MONITOR = {claude_enabled}\r\n\
 $env:CLAWD_SYNC_HOOKS = {claude_enabled}\r\n\
 $env:CLAWD_ENABLE_CODEX_MONITOR = {codex_enabled}\r\n\
@@ -12532,6 +13395,11 @@ Set-Content -LiteralPath {pid_path} -Value $process.Id -Encoding ascii\r\n",
         agent_bus_port = powershell_quote(&DEFAULT_AGENT_BUS_PORT.to_string()),
         enabled_agents = powershell_quote(&enabled_agents_csv(profile)),
         selected_agent_id = powershell_quote(&profile.selected_agent_id),
+        devin_cloud_enabled = powershell_quote(if devin_cloud::enabled_for_bridge() {
+            "true"
+        } else {
+            "false"
+        }),
         claude_enabled = powershell_quote(agent_enabled_env(profile, "claude-code")),
         codex_enabled = powershell_quote(agent_enabled_env(profile, "codex")),
         codex_session_dir = powershell_quote(
@@ -12612,35 +13480,8 @@ fn assign_child_to_windows_background_job(child: &std::process::Child) -> Result
 
 #[cfg(windows)]
 fn assign_pid_to_windows_background_job(pid: u32) -> Result<(), String> {
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-    use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
-    };
-
-    let job = windows_background_job_handle()? as HANDLE;
-    let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
-    if process.is_null() {
-        return Err(format!(
-            "failed to open child {pid} for Windows background job: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let assigned = unsafe { AssignProcessToJobObject(job, process) };
-    let error = if assigned == 0 {
-        Some(std::io::Error::last_os_error())
-    } else {
-        None
-    };
-    unsafe {
-        CloseHandle(process);
-    }
-    match error {
-        Some(error) => Err(format!(
-            "failed to assign child {pid} to Windows background job: {error}"
-        )),
-        None => Ok(()),
-    }
+    let job = windows_background_job_handle()? as windows_sys::Win32::Foundation::HANDLE;
+    managed_runtime::assign_windows_job(pid, job)
 }
 
 #[cfg(windows)]
@@ -12663,15 +13504,18 @@ fn start_bridge_process(
     script_path: &Path,
     log_path: &Path,
     pid_path: &Path,
+    node_path: &Path,
 ) -> Result<u32, String> {
     #[cfg(unix)]
     {
+        let _ = node_path;
         start_bridge_via_sh(script_path, log_path, pid_path)
     }
     #[cfg(windows)]
     {
         let _ = log_path;
         let _ = fs::remove_file(pid_path);
+        let launched = std::time::SystemTime::now();
         let status = command_for_host("powershell.exe")
             .env("PET_MANAGER_PARENT_PID", std::process::id().to_string())
             .args([
@@ -12693,6 +13537,7 @@ fn start_bridge_process(
         }
         for _ in 0..20 {
             if let Some(pid) = read_pid(pid_path) {
+                managed_runtime::adopt_windows_child(pid, node_path, launched)?;
                 if let Err(error) = assign_pid_to_windows_background_job(pid) {
                     eprintln!("[bridge-runtime] {error}");
                 }
@@ -12759,9 +13604,7 @@ fn start_voice_service_direct(
     if let Err(error) = assign_child_to_windows_background_job(&child) {
         eprintln!("[voice-runtime] {error}");
     }
-    let pid = child.id();
-    write_private_file(pid_path, format!("{pid}\n").as_bytes())?;
-    Ok(pid)
+    remember_runtime_child(child, pid_path)
 }
 
 /// Spawn node directly with the correct env vars, bypassing the shell script.
@@ -12798,8 +13641,14 @@ fn start_bridge_direct(
 
     let mut command = command_for_host(&node_path);
     command.arg(&entry_path);
+    #[cfg(windows)]
+    let bootstrap = {
+        command.arg("--managed-stdio-capability");
+        bridge_capability::managed::fresh()?
+    };
     command.current_dir(&workspace_root);
     command.env("PET_MANAGER_PARENT_PID", std::process::id().to_string());
+    command.env("PET_MANAGER_MANAGED_BRIDGE", "1");
     command.env_remove("NODE_OPTIONS");
     if let Some(path_env) = merged_host_path(node_dir_for_path(&node_path)) {
         command.env("PATH", path_env);
@@ -12821,6 +13670,14 @@ fn start_bridge_direct(
     command.env("AGENT_BUS_PORT", DEFAULT_AGENT_BUS_PORT.to_string());
     command.env("CLAWD_ENABLED_AGENTS", enabled_agents_csv(profile));
     command.env("CLAWD_SELECTED_AGENT_ID", &profile.selected_agent_id);
+    command.env(
+        "CLAWD_DEVIN_CLOUD_ENABLED",
+        if devin_cloud::enabled_for_bridge() {
+            "true"
+        } else {
+            "false"
+        },
+    );
 
     // Map enabled_agents to per-tool env vars.  Empty vec = all enabled
     // (backward compat with profiles saved before this field existed).
@@ -12862,7 +13719,7 @@ fn start_bridge_direct(
             "false"
         },
     );
-    command.stdin(Stdio::null());
+    command.stdin(if cfg!(windows) { Stdio::piped() } else { Stdio::null() });
     command.stdout(Stdio::from(stdout));
     command.stderr(Stdio::from(stderr));
     #[cfg(unix)]
@@ -12871,12 +13728,31 @@ fn start_bridge_direct(
     }
     let child = command.spawn().map_err(|error| error.to_string())?;
     #[cfg(windows)]
-    if let Err(error) = assign_child_to_windows_background_job(&child) {
-        eprintln!("[bridge-runtime] {error}");
+    {
+        let mut child = child;
+        if let Err(error) = assign_child_to_windows_background_job(&child) {
+            eprintln!("[bridge-runtime] {error}");
+        }
+        let written = child.stdin.take().is_some_and(|pipe| serde_json::to_writer(pipe, &bootstrap).is_ok());
+        if !written {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Bridge 私有启动通道写入失败。".into());
+        }
+        let pid = remember_runtime_child(child, pid_path)?;
+        if let Err(error) = bridge_capability::managed::set(pid, bootstrap) {
+            stop_managed_bridge(pid_path);
+            return Err(error);
+        }
+        return Ok(pid);
     }
-    let pid = child.id();
-    write_private_file(pid_path, format!("{pid}\n").as_bytes())?;
-    Ok(pid)
+    #[cfg(not(windows))]
+    remember_runtime_child(child, pid_path)
+}
+
+struct BridgeLaunch {
+    pid: Option<u32>,
+    failure: Option<&'static str>,
 }
 
 fn launch_bridge_runtime(
@@ -12884,7 +13760,7 @@ fn launch_bridge_runtime(
     bridge_assets: &ResolvedBridgeAssets,
     profile: &BridgeProfileFile,
     runtime_paths: &BridgeRuntimePaths,
-) -> Result<(bool, Option<u32>), String> {
+) -> Result<BridgeLaunch, String> {
     let direct_failure = match start_bridge_direct(
         node_path,
         bridge_assets,
@@ -12893,8 +13769,8 @@ fn launch_bridge_runtime(
         &runtime_paths.pid_path,
     ) {
         Ok(pid) => {
-            if wait_for_bridge_ready(DEFAULT_BRIDGE_PORT, 36, 200) {
-                return Ok((true, Some(pid)));
+            if wait_for_bridge_ready(DEFAULT_BRIDGE_PORT, pid, 36, 200) {
+                return Ok(BridgeLaunch { pid: Some(pid), failure: None });
             }
             let process_state = if process_exists(pid) {
                 "仍在运行但端口未就绪"
@@ -12922,25 +13798,31 @@ fn launch_bridge_runtime(
         &fallback_script_path,
         &runtime_paths.log_path,
         &runtime_paths.pid_path,
+        node_path,
     )
     .map_err(|error| format!("{direct_failure}；备用启动失败: {error}"))?;
-    if wait_for_bridge_ready(DEFAULT_BRIDGE_PORT, 36, 200) {
-        return Ok((true, Some(fallback_pid)));
+    if wait_for_bridge_ready(DEFAULT_BRIDGE_PORT, fallback_pid, 36, 200) {
+        return Ok(BridgeLaunch { pid: Some(fallback_pid), failure: None });
     }
 
-    let fallback_state = if process_exists(fallback_pid) {
-        "仍在运行但端口未就绪"
-    } else {
-        "已提前退出"
+    let failure = match (
+        probe_bridge_running(DEFAULT_BRIDGE_PORT),
+        probe_agent_bus_running(DEFAULT_AGENT_BUS_PORT),
+    ) {
+        (true, true) => return Ok(BridgeLaunch { pid: Some(fallback_pid), failure: None }),
+        (false, true) => "Bridge 状态服务（23333）未通过健康检查。",
+        (true, false) => "Agent Bus（8181）未通过健康检查。",
+        (false, false) if !process_exists(fallback_pid) => "本地桥接进程在服务就绪前退出。",
+        (false, false) => "Bridge 状态服务（23333）和 Agent Bus（8181）均未通过健康检查。",
     };
     stop_managed_bridge(&runtime_paths.pid_path);
     eprintln!(
         "[bridge-runtime] fallback process {} {}; log={}",
         fallback_pid,
-        fallback_state,
+        failure,
         runtime_paths.log_path.display()
     );
-    Ok((false, None))
+    Ok(BridgeLaunch { pid: None, failure: Some(failure) })
 }
 
 #[cfg(unix)]
@@ -12969,9 +13851,7 @@ fn start_bridge_via_sh(
     }
 
     let child = command.spawn().map_err(|error| error.to_string())?;
-    let pid = child.id();
-    write_private_file(pid_path, format!("{pid}\n").as_bytes())?;
-    Ok(pid)
+    remember_runtime_child(child, pid_path)
 }
 
 fn build_voice_agent_env_pairs(profile: &BridgeProfileFile) -> Vec<(&'static str, String)> {
@@ -13033,8 +13913,8 @@ fn build_voice_agent_env_exports(profile: &BridgeProfileFile) -> String {
         .join("")
 }
 
-/// Kill whatever process is listening on the given port (used to reclaim the
-/// bridge port from stale/external processes we don't have a PID file for).
+/// Stop only retained owned handles among listeners. Port ownership or a stale
+/// PID file alone never authorizes terminating a process.
 fn stop_process_on_port(port: u16) {
     for pid in find_listening_pids_on_port(port) {
         let _ = stop_process(pid);
@@ -13102,7 +13982,7 @@ fn find_listening_pids_on_port(port: u16) -> Vec<u32> {
     {
         let mut pids = HashSet::new();
         if let Ok(output) = command_for_host("lsof")
-            .args(["-ti", &format!(":{port}")])
+            .args(["-nP", "-t", &format!("-iTCP:{port}"), "-sTCP:LISTEN"])
             .output()
         {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -13160,7 +14040,170 @@ fn address_matches_port(address: &str, port: u16) -> bool {
     port_text.parse::<u16>().ok() == Some(port)
 }
 
+// Retain OS ownership, not merely a PID that the OS may reuse after exit.
+mod managed_runtime {
+    use std::{collections::HashMap, io, process::Child, sync::{Mutex, OnceLock}, time::Duration};
+    enum Owned {
+        Child(Child),
+        #[cfg(windows)]
+        LauncherChild(std::os::windows::io::OwnedHandle),
+    }
+    impl Owned {
+        fn live(&mut self) -> io::Result<bool> {
+            match self {
+                Self::Child(child) => child.try_wait().map(|exit| exit.is_none()),
+                #[cfg(windows)]
+                Self::LauncherChild(handle) => {
+                    use std::os::windows::io::AsRawHandle;
+                    use windows_sys::Win32::{Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT}, System::Threading::WaitForSingleObject};
+                    match unsafe { WaitForSingleObject(handle.as_raw_handle(), 0) } {
+                        WAIT_OBJECT_0 => Ok(false), WAIT_TIMEOUT => Ok(true), _ => Err(io::Error::last_os_error()),
+                    }
+                }
+            }
+        }
+        fn stop(&mut self) -> bool {
+            if !matches!(self.live(), Ok(true)) { return matches!(self.live(), Ok(false)); }
+            match self {
+                Self::Child(child) => {
+                    #[cfg(unix)]
+                    {
+                        // This is our unreaped child: its PID cannot be reused while we wait.
+                        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM); }
+                        for _ in 0..12 {
+                            match child.try_wait() { Ok(Some(_)) => return true, Err(_) => return false, _ => {} }
+                            std::thread::sleep(Duration::from_millis(120));
+                        }
+                    }
+                    if child.kill().is_err() { return matches!(child.try_wait(), Ok(Some(_))); }
+                    for _ in 0..25 {
+                        match child.try_wait() { Ok(Some(_)) => return true, Err(_) => return false, _ => {} }
+                        std::thread::sleep(Duration::from_millis(40));
+                    }
+                    false
+                }
+                #[cfg(windows)]
+                Self::LauncherChild(handle) => {
+                    use std::os::windows::io::AsRawHandle;
+                    use windows_sys::Win32::{Foundation::WAIT_OBJECT_0, System::Threading::{TerminateProcess, WaitForSingleObject}};
+                    // The retained handle refers to the original process even if its PID is reused.
+                    unsafe { TerminateProcess(handle.as_raw_handle(), 1); }
+                    unsafe { WaitForSingleObject(handle.as_raw_handle(), 1000) == WAIT_OBJECT_0 }
+                }
+            }
+        }
+    }
+    fn processes() -> &'static Mutex<HashMap<u32, Owned>> {
+        static OWNED: OnceLock<Mutex<HashMap<u32, Owned>>> = OnceLock::new();
+        OWNED.get_or_init(Default::default)
+    }
+    pub(super) fn remember(mut child: Child) -> Result<u32, String> {
+        let pid = child.id();
+        match processes().lock() {
+            Ok(mut owned) => { owned.insert(pid, Owned::Child(child)); Ok(pid) }
+            Err(_) => {
+                let _ = child.kill(); let _ = child.wait();
+                Err("无法登记本地服务进程，启动已取消".into())
+            }
+        }
+    }
+    pub(super) fn is_live(pid: u32) -> bool {
+        let Ok(mut owned) = processes().lock() else { return false; };
+        let result = owned.get_mut(&pid).is_some_and(|process| matches!(process.live(), Ok(true)));
+        if !result { owned.remove(&pid); }
+        result
+    }
+    pub(super) fn stop(pid: u32) -> bool {
+        let Ok(mut owned) = processes().lock() else { return false; };
+        let Some(process) = owned.get_mut(&pid) else { return false; };
+        if !process.stop() { return false; }
+        owned.remove(&pid);
+        true
+    }
+    #[cfg(windows)]
+    pub(super) fn assign_windows_job(pid: u32, job: windows_sys::Win32::Foundation::HANDLE) -> Result<(), String> {
+        use std::os::windows::io::AsRawHandle;
+        let owned = processes().lock().map_err(|_| "服务进程登记繁忙")?;
+        let handle = match owned.get(&pid).ok_or("未持有服务进程句柄")? {
+            Owned::Child(child) => child.as_raw_handle(),
+            Owned::LauncherChild(handle) => handle.as_raw_handle(),
+        };
+        if unsafe { windows_sys::Win32::System::JobObjects::AssignProcessToJobObject(job, handle) } == 0 {
+            return Err("无法将服务进程加入后台任务组".into());
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    pub(super) fn adopt_windows_child(pid: u32, node_path: &std::path::Path, launched: std::time::SystemTime) -> Result<(), String> {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::{Foundation::FILETIME, System::Threading::{OpenProcess, GetProcessTimes, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, PROCESS_SET_QUOTA}};
+        if pid <= 1 || pid == std::process::id() { return Err("备用服务进程身份无效".into()); }
+        const SYNCHRONIZE: u32 = 0x00100000;
+        let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SET_QUOTA | SYNCHRONIZE, 0, pid) };
+        if raw.is_null() { return Err("无法核验备用服务进程".into()); }
+        let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let mut created: FILETIME = unsafe { std::mem::zeroed() };
+        let mut exited = created; let mut kernel = created; let mut user = created;
+        if unsafe { GetProcessTimes(handle.as_raw_handle(), &mut created, &mut exited, &mut kernel, &mut user) } == 0 {
+            return Err("无法核验备用服务启动时间".into());
+        }
+        let ticks = ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64;
+        let earliest = launched.duration_since(std::time::UNIX_EPOCH).map_err(|_| "系统时间无效")?.as_nanos() / 100 + 116444736000000000u128;
+        if (ticks as u128) < earliest { return Err("拒绝接管旧的备用服务进程".into()); }
+        let mut name = vec![0u16; 32768]; let mut size = name.len() as u32;
+        if unsafe { QueryFullProcessImageNameW(handle.as_raw_handle(), 0, name.as_mut_ptr(), &mut size) } == 0 {
+            return Err("无法核验备用服务程序".into());
+        }
+        let normalize = |path: &std::path::Path| -> Result<String, String> {
+            let path = std::fs::canonicalize(path).map_err(|_| "无法核验备用服务程序路径")?;
+            Ok(path.to_string_lossy().trim_start_matches(r"\\?\").to_lowercase())
+        };
+        let actual = std::path::PathBuf::from(String::from_utf16(&name[..size as usize]).map_err(|_| "备用程序路径无效")?);
+        if normalize(&actual)? != normalize(node_path)? { return Err("备用服务程序与随包运行时不符".into()); }
+        processes().lock().map_err(|_| "服务进程登记繁忙")?.insert(pid, Owned::LauncherChild(handle));
+        Ok(())
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        fn child() -> Child {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "managed_runtime::tests::fixture_child", "--nocapture"])
+                .env("HACHIMO_OWNERSHIP_TEST_CHILD", "1")
+                .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+                .spawn().unwrap()
+        }
+        #[test] fn fixture_child() {
+            if std::env::var("HACHIMO_OWNERSHIP_TEST_CHILD").as_deref() == Ok("1") { std::thread::sleep(Duration::from_secs(30)); }
+        }
+        #[test] fn unknown_pid_never_authorizes_termination() {
+            let mut foreign = child(); let pid = foreign.id();
+            assert!(!is_live(pid)); assert!(!stop(pid));
+            assert!(foreign.try_wait().unwrap().is_none());
+            foreign.kill().unwrap(); foreign.wait().unwrap();
+        }
+        #[test] fn registered_child_is_stopped_and_retired() {
+            let pid = remember(child()).unwrap(); assert!(is_live(pid));
+            assert!(stop(pid)); assert!(!is_live(pid)); assert!(!stop(pid));
+        }
+        #[test] fn zero_and_current_process_are_not_owned() {
+            assert!(!stop(0)); assert!(!stop(std::process::id()));
+        }
+    }
+}
+
+fn remember_runtime_child(child: std::process::Child, pid_path: &Path) -> Result<u32, String> {
+    let pid = managed_runtime::remember(child)?;
+    if let Err(error) = write_private_file(pid_path, format!("{pid}\n").as_bytes()) {
+        managed_runtime::stop(pid);
+        return Err(error);
+    }
+    Ok(pid)
+}
+
 fn stop_managed_bridge(pid_path: &Path) {
+    #[cfg(windows)]
+    bridge_capability::managed::clear();
     if let Some(pid) = read_pid(pid_path) {
         let _ = stop_process(pid);
     }
@@ -13175,58 +14218,7 @@ fn stop_managed_process(pid_path: &Path) {
 }
 
 fn stop_process(pid: u32) -> bool {
-    // On Windows `taskkill` without /F only posts WM_CLOSE, which windowless
-    // Node/PowerShell children never handle ("can only be terminated
-    // forcefully"). The soft wait therefore always ran its full ~5 s before
-    // the forced kill, stalling every Agent follow switch.
-    if cfg!(windows) {
-        terminate_process_force(pid);
-        return wait_for_process_exit(pid, 25, 40);
-    }
-    terminate_process_soft(pid);
-    if wait_for_process_exit(pid, 12, 120) {
-        return true;
-    }
-
-    terminate_process_force(pid);
-    wait_for_process_exit(pid, 6, 120)
-}
-
-fn wait_for_process_exit(pid: u32, attempts: usize, sleep_ms: u64) -> bool {
-    for _ in 0..attempts {
-        if !process_exists(pid) {
-            return true;
-        }
-        thread::sleep(Duration::from_millis(sleep_ms));
-    }
-    !process_exists(pid)
-}
-
-#[cfg(unix)]
-fn terminate_process_soft(pid: u32) {
-    let _ = command_for_host("kill").arg(pid.to_string()).status();
-}
-
-#[cfg(unix)]
-fn terminate_process_force(pid: u32) {
-    let _ = command_for_host("kill")
-        .arg("-9")
-        .arg(pid.to_string())
-        .status();
-}
-
-#[cfg(windows)]
-fn terminate_process_soft(pid: u32) {
-    let _ = command_for_host("taskkill")
-        .args(["/PID", &pid.to_string(), "/T"])
-        .status();
-}
-
-#[cfg(windows)]
-fn terminate_process_force(pid: u32) {
-    let _ = command_for_host("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .status();
+    managed_runtime::stop(pid)
 }
 
 fn process_exists(pid: u32) -> bool {
@@ -13285,18 +14277,19 @@ fn read_pid(pid_path: &Path) -> Option<u32> {
 
 fn read_live_managed_pid(pid_path: &Path) -> Option<u32> {
     let pid = read_pid(pid_path)?;
-    if process_exists(pid) {
-        Some(pid)
-    } else {
-        let _ = fs::remove_file(pid_path);
+    if managed_runtime::is_live(pid) { Some(pid) } else {
+        // A legacy PID file is not evidence that we own the current process.
+        if !process_exists(pid) { let _ = fs::remove_file(pid_path); }
         None
     }
 }
 
 fn fetch_bridge_agent_status() -> Result<Option<serde_json::Value>, String> {
-    let url = format!("http://127.0.0.1:{DEFAULT_AGENT_BUS_PORT}/agent/status");
-    let response = lan_http_client(Duration::from_millis(1200))?
+    let cap = bridge_capability::load("read")?;
+    let url = format!("{}/agent/status", cap.base_url);
+    let response = bridge_capability::blocking_client(Duration::from_millis(1200))?
         .get(url)
+        .bearer_auth(&cap.token)
         .send()
         .map_err(|error| error.to_string())?;
     if !response.status().is_success() {
@@ -13422,15 +14415,12 @@ fn probe_agent_bus_running(port: u16) -> bool {
 
     let mut buffer = [0u8; 2048];
     let mut response = String::new();
-    loop {
+    while response.len() < 8192 {
         match stream.read(&mut buffer) {
             Ok(0) => break,
             Ok(read) => {
                 response.push_str(&String::from_utf8_lossy(&buffer[..read]));
-                if response.contains("200 OK")
-                    && response.contains("\"ok\":true")
-                    && response.contains("\"adapters\"")
-                {
+                if agent_bus_health_matches(&response) {
                     return true;
                 }
             }
@@ -13439,6 +14429,24 @@ fn probe_agent_bus_running(port: u16) -> bool {
     }
 
     false
+}
+
+fn agent_bus_health_matches(response: &str) -> bool {
+    let Some((headers, body)) = response.split_once("\r\n\r\n") else {
+        return false;
+    };
+    if !headers.lines().next().is_some_and(|status| {
+        matches!(status.split_whitespace().nth(1), Some("200"))
+    }) {
+        return false;
+    }
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    body["ok"] == true && match body.get("service") {
+        Some(service) => service == "agent-session-bus",
+        None => body.get("adapters").is_some_and(serde_json::Value::is_array),
+    }
 }
 
 fn probe_voice_service_running(port: u16) -> bool {
@@ -13477,12 +14485,17 @@ fn probe_voice_service_running(port: u16) -> bool {
     false
 }
 
-fn wait_for_bridge_ready(port: u16, attempts: usize, sleep_ms: u64) -> bool {
-    for _ in 0..attempts {
+fn wait_for_bridge_ready(port: u16, pid: u32, attempts: usize, sleep_ms: u64) -> bool {
+    for attempt in 0..attempts {
+        if !managed_runtime::is_live(pid) {
+            return false;
+        }
         if probe_bridge_running(port) && probe_agent_bus_running(DEFAULT_AGENT_BUS_PORT) {
             return true;
         }
-        thread::sleep(Duration::from_millis(sleep_ms));
+        if attempt + 1 < attempts {
+            thread::sleep(Duration::from_millis(sleep_ms));
+        }
     }
     false
 }
@@ -13633,6 +14646,27 @@ fn current_timestamp_ms() -> u64 {
 mod tests {
 
     #[test]
+    fn accepts_legacy_and_current_agent_bus_health_without_accepting_unrelated_services() {
+        for body in [
+            r#"{"ok": true, "service": "agent-session-bus"}"#,
+            r#"{"ok":true,"adapters":[],"activeRuns":0}"#,
+        ] {
+            assert!(agent_bus_health_matches(&format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{body}"
+            )));
+        }
+        assert!(!agent_bus_health_matches(
+            "HTTP/1.1 200 OK\r\n\r\n{\"ok\":true,\"service\":\"other\",\"adapters\":[]}"
+        ));
+        assert!(!agent_bus_health_matches(
+            "HTTP/1.1 503 Service Unavailable\r\n\r\n{\"ok\":true,\"service\":\"agent-session-bus\"}"
+        ));
+        assert!(!agent_bus_health_matches(
+            "HTTP/1.1 200 OK\r\n\r\n{\"ok\":true}"
+        ));
+    }
+
+    #[test]
     fn visible_composer_lookup_failure_is_not_a_target_switch_receipt() {
         for error in ["No writable visible semantic composer was found", "NoTarget",
             "No writable semantic composer", "Visible Agent composer unavailable",
@@ -13692,20 +14726,20 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-        let pid = child.id();
+        let pid = managed_runtime::remember(child).unwrap();
         assert!(process_exists(pid));
         let started = Instant::now();
         assert!(stop_process(pid));
         assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
         assert!(!process_exists(pid));
-        let _ = child.wait();
     }
 
     #[test]
     fn unsupported_mimo_voice_is_rejected_before_asr_without_disabling_other_agents() {
         assert!(device_voice_platform_block_reason("mimocode", false).is_some());
         assert!(device_voice_platform_block_reason("mimocode", true).is_none());
-        for id in ["codex", "claude-code", "openclaw", "workbuddy"] {
+        assert!(device_voice_platform_block_reason("devin", true).is_some());
+        for id in ["codex", "claude-code", "openclaw", "workbuddy", "devin"] {
             assert!(device_voice_platform_block_reason(id, false).is_none());
         }
         let source = include_str!("lib.rs");
@@ -13739,6 +14773,29 @@ mod tests {
         assert_eq!(detected.id, "workbuddy");
         assert_eq!(detected.label, "WorkBuddy");
         assert!(detected.config_path.ends_with("settings.json"));
+    }
+
+    #[test]
+    fn devin_channel_uses_current_visible_composer_and_cloud_source_identity() {
+        assert_eq!(normalize_agent_id("Devin").as_deref(), Some("devin"));
+        assert_eq!(normalize_agent_id("Devin Desktop").as_deref(), Some("devin"));
+        assert_eq!(selected_agent_to_channel_id("devin"), "devin");
+        assert_eq!(normalize_pet_channel_id("Devin".into()), "devin");
+        assert_eq!(usb_source_display_name("devin"), "Devin");
+        assert_eq!(usb_state_display_text("sleeping"), Some("已暂停"));
+        assert!(KNOWN_USB_STATE_SOURCES.contains(&"devin"));
+        assert!(agent_uses_visible_composer("devin"));
+        assert!(should_use_current_visible_session(false, false, "devin"));
+        assert!(!should_locate_desktop_session(true, "devin"));
+        assert!(!agent_streams_voice_draft("devin"));
+        assert!(!device_voice_bound_target_is_addressable(false, &P4SessionBinding {
+            agent_id: "devin".into(), session_id: "id".into(), session_title: "title".into(),
+            session_title_unique: true, ..P4SessionBinding::default()
+        }));
+        assert_eq!(
+            codex_composer::DEVIN_DESKTOP_EXE_NAME,
+            "devin.exe"
+        );
     }
 
     #[test]
@@ -14103,6 +15160,19 @@ mod tests {
         assert!(source.contains("CodexComposerBridge::is_agent_frontmost"));
         assert!(source.contains("falling back to device session"));
         assert!(source.contains("use_current_visible_session"));
+    }
+
+    #[test]
+    fn ptt_queues_capture_before_waiting_for_the_desktop_agent() {
+        let source = include_str!("lib.rs");
+        let start = source.split("fn start_device_voice_context(").nth(1).unwrap()
+            .split("fn prepare_device_voice_agent(").next().unwrap();
+        let publish = start.find("active.replace(context.clone())").unwrap();
+        let worker = start.find(".spawn(move ||").unwrap();
+        let prepare = start.find("prepare_device_voice_agent(&startup_context)").unwrap();
+        assert!(publish < worker && worker < prepare);
+        assert!(!start.contains("activate_agent("));
+        assert!(!start.contains("is_agent_frontmost("));
     }
 
     #[test]
@@ -14986,8 +16056,8 @@ mod tests {
     #[test]
     fn linux_audio_start_keeps_an_explicit_lan_address() {
         assert_eq!(
-            resolve_audio_bridge_pc_ip("start", Some("192.168.1.25".to_string()), true).unwrap(),
-            Some("192.168.1.25".to_string())
+            resolve_audio_bridge_pc_ip("start", Some("192.0.2.25".to_string()), true).unwrap(),
+            Some("192.0.2.25".to_string())
         );
     }
 
@@ -15070,6 +16140,7 @@ mod tests {
         assert!(is_allowed_button_config_action("miniapp_screen_tap"));
         assert!(is_allowed_button_config_action("miniapp_screen_long_press"));
         assert!(is_allowed_button_config_action("component_center"));
+        assert!(is_allowed_button_config_action("system_settings"));
         assert!(is_allowed_button_config_action("page_toggle"));
         assert!(is_allowed_button_config_action("page_enter"));
         assert!(is_allowed_button_config_action("page_back"));
@@ -15145,6 +16216,7 @@ mod tests {
             vec![
                 "codex".to_string(),
                 "deepseek-harness".to_string(),
+                "hermes".to_string(),
                 "mimocode".to_string(),
                 "openclaw".to_string(),
                 "workbuddy".to_string()
@@ -15170,6 +16242,7 @@ mod tests {
             protocol_schema: 4,
             wire_protocol: "pet-usb-jsonl-v2".to_string(),
             capabilities: serde_json::json!({ "assetFormats": ["p4-mjpeg-v1"] }),
+            board_wedged: false,
         };
         let p4_asset_format_status = usb_serial::UsbConnectionStatus {
             runtime: String::new(),
@@ -15588,4 +16661,9 @@ mod component_delete_policy_tests {
         assert_eq!(input.preserve_save,Some(false));
         assert!(!input.clear_device_save_confirmed);
     }
+}
+
+#[tauri::command]
+async fn local_bridge_request(route: String, body: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
+    bridge_capability::request(route, body).await
 }

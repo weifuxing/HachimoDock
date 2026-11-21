@@ -9,7 +9,7 @@ import ServiceBridgeControls from './ServiceBridgeControls.jsx';
 import "./component-app.css";
 
 const EMPTY_CITY={city:"",lat:0,lon:0};
-const LABELS={voice:"语音补充",details:"详情 / 隐藏",previous:"上一项",next:"下一项",random:"换一条 / 确认分类",category:"分类 / 返回",depart:"开始旅行",collection:"明信片",refresh:"更新预报",todo:"近期待办",record:"开始 / 结束录音",save:"确认保存",delete:"删除笔记",speak:"朗读 / 停止",favorite:"收藏 / 取消",toggle:"播放 / 停止",timer:"切换定时",up:"音量 +",down:"音量 −"};
+const LABELS={voice:"语音补充",details:"详情 / 隐藏",previous:"上一项",next:"下一项",random:"换一条 / 确认分类",category:"分类 / 返回",depart:"开始旅行",collection:"明信片",refresh:"更新预报",todo:"转为待办",tasks:"想法 / 待办",open:"查看 / 返回",filter:"未完成 / 已完成",row_a:"第一项",row_b:"第二项",row_c:"第三项",record:"开始 / 结束录音",save:"确认保存",delete:"删除笔记",speak:"朗读 / 停止",favorite:"收藏 / 取消",toggle:"播放 / 停止",timer:"切换定时",up:"音量 +",down:"音量 −"};
 export function permissionText(p={},notice=""){
   const result=["组件服务默认启用，更新后无需再次授权。记录只保存在这台电脑，不随资源包或社区发布；系统权限仍由操作系统管理。"];
   if(p.networkHosts?.length)result.push(`联网访问 ${p.networkHosts.join("、")}。${notice}`);
@@ -17,7 +17,7 @@ export function permissionText(p={},notice=""){
   if(p.microphone)result.push("仅在按下录制后使用设备麦克风，最多 28 秒；音频发给你配置的云端 ASR，转写须手动确认保存。不会写入桌面 Agent 输入框。");
   if(p.speechProvider&&!p.microphone)result.push(p.autoRead?"在设备进入组件或换条后，自动将当前知识正文分段发送给已配置的语音合成服务并朗读；打开 PC 预览不会播放，不发送其他笔记或聊天内容。":"按下朗读后，将该知识卡片文字发送给你配置的语音合成服务；不发送其他笔记或聊天内容。");
   if(p.deviceAudio)result.push("通过 USB 使用设备扬声器。退出组件、断线或进入语音后停止，不会自动恢复。");
-  if(p.todos)result.push(p.todoWrites?"读取本机待办；仅在你确认具体事项后标记完成或撤销完成，不新增、不删除事项。":p.microphone?"可在你确认后创建统一待办；删除笔记不删除关联待办。":"可读取本机近期待办，内容可能显示在设备上。");
+  if(p.todos)result.push(p.todoWrites&&p.microphone?"想法可由你确认转为统一待办；待办可标记完成或撤销。删除笔记不会删除关联待办。":p.todoWrites?"读取本机待办；仅在你确认具体事项后标记完成或撤销完成，不新增、不删除事项。":p.microphone?"可在你确认后创建统一待办；删除笔记不删除关联待办。":"可读取本机近期待办，内容可能显示在设备上。");
   if(p.desktopReceipts)result.push("只读取当前设备跟随 Agent 的任务回执；默认隐藏正文。语音补充仍遵守客户端原有权限确认。");
   if(p.desktopInput)result.push("可向这台电脑当前前台应用发送资源包声明的白名单组合键（无文本输入、无宏）。默认关闭：需要在下方开启后才真正按键；macOS 需在系统设置授予辅助功能权限；实时对话期间不发送。");
   return result;
@@ -59,6 +59,7 @@ export default function ComponentAppPanel({component,active=false,request=invoke
     {data?.enabled===false&&<div className="component-app__permissions"><p>此组件服务已手动停用，本机记录仍保留。</p><button disabled={busy} onClick={()=>command("enable")}>重新开启服务</button></div>}
     <div className="component-app__layout">{mixed?<ComponentAppPreview component={component} active={active} interactive={true} hostSnapshot={hostSnapshot} onHostAction={enabled&&!busy?(a,confirmation)=>command("action",{action:a,...confirmation}):undefined}/>:<AppSurface active={active} componentId={component.id} runtime={component.appRuntime} snapshot={snapshot} images={component.sceneSprites} bindings={component.defaultBindings} onAction={enabled&&!busy&&service!=="journey"?(a,confirmation)=>command("action",{action:a,...confirmation}):undefined}/>}<div className="component-app__controls">
       <p>{service==="journey"?"目的地直接在设备上选择：点击上一站/下一站或拨动摇杆，确认后出发。旅途中可以预选下一站，不会重置当前旅程；此处只展示状态。":"设备上操作与下方按钮使用同一条服务链路。播放和录音前，请在设备打开此组件。"}</p>
+      {service==="notes"&&component.pcApplication.actions["host.tasks"]&&<p>想法与待办在同一组件中切换。录音结束后保存或转为待办；待办详情可确认完成、撤销完成。摇杆中按切换，上下选条，左右翻页。</p>}
       {service==="todos"&&<p>直接点击预览或设备上的事项查看全文；在详情中确认完成，也可以撤销完成。摇杆上下选事项、左右翻页，切换筛选可查看已完成事项。完整待办仍在本机统一保存。</p>}
       {service==="hotkeys"&&data?.hotkeys&&<div className="component-app__permissions" aria-label="快捷键发送开关">
         <label><input type="checkbox" checked={data.hotkeys.sendEnabled===true} disabled={busy||!enabled} onChange={e=>command("configure",{send:e.target.checked})}/> 允许向这台电脑发送快捷键（当前 {data.hotkeys.platform==="macos"?"macOS":data.hotkeys.platform==="windows"?"Windows":"不支持的平台"}）</label>
@@ -68,7 +69,7 @@ export default function ComponentAppPanel({component,active=false,request=invoke
       </div>}
       {service==="bridge"&&<ServiceBridgeControls key={`${id}:${component.versionHash}`} component={component} data={data} enabled={enabled&&!hostExpired} busy={busy} onCommand={command} onError={setError}/>}
       {service==="composition"&&data?.sources&&<div aria-label="组合数据源诊断"><p role="status">{Object.entries(data.sources).map(([name,phase])=>`${name}：${({ready:"可用",preparing:"更新中",error:"暂不可用，已有记录保留",busy:"队列繁忙"})[phase]||"不可用"}`).join("；")}</p>{data.bindingErrors?.length>0&&<p role="alert">部分字段暂不可用，已显示资源包声明的备用值：{data.bindingErrors.join("、")}</p>}</div>}
-      {!["journey","todos","bridge"].includes(service)&&<div className="component-app__actions">{Object.entries(component.pcApplication.actions).filter(([,op])=>op!=="delete"&&!(service!=="news"&&component.pcApplication.autoRead&&["previous","next"].includes(op))).map(([action,op])=><button key={action} disabled={!enabled||busy||(Array.isArray(data?.ui?.actions)&&!data.ui.actions.includes(action))} onClick={()=>{const prompt=component.appRuntime.input?.confirm?.[action];if(prompt){const context=data?.ui?.context;if(window.confirm(prompt))command("action",{action,confirm:true,context});}else command("action",{action});}}>{component.defaultBindings?.find(b=>b.action===action)?.label||(service==="notes"&&op==="todo"?"转为待办":LABELS[op]||op)}</button>)}</div>}
+      {!["journey","todos","bridge"].includes(service)&&!(service==="notes"&&component.pcApplication.actions["host.tasks"])&&<div className="component-app__actions">{Object.entries(component.pcApplication.actions).filter(([,op])=>op!=="delete"&&!(service!=="news"&&component.pcApplication.autoRead&&["previous","next"].includes(op))).map(([action,op])=><button key={action} disabled={!enabled||busy||(Array.isArray(data?.ui?.actions)&&!data.ui.actions.includes(action))} onClick={()=>{const prompt=component.appRuntime.input?.confirm?.[action];if(prompt){const context=data?.ui?.context;if(window.confirm(prompt))command("action",{action,confirm:true,context});}else command("action",{action});}}>{component.defaultBindings?.find(b=>b.action===action)?.label||(service==="notes"&&op==="todo"?"转为待办":LABELS[op]||op)}</button>)}</div>}
       {service==="fetch"&&<form aria-label="网络来源白名单" onSubmit={e=>{e.preventDefault();command("configure",{hosts:fetchHosts.split(/[\s,，]+/).filter(Boolean)});}}>
         <p>显式启用服务并允许精确 HTTPS 主机后，PC 在组件隐藏时继续周期更新；停用服务或退出 PC 客户端后停止。空白名单不联网。</p>
         <label>允许的主机<input aria-label="允许的主机" value={fetchHosts} placeholder="example.org" onChange={e=>setFetchHosts(e.target.value)} disabled={busy}/></label><button disabled={busy}>保存网络白名单</button>

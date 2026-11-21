@@ -16,6 +16,22 @@ const MAX_RECOVERY_RETRIES: usize = 3;
 const RECOVERY_DEADLINE: Duration = Duration::from_millis(350);
 const RETRY_BACKOFF: Duration = Duration::from_millis(2);
 
+// The P4 JSONL reader discards a line containing NUL until the next LF.
+// A bare LF could complete a command whose only missing byte was its delimiter.
+pub(super) const P4_DISCARD_LINE: &[u8] = b"\0\n";
+
+pub(super) fn recover_p4_audio_line(
+    writer: &mut dyn Write,
+    frame_bytes: usize,
+    report: &LiveWriteReport,
+) -> bool {
+    report.bytes_written > 0
+        && report.bytes_written < frame_bytes
+        && matches!(report.error_kind, Some("timeout" | "would_block" | "interrupted"))
+        && write_serial_live_frame(writer, P4_DISCARD_LINE, P4_DISCARD_LINE.len(), Duration::ZERO)
+            .is_ok()
+}
+
 // Failed Windows overlapped completion can have unknown partial progress.
 // Retain its OS code for diagnostics, but never retry it as a zero-byte timeout.
 #[derive(Debug)]
@@ -146,6 +162,31 @@ mod tests {
     fn flaky(failures: Vec<(usize,io::ErrorKind)>) -> Flaky {
         Flaky{bytes:Vec::new(),failures:failures.into(),attempts:0}
     }
+    #[test]
+    fn partial_audio_timeout_discards_the_line_without_replaying_audio() {
+        let audio = vec![b'a'; 4462];
+        let mut writer = flaky(vec![(768, io::ErrorKind::TimedOut); 4]);
+        let failure = write_serial_live_frame(&mut writer, &audio, 64, Duration::ZERO).unwrap_err();
+        assert_eq!(failure.report.bytes_written, 768);
+        assert_eq!(failure.report.retries, 3);
+        assert!(recover_p4_audio_line(&mut writer, audio.len(), &failure.report));
+        assert_eq!(&writer.bytes[..768], &audio[..768]);
+        assert_eq!(&writer.bytes[768..], P4_DISCARD_LINE);
+
+        let mut still_stalled = flaky(vec![(0, io::ErrorKind::TimedOut); 4]);
+        assert!(!recover_p4_audio_line(&mut still_stalled, audio.len(), &failure.report));
+        assert!(still_stalled.bytes.is_empty());
+
+        let hard_error = LiveWriteReport {
+            bytes_written: 768,
+            error_kind: Some("broken_pipe"),
+            ..Default::default()
+        };
+        let mut untouched = flaky(vec![]);
+        assert!(!recover_p4_audio_line(&mut untouched, audio.len(), &hard_error));
+        assert_eq!(untouched.attempts, 0);
+    }
+
     #[test]
     fn transient_errors_resume_exact_suffix_even_mid_slice() {
         let bytes:Vec<_>=(0..200).map(|i|i as u8).collect();

@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 from validate_generated_widget import load_capabilities, validate_widget
 from smoke_test_widget_game import smoke_test_game
+from pack_hachiapp import COVER, COVER_MAX, FORMAT, json_bytes, validate_cover
 
 
 def utc_now() -> str:
@@ -68,6 +69,29 @@ def is_relative_to(path: Path, parent: Path) -> bool:
         return False
 
 
+def ensure_hachiapp_manifest(package: Path, component_id: str) -> None:
+    """Keep formal local packages with covers compatible with the archive loader."""
+    cover = package / COVER
+    marker = package / "hachiapp.json"
+    if (package / "pc").is_symlink() or cover.is_symlink() or marker.is_symlink():
+        raise ValueError("封面或 .hachiapp 清单不能使用符号链接")
+    expected = {"format": FORMAT, "id": component_id}
+    if marker.exists():
+        if not marker.is_file() or marker.stat().st_size > 256 * 1024:
+            raise ValueError(".hachiapp 清单不是有效文件")
+        value = json.loads(marker.read_text(encoding="utf-8"))
+        if not isinstance(value, dict) or any(value.get(k) != v for k, v in expected.items()):
+            raise ValueError(".hachiapp 清单与组件 ID 或格式不符")
+    if not cover.exists():
+        return
+    if not cover.is_file() or cover.stat().st_size > COVER_MAX:
+        raise ValueError("封面必须是 PNG 且不超过 256 KiB")
+    validate_cover(cover.read_bytes())
+    if not marker.exists():
+        with marker.open("xb") as handle:
+            handle.write(json_bytes(expected))
+
+
 def publish_widget(
     source: Path,
     *,
@@ -77,6 +101,13 @@ def publish_widget(
 ) -> dict[str, Any]:
     source = source.expanduser().resolve()
     pet_home = pet_home.expanduser().resolve()
+    if pet_home == default_pet_home().expanduser().resolve():
+        from pack_hachiapp import native_command
+        entry = json.loads(native_command(["publish-json", source]))
+        return {"ok": True, "status": "published", "componentId": entry["id"],
+                "versionHash": entry["versionHash"], "publishedPath": entry["path"], "native": True}
+    # Isolated migration/test roots retain the legacy fixture adapter. They never
+    # write the real user's component library or participate in client discovery.
     components_root = pet_home / "components"
     staging_root = components_root / ".staging"
     library_root = components_root / "library"
@@ -111,6 +142,9 @@ def publish_widget(
         errors = validate_widget(staged_package, capabilities)
         if errors:
             raise ValueError("组件校验失败: " + "；".join(errors))
+        manifest = json.loads((staged_package / "component.json").read_text(encoding="utf-8"))
+        component_id = manifest["id"]
+        ensure_hachiapp_manifest(staged_package, component_id)
         try:
             gameplay = smoke_test_game(staged_package)
         except (KeyError, TypeError, ValueError) as error:
@@ -121,8 +155,6 @@ def publish_widget(
             )
         job.update(gameplaySmoke=gameplay, updatedAt=utc_now())
         atomic_write_json(log_path, job)
-        manifest = json.loads((staged_package / "component.json").read_text(encoding="utf-8"))
-        component_id = manifest["id"]
         version_hash = content_hash(staged_package)
         component_root = library_root / component_id
         destination = component_root / version_hash

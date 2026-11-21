@@ -2,9 +2,28 @@
 //! personal context. A cancelled/obsolete job can never publish its result.
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
 use futures_util::StreamExt;
 use std::{collections::{HashMap, HashSet}, io::Read, sync::{Mutex, OnceLock}, time::Duration};
 
+/// Optional device headline projection for ordinary host applications.
+pub(crate) fn validate_device_headlines(runtime: &serde_json::Value) -> Result<(), String> {
+    let Some(source) = runtime["vars"].get("petui.wifi_data") else { return Ok(()); };
+    let transitions = runtime["transitions"].as_array();
+    let valid = source == &json!({"type":"string","init":"news.hn"})
+        && runtime["engine"] == "p4-bounded-runtime-v4"
+        && runtime["host"] == true
+        && runtime["input"]["engine"] == "p4-input-v1"
+        && runtime["surface"]["engine"] == "p4-app-surface-v1"
+        && runtime["surface"]["bindings"] == "p4-variable-bindings-v1"
+        && runtime.get("ownership").is_none()
+        && ["host.refresh", "host.previous", "host.next"].iter().all(|action| {
+            runtime["input"]["confirm"].get(*action).is_none()
+                && transitions.is_some_and(|rules| rules.iter()
+                    .any(|rule| rule == &json!({"on":action,"from":"*"})))
+        });
+    if valid { Ok(()) } else { Err("petui.wifi_data 仅支持有界 news.hn 资讯宿主".into()) }
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Topic { pub id:String, pub title:String, pub query:String }
@@ -837,7 +856,7 @@ pub(crate) fn seed_verified_acceptance_report(id:&str,path:&std::path::Path,cont
         crate::voice_chat_settings::configure_storage_dir(std::env::var("P4_SERVICE_CONFIG").unwrap().into()).unwrap();
         crate::llm_network::configure_storage_dir(std::env::var("P4_SERVICE_CONFIG").unwrap().into()).unwrap();
         let started=std::time::Instant::now();
-        let declared:crate::app_services::Declaration=serde_json::from_str(include_str!("../../builtin-clawpkgs/daily-news/pc/application.json")).unwrap();
+        let declared:crate::app_services::Declaration=serde_json::from_str(include_str!("../../optional-clawpkgs/daily-news/pc/application.json")).unwrap();
         let output=std::path::PathBuf::from(std::env::var("PET_NEWS_REPORT").unwrap());
         let root=output.parent().unwrap().join("daily-generation-public");std::fs::create_dir_all(root.join("daily-news")).unwrap();configure_cache(root);
         let result=tauri::async_runtime::block_on(async{tokio::time::timeout(Duration::from_secs(420),generate_daily("daily-news",topics(&declared.content).unwrap(),Default::default())).await});
@@ -870,7 +889,7 @@ pub(crate) fn seed_verified_acceptance_report(id:&str,path:&std::path::Path,cont
             for (index,topic) in profile.iter().enumerate(){
                 let sources:Vec<_>=(0..3).map(|i|crate::web_search::Source{title:format!("来源{i}"),url:format!("https://example.org/{index}/{i}"),published_at:"2026-10-24T11:30:00+08:00".into()}).collect();
                 let stories:Vec<_>=sources.iter().enumerate().map(|(i,s)|json!({"title":format!("新闻{i}"),"text":"完整可信正文".repeat(15),"url":s.url,"publishedAt":s.published_at})).collect();
-                let good=crate::web_search::SearchResult{summary:json!({"items":stories}).to_string(),sources,retrieved_at:"2026-10-24T12:00:00+08:00".into()};
+                let good=crate::web_search::SearchResult{provider:"豆包".into(),summary:json!({"items":stories}).to_string(),sources,retrieved_at:"2026-10-24T12:00:00+08:00".into()};
                 let path=root.path().join(format!("{}.json",topic.id));
                 let result=complete_topic(topic,Some(&path),now,&Default::default(),Duration::ZERO,|attempt|{
                     counts[index]+=1;let mut r=good.clone();if index==2&&attempt==0{r.summary="让我再搜索一些综艺和音乐相关的新闻，确保覆盖更多子领域。".into();}
@@ -937,7 +956,7 @@ pub(crate) fn seed_verified_acceptance_report(id:&str,path:&std::path::Path,cont
         assert!(p.contains("直接输出三条"));assert!(briefing_prompt(&topics[1],ts).contains("消费零售"));
         let sources=(0..3).map(|i|crate::web_search::Source{title:format!("来源{i}"),url:format!("https://unreachable.invalid/article/{i}"),published_at:String::new()}).collect::<Vec<_>>();
         let stories=sources.iter().enumerate().map(|(i,s)|json!({"title":format!("新闻{i}"),"text":"真实正文".repeat(20),"url":s.url,"publishedAt":"2026-10-24T11:30:00+08:00"})).collect::<Vec<_>>();
-        let mut result=crate::web_search::SearchResult{summary:json!({"items":stories}).to_string(),sources,retrieved_at:"2026-10-24T12:00:00+08:00".into()};
+        let mut result=crate::web_search::SearchResult{provider:"豆包".into(),summary:json!({"items":stories}).to_string(),sources,retrieved_at:"2026-10-24T12:00:00+08:00".into()};
         let (drafts,evidence)=parse_briefing(&result,&topics[0],ts).unwrap();
         assert_eq!(drafts.len(),3);assert_eq!(drafts[0].text,"真实正文".repeat(20));assert_eq!(evidence[0].published_at,ts-1800);
         result.summary=format!("下面是播报内容。\n```json\n{}\n```",result.summary);
@@ -954,7 +973,7 @@ pub(crate) fn seed_verified_acceptance_report(id:&str,path:&std::path::Path,cont
         for date in ["","2026-10-24","2026-10-23T11:59:59+08:00","2026-10-24T12:00:01+08:00"]{
             let sources=(0..3).map(|i|crate::web_search::Source{title:format!("来源{i}"),url:format!("https://example.org/{i}"),published_at:String::new()}).collect::<Vec<_>>();
             let stories=sources.iter().map(|s|json!({"title":"报道","text":"正文".repeat(40),"url":s.url,"publishedAt":date})).collect::<Vec<_>>();
-            let result=crate::web_search::SearchResult{summary:json!({"items":stories}).to_string(),sources,retrieved_at:String::new()};
+            let result=crate::web_search::SearchResult{provider:"豆包".into(),summary:json!({"items":stories}).to_string(),sources,retrieved_at:String::new()};
             assert!(parse_briefing(&result,&topic,ts).is_err(),"{date}");
         }
     }

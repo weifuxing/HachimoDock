@@ -14,10 +14,19 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "pet_p4_component_ext.h"
+#ifndef PET_P4_WASM_AUDIO
+#define PET_P4_WASM_AUDIO 0
+#endif
 #define PET_CMEDIA_STAGE_BYTES (PET_SAMPLE_BUDGET_BYTES + 4u * PET_CEXT_SAMPLE_HEADER + PET_CEXT_CLIP_MAX_BYTES + PET_CEXT_BIG_BUDGET_BYTES)
 #define PET_CMEDIA_DEVICE_BUDGET_BYTES (4u * 1024u * 1024u) /* all installed component media together */
 /* ---- install staging (protocol worker, storage lane held; never an audio lock) ---- */
 void pet_cmedia_stage_reset(void);
+#if defined(PET_P4_WASM_AUDIO) && PET_P4_WASM_AUDIO
+/* Only the manifested widget-files transfer may append the exact-sized sidecar. */
+bool pet_cmedia_speech_stage(size_t file_size, size_t offset, const uint8_t *data,
+                             size_t len, char *error, size_t error_size);
+bool pet_cmedia_speech_verify_file(size_t slot, uint8_t generation, const char *sha256);
+#endif
 /* Appends one decoded chunk (index must be sequential per file). */
 bool pet_cmedia_stage_chunk(pet_cext_media_kind_t kind, const char *id, uint32_t index, const uint8_t *data, size_t len, char *error, size_t error_size);
 /* Every declared sample/clip/big image is staged with a valid header and inside budget. */
@@ -50,6 +59,11 @@ typedef struct { uint64_t token; uint32_t generation; const int16_t *pcm; uint32
 typedef struct { uint64_t token; uint32_t generation; const uint8_t *stream; size_t bytes; pet_cext_clip_t meta; } pet_cmedia_clip_lease_t;
 bool pet_cmedia_sample_pin(unsigned index, pet_cmedia_sample_lease_t *out);
 bool pet_cmedia_clip_pin(unsigned index, pet_cmedia_clip_lease_t *out);
+#if defined(PET_P4_WASM_AUDIO) && PET_P4_WASM_AUDIO
+typedef struct { uint64_t token; const uint8_t *data; size_t bytes; } pet_cmedia_speech_lease_t;
+/* WASM worker requests never block behind storage/preparation or borrow stale banks. */
+bool pet_cmedia_speech_pin_try_at(unsigned index, uint32_t expected, pet_cmedia_speech_lease_t *out);
+#endif
 bool pet_cmedia_unpin(uint64_t token);
 /* Audio-safe bounded release: eight lock-free 32-bit CAS attempts, no mutex,
  * free or IO. Store calls collect under its mutex; retirement uses fixed banks. */

@@ -24,9 +24,9 @@ export default function ContextRail({
   onOpenComponent,
   onStartBinding,
 }) {
-  const { binding, usb, deviceOnline, currentDisplay, currentComponent } = useDeviceContext();
+  const { activeBoardDeviceId, usb, wifi, deviceOnline, currentDisplay, currentComponent } = useDeviceContext();
 
-  if (!binding) {
+  if (!activeBoardDeviceId) {
     return (
       <div className="context-rail context-rail--empty">
         <button type="button" className="context-rail__cta" onClick={onStartBinding}>
@@ -38,13 +38,13 @@ export default function ContextRail({
   }
 
   const connectionIcon = usb.connected ? <Usb size={12} /> : deviceOnline ? <Wifi size={12} /> : <WifiOff size={12} />;
-  const connectionLabel = usb.connected ? "USB" : deviceOnline ? "在线" : "离线";
+  const connectionLabel = usb.connected ? "USB" : wifi ? "Wi-Fi" : "离线";
 
   return (
     <div className="context-rail">
       <button type="button" className="context-rail__row" onClick={onOpenDevice} title="打开设备页">
         <Monitor size={14} />
-        <span className="context-rail__primary">{binding.boardDeviceId}</span>
+        <span className="context-rail__primary">{activeBoardDeviceId}</span>
         <span className={`context-rail__chip context-rail__chip--${usb.connected ? "ok" : deviceOnline ? "ok" : "warn"}`}>
           {connectionIcon}
           {connectionLabel}

@@ -77,6 +77,25 @@ menu "Board Support Package(ESP32-P4)"
     endmenu
 
     menu "Display"
+
+        config BSP_LCD_DSI_DATA_LANES
+            int "MIPI DSI data lanes"
+            range 1 2
+            default 1
+            help
+                Set 2 only for a panel strapped for two-lane operation and
+                an adapter and cable that route both DSI data pairs.
+
+        config BSP_LCD_DSI_LANE_BITRATE_MBPS
+            int "MIPI DSI bit rate per lane (Mbps)"
+            range 480 550 if BSP_LCD_DSI_DATA_LANES = 2
+            range 480 800
+            default 500 if BSP_LCD_DSI_DATA_LANES = 2
+            default 800
+            help
+                The ST7701S supports up to 800 Mbps in single-lane mode
+                and up to 550 Mbps per lane in dual-lane mode.
+
         config BSP_LCD_DPI_BUFFER_NUMS
             int "Set number of frame buffers"
             default 3

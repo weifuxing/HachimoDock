@@ -19,7 +19,7 @@
 #endif
 typedef struct {
     uint64_t positive_us, negative_us, error_us;
-    uint32_t calls, candidates, applied, positives, negatives, errors, maximum_us;
+    uint32_t calls, candidates, applied, positives, negatives, errors, maximum_us, catalog_prime_us;
 } pet_spiffs_hint_stats_t;
 #if PET_P4_SPIFFS_HINT_ENABLE
 /* Numeric snapshot only; no paths, hashes, pointers or file data exported. */

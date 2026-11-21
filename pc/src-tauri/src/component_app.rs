@@ -5,6 +5,7 @@ use serde::{Deserialize,Serialize};
 use serde_json::{json,Value};
 use std::{collections::VecDeque,path::{Path,PathBuf},sync::{Arc,Mutex,OnceLock},io::Write};
 use tauri::Emitter;
+mod organizer;
 #[derive(Clone,Default,PartialEq,Serialize,Deserialize)]
 #[serde(default)]
 struct State{
@@ -16,6 +17,7 @@ struct State{
     knowledge:crate::knowledge_library::Reading,
     sound_volume:Option<u32>,sound_timer:usize,
     todos:crate::component_todos::Reading,
+    organizer_tasks:bool, organizer_page:usize,
     calendar:crate::component_calendar::Reading,
 }
 #[derive(Clone,PartialEq,Serialize,Deserialize)]
@@ -242,6 +244,7 @@ fn settle_trip(s:&mut State,d:&Declaration,now:i64)->bool{
 }
 fn next(s:&mut State,count:usize,back:bool){s.selected=(s.selected%count.max(1)+if back{count.saturating_sub(1)}else{1})%count.max(1);}
 fn controls(id:&str,dir:&Path,d:&Declaration,s:&State)->Result<Value,String>{
+    if organizer::enabled(d) { return organizer::controls(id,dir,d,s); }
     if d.service=="todos" {
         let allowed=s.todos.ui["operations"].as_array();
         let actions:Vec<&str>=d.actions.iter().filter(|(_,op)|allowed.is_some_and(|a|a.iter().any(|v|v.as_str()==Some(op.as_str())))).map(|(key,_)|key.as_str()).collect();
@@ -266,6 +269,7 @@ fn controls(id:&str,dir:&Path,d:&Declaration,s:&State)->Result<Value,String>{
     Ok(json!({"mode":mode,"actions":actions,"context":context}))
 }
 fn apply(id:&str,dir:&Path,d:&Declaration,s:&mut State,op:&str,input:&Value,board:&str,notify:&dyn Fn(Value)->Result<(),String>,usb:&crate::usb_serial::UsbSerialManager,values:&mut Value)->Result<(),String>{
+    if organizer::enabled(d) { return organizer::apply(id,dir,s,op,input,usb,values); }
     let now=chrono::Utc::now().timestamp();
     match d.service.as_str(){
         "calendar"=>{

@@ -40,6 +40,11 @@ static void pet_p4_native_usb_process(uint64_t now){observe(now);}
 static pet_program_runtime_result_t enqueue(void *ctx,uint64_t generation,uint64_t sequence,const pet_program_event_t *event){
  (void)ctx;(void)generation;(void)sequence;(void)event;assert(!"not due yet");return PET_RUNTIME_OK;
 }
+#include "pet_p4_wdt_deadlock.h"
+static void pet_p4_wdt_deadlock_feed_test(pet_p4_deadlock_task_t task) {
+ assert(task==PET_DEADLOCK_MAIN && !held);
+}
+#define pet_p4_wdt_deadlock_feed pet_p4_wdt_deadlock_feed_test
 static void one_actual_turn(void){
 '''+prefix+r'''
     observed=now_ms;

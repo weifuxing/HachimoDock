@@ -20,7 +20,7 @@ def test_negotiated_close_ack_preserves_legacy_and_framed_routes(tmp_path):
         _run_screenshot_writer(folder,True,True,negotiated=True,framed=framed)
 
 def _run_screenshot_writer(tmp_path,close_ack,integrity=False,negotiated=False,framed=True):
-    source = (ROOT / 'main/pet_p4_main.c').read_text()
+    source = (ROOT / 'main/pet_p4_main.c').read_text().replace('__attribute__((optimize("Os"))) ', '')
     production = source.split('/* Screenshot-only checked writes.', 1)[1]
     production = production.split('/* Only protocol_worker_task owns these scratch buffers.', 1)[0]
     production = '/* Screenshot-only checked writes.' + production

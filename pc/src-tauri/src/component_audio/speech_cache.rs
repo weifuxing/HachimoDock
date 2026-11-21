@@ -91,6 +91,7 @@ pub(super) fn prepare(id:&str,board:&str,cfg:crate::doubao_tts::DoubaoTtsConfig,
         assert_eq!(std::env::var("PET_NEWS_CACHE_TEST").as_deref(),Ok("1"));
         let settings=PathBuf::from(std::env::var("P4_SERVICE_CONFIG").unwrap());
         crate::voice_chat_settings::configure_storage_dir(settings.clone()).unwrap();
+        #[cfg(target_os = "macos")]
         crate::volcengine_asr::configure_storage_dir(settings.clone()).unwrap();
         crate::llm_network::configure_storage_dir(settings.clone()).unwrap();
         let output=PathBuf::from(std::env::var("PET_NEWS_CACHE_DIR").unwrap());
@@ -98,7 +99,7 @@ pub(super) fn prepare(id:&str,board:&str,cfg:crate::doubao_tts::DoubaoTtsConfig,
         let persona=crate::component_voice::acceptance_persona(&settings,"builtin-terrier");
         let v=&persona["voice"];
         let voice=json!({"boardDeviceId":"cache-test-only","appearanceId":"builtin-terrier","speaker":v["speaker"],"cloneSpeakerId":v["clone_speaker_id"].as_str().unwrap_or(""),"speed":v["speed"].as_f64().unwrap_or(1.0)});
-        let d:Value=serde_json::from_str(include_str!("../../../builtin-clawpkgs/daily-news/pc/application.json")).unwrap();
+        let d:Value=serde_json::from_str(include_str!("../../../optional-clawpkgs/daily-news/pc/application.json")).unwrap();
         crate::component_news::seed_verified_acceptance_report("daily-news",&PathBuf::from(std::env::var("PET_NEWS_REPORT").unwrap()),d["content"].as_array().unwrap());
         crate::component_voice::component_speech_set_pet_voice(Some(serde_json::from_value(voice.clone()).unwrap())).unwrap();
         let cfg=crate::component_voice::config("cache-test-only").unwrap();

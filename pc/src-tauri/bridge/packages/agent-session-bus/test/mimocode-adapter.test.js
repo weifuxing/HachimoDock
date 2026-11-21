@@ -53,6 +53,7 @@ function makeAdapter(home, extraEnv = {}) {
       USERPROFILE: home,
       PATH: "",
       MIMOCODE_CLI_PATH: createFakeMiMoEntry(home),
+      FAKE_MIMO_INVOCATIONS: path.join(home, "invocations.jsonl"),
       ...extraEnv,
     },
     cwd: home,
@@ -61,16 +62,22 @@ function makeAdapter(home, extraEnv = {}) {
   });
 }
 
-test("isAvailable detects the MiMoCode CLI version", async () => {
+function readInvocations(home) {
+  const file = path.join(home, "invocations.jsonl");
+  if (!fs.existsSync(file)) return [];
+  return fs.readFileSync(file, "utf8").trim().split("\n").map(JSON.parse);
+}
+
+test("availability checks locate the executable without launching it", async () => {
   await withFakeHome(async (home) => {
     const adapter = makeAdapter(home);
-    const probe = await adapter.isAvailable();
-    assert.equal(probe.ready, true);
-    assert.equal(probe.version, "0.1.6");
+    assert.equal((await adapter.isAvailable()).ready, true);
+    assert.equal((await adapter.isAvailable()).ready, true);
+    assert.deepEqual(readInvocations(home), []);
   });
 });
 
-test("listSessions maps official JSON and sorts newest first", async () => {
+test("listSessions shares one isolated query and preserves ordering and limits", async () => {
   await withFakeHome(async (home) => {
     const adapter = makeAdapter(home, {
       FAKE_MIMO_SESSIONS: JSON.stringify([
@@ -90,10 +97,31 @@ test("listSessions maps official JSON and sorts newest first", async () => {
         },
       ]),
     });
-    const sessions = await adapter.listSessions({ limit: 10 });
+    const [sessions, limited] = await Promise.all([
+      adapter.listSessions({ limit: 10 }),
+      adapter.listSessions({ limit: 1 }),
+    ]);
     assert.deepEqual(sessions.map((session) => session.id), ["newer", "older"]);
     assert.equal(sessions[0].name, "新会话");
     assert.equal(sessions[0].cwd, "D:/new");
+    assert.deepEqual(limited, sessions.slice(0, 1));
+    assert.deepEqual(await adapter.listSessions(), sessions);
+    const invocations = readInvocations(home);
+    assert.equal(invocations.length, 1);
+    assert.deepEqual(invocations[0].args, ["session", "list", "--format", "json", "--max-count", "200"]);
+    assert.match(path.basename(invocations[0].temp), /^hachimi-mimocode-/);
+    assert.equal(fs.existsSync(invocations[0].temp), false);
+  });
+});
+
+test("a failed query removes its temporary directory and backs off repeated calls", async () => {
+  await withFakeHome(async (home) => {
+    const adapter = makeAdapter(home, { FAKE_MIMO_FAIL: "1" });
+    await assert.rejects(adapter.listSessions(), /exited code=2/);
+    await assert.rejects(adapter.listSessions(), /exited code=2/);
+    const invocations = readInvocations(home);
+    assert.equal(invocations.length, 1);
+    assert.equal(fs.existsSync(invocations[0].temp), false);
   });
 });
 

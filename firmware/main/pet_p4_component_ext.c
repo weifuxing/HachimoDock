@@ -242,6 +242,39 @@ pet_cext_media_kind_t pet_cext_media_path_kind(const char *path, char id[PET_CEX
 }
 static uint32_t u32le(const uint8_t *p) { return (uint32_t) p[0] | (uint32_t) p[1] << 8 | (uint32_t) p[2] << 16 | (uint32_t) p[3] << 24; }
 static uint16_t u16le(const uint8_t *p) { return (uint16_t) (p[0] | p[1] << 8); }
+bool pet_cext_speech_cue(const uint8_t *d, size_t size, unsigned index,
+                         uint32_t *offset, uint32_t *bytes) {
+  if (!d || size < PET_CEXT_SPEECH_HEADER || size > PET_CEXT_SPEECH_MAX_BYTES ||
+      memcmp(d, "HAB1", 4)) return false;
+  uint32_t count = u32le(d + 4);
+  size_t table_end = PET_CEXT_SPEECH_HEADER + (size_t)count * 8;
+  if (!count || count > PET_CEXT_SPEECH_MAX_CUES || index >= count || table_end > size) return false;
+  const uint8_t *entry = d + PET_CEXT_SPEECH_HEADER + index * 8;
+  uint32_t start = u32le(entry), length = u32le(entry + 4);
+  if (start < table_end || start > size || !length || length > size - start ||
+      length > PET_CEXT_SPEECH_CUE_BYTES || length % PET_CEXT_SPEECH_BLOCK_BYTES) return false;
+  *offset = start;
+  *bytes = length;
+  return true;
+}
+
+bool pet_cext_speech_bank_valid(const uint8_t *d, size_t size) {
+  uint32_t offset, bytes;
+  if (!pet_cext_speech_cue(d, size, 0, &offset, &bytes)) return false;
+  uint32_t count = u32le(d + 4);
+  uint32_t next = PET_CEXT_SPEECH_HEADER + count * 8;
+  for (unsigned i = 0; i < count; i++) {
+    if (!pet_cext_speech_cue(d, size, i, &offset, &bytes) || offset != next) return false;
+    next += bytes;
+    for (uint32_t pos = offset; pos < next; pos += PET_CEXT_SPEECH_BLOCK_BYTES) {
+      const uint8_t *block = d + pos;
+      if (block[2] > 88 || block[3] || block[4] != 0x40 || block[5] != 0x01 ||
+          (block[PET_CEXT_SPEECH_BLOCK_BYTES - 1] & 0xf0)) return false;
+    }
+  }
+  return next == size;
+}
+
 bool pet_cext_sample_header(const uint8_t *d, size_t size, pet_cext_sample_t *out) {
   if (!d || size < PET_CEXT_SAMPLE_HEADER || memcmp(d, "P4A1", 4)) return false;
   uint32_t frames = u32le(d + 4);

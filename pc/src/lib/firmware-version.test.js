@@ -5,6 +5,7 @@
  * [Sync] If this file changes, update `pc/src/.folder.md`.
  */
 
+import { currentFirmwareCompletion } from "./firmware-version.js";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -39,4 +40,13 @@ test("firmware update disposition exposes update only for older devices", () => 
   assert.equal(firmwareUpdateDisposition("0.7.29-p4", "0.7.29-p4"), "latest");
   assert.equal(firmwareUpdateDisposition("0.7.30-p4", "0.7.29-p4"), "latest");
   assert.equal(firmwareUpdateDisposition("unknown", "0.7.29-p4"), "unknown");
+});
+
+test("a firmware completion applies only to the connection that passed verification", () => {
+  const usb = { connected: true, runtime: "esp-p4", boardDeviceId: "p4-test", connectionId: "2" };
+  const completed = { boardDeviceId: "p4-test", connectionId: "2", version: "0.7.103-p4-r195-wifi6" };
+  assert.equal(currentFirmwareCompletion(usb, completed), completed);
+  assert.equal(currentFirmwareCompletion({ ...usb, connectionId: "3" }, completed), null);
+  assert.equal(currentFirmwareCompletion({ ...usb, boardDeviceId: "p4-other" }, completed), null);
+  assert.equal(currentFirmwareCompletion({ ...usb, connected: false }, completed), null);
 });

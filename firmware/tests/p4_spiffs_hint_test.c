@@ -47,6 +47,20 @@ int main(void){
       .hal_read_f=rd,.hal_write_f=wr,.hal_erase_f=erase};
     assert(SPIFFS_mount(&fs,&cfg,work,fds,sizeof(fds),cache,sizeof(cache),NULL)<0);
     assert(!SPIFFS_format(&fs));mount();
+#if PET_P4_SPIFFS_HINT_APPLY
+    write_file("/p4w07.json", 107);
+    write_file("/p4b07.json", 207);
+    write_file("/p4-miniapps-0.json", 42);
+    /* Simulate a boot with empty RAM hints and populated flash. */
+    memset(hints, 0, sizeof(hints));
+    catalog_hints_attempted = false;
+    assert(read_file("/p4-miniapps-0.json") == 42);
+    assert(catalog_hints_attempted && stats.catalog_prime_us);
+    unsigned seeded_hits = stats.applied;
+    assert(read_file("/p4w07.json") == 107);
+    assert(read_file("/p4b07.json") == 207);
+    assert(stats.applied == seeded_hits + 2);
+#endif
     for(unsigned n=0;n<120;n++){char name[32];snprintf(name,sizeof(name),"/record%03u",n);write_file(name,n);}
     for(unsigned n=0;n<120;n++){char name[32];snprintf(name,sizeof(name),"/record%03u",n);assert(read_file(name)==n);}
     spiffs_page_ix pix=65535;assert(!lookup("/record019",&pix));

@@ -59,5 +59,5 @@ def test_render_lane_never_waits_or_reads_pending_assets():
     assert 'release_inactive_asset_prepares();' in inactive
     assert "if (!drew_asset && !g_asset_cache_pending" in frame
     assert "draw_session_queue(state, now_ms)" in frame
-    assert "draw_connection_banner(state, now_ms)" in frame
+    assert "draw_common_connection(connection)" in frame
     assert "rotate_landscape_to_panel()" in frame

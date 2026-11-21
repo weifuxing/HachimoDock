@@ -54,7 +54,7 @@ try {
  $nodeVersion=(& $node --version 2>$null|Out-String).Trim()
  if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch '^v\d+\.\d+\.\d+$') { throw 'Bundled Node execution failed' }
  $ffmpegHash=Check-X64Pe $ffmpeg
- if ($ffmpegHash -ne '1cefca14ea713d5d7e7a1b948299142831185487f5efb14914d049ba9090d95f') { throw 'Unreviewed FFmpeg executable' }
+ if ($ffmpegHash -ne '18ac8e4c695148f3e2e20b6a24b3974a7b350b3a6dee1c8a018db5c2d1b3fc4f') { throw 'Unreviewed FFmpeg executable' }
  $version=(& $ffmpeg -hide_banner -version 2>$null|Out-String)
  if ($LASTEXITCODE -ne 0 -or $version -notmatch '--disable-gpl' -or $version -notmatch '--disable-nonfree' -or $version -match '--enable-gpl|--enable-nonfree') { throw 'FFmpeg configuration mismatch' }
  $encoders=(& $ffmpeg -hide_banner -encoders 2>$null|Out-String)

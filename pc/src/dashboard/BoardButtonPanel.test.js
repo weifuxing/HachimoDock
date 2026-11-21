@@ -15,6 +15,7 @@ import { dirname, join } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(here, "BoardButtonPanel.jsx"), "utf8");
+const map = readFileSync(join(here, "P4BoardInputMap.jsx"), "utf8");
 
 test("common button operations are expanded on first render", () => {
   assert.match(source, /<details open>\s*<summary>常用操作/);
@@ -24,9 +25,13 @@ test("BoardButtonPanel exports a default React component", () => {
   assert.match(source, /export default function BoardButtonPanel\s*\(/);
 });
 
-test("BoardButtonPanel renders the SVG board map with viewBox preserved", () => {
-  assert.match(source, /viewBox=\{isP4Runtime \? "0 0 456 320" : "0 0 560 320"\}/);
-  assert.match(source, /board-button-map__device/);
+test("normal and Bluetooth configuration share the P4 device map", () => {
+  const bluetooth = readFileSync(join(here, "BluetoothShortcutPanel.jsx"), "utf8");
+  assert.match(source, /<P4BoardInputMap/);
+  assert.match(source, /viewBox="0 0 560 320"/);
+  assert.match(map, /viewBox="0 0 456 320"/);
+  assert.match(bluetooth, /<P4BoardInputMap[\s\S]*onSelect=/);
+  assert.match(bluetooth, /<ControlGlyph/);
 });
 
 test("Each hardware callout uses split label lines so long Chinese action text does not collide", () => {
@@ -64,7 +69,7 @@ test("Button configuration header is one compact toolbar instead of a duplicated
   const dashboard = readFileSync(join(here, "..", "DeviceDashboard.jsx"), "utf8");
   assert.match(source, /<h2>按钮配置<\/h2>/);
   assert.match(source, /\{controlGroups\.length\} 个控件/);
-  assert.match(source, /voiceConfigDirty \? "待同步" : "已同步"/);
+  assert.match(source, /voiceConfigDirty \? "待同步" : confirmed \? "已同步" : "待核对"/);
   assert.doesNotMatch(dashboard, /<Card title="按钮配置"/);
   assert.match(css, /\.board-button-panel__toolbar\s*{[\s\S]*min-height:\s*38px[\s\S]*padding:\s*0 0 var\(--space-2\)/);
   assert.match(css, /\.board-button-panel__voice-toggle\s*{[\s\S]*min-height:\s*34px[\s\S]*padding:\s*3px 6px/);
@@ -153,7 +158,7 @@ test("Every gesture can reveal its own bounded Code Agent prompt directly below 
 test("The sync action uses the shared Button with stable loading semantics", () => {
   assert.match(source, /import Button from "\.\.\/shell\/Button"/);
   assert.match(source, /variant="primary"/);
-  assert.match(source, /loading=\{voiceConfigOtaState\?\.pending\}/);
+  assert.match(source, /loading=\{syncPending\}/);
   assert.match(source, /loadingLabel="正在同步…"/);
 });
 
@@ -169,9 +174,9 @@ test("An unverified runtime does not fall back to the Linux hardware illustratio
 test("P4 map shows three hardware keys plus the joystick and every gesture row", () => {
   const css = readFileSync(join(here, "..", "styles.css"), "utf8");
   const dashboard = readFileSync(join(here, "..", "DeviceDashboard.jsx"), "utf8");
-  assert.match(source, /p4_sw1_short/);
-  assert.match(source, /p4_sw2_short/);
-  assert.match(source, /p4_sw3_short/);
+  assert.match(dashboard, /p4_sw1_short/);
+  assert.match(dashboard, /p4_sw2_short/);
+  assert.match(dashboard, /p4_sw3_short/);
   assert.match(dashboard, /p4_sw1_long/);
   assert.match(dashboard, /p4_sw2_long/);
   assert.match(dashboard, /p4_sw3_long/);
@@ -189,12 +194,12 @@ test("P4 map shows three hardware keys plus the joystick and every gesture row",
 
 test("Each physical group owns an accessible standalone SVG control illustration", () => {
   const css = readFileSync(join(here, "..", "styles.css"), "utf8");
-  assert.match(source, /function ControlGlyph/);
-  assert.match(source, /role="img"/);
-  assert.match(source, /aria-label=\{`\$\{label\} 实体控件示意`\}/);
+  assert.match(map, /function ControlGlyph/);
+  assert.match(map, /role="img"/);
+  assert.match(map, /aria-label=\{`\$\{label\} 实体控件示意`\}/);
   assert.match(source, /controlId=\{group\.id\}/);
-  assert.match(source, /board-button-control-glyph__key/);
-  assert.match(source, /board-button-control-glyph__encoder/);
+  assert.match(map, /board-button-control-glyph__key/);
+  assert.match(map, /board-button-control-glyph__encoder/);
   assert.match(css, /\.board-button-control-glyph\s*{/);
   assert.match(css, /\.board-button-control-glyph__key\s*{/);
   assert.match(css, /\.board-button-control-glyph__encoder\s*{/);
@@ -235,16 +240,16 @@ test("Component-owned actions are not rendered as global hardware actions", () =
 });
 
 test("P4 map matches the physical left-to-right SW1, SW2, SW3, joystick layout", () => {
-  assert.match(source, /board-button-map__body--p4/);
-  assert.match(source, /board-button-map__control-deck/);
-  assert.match(source, /\["p4_sw1", "p4_sw1_short", 84, "SW1"\]/);
-  assert.match(source, /\["p4_sw2", "p4_sw2_short", 150, "SW2"\]/);
-  assert.match(source, /\["p4_sw3", "p4_sw3_short", 216, "SW3"\]/);
-  assert.match(source, /board-button-map__encoder--p4[\s\S]*cx="328" cy="242"/);
-  assert.match(source, /x=\{x\} y="218" width="48" height="48" rx="12"/);
-  assert.match(source, /board-button-map__encoder-label/);
-  assert.match(source, /p4_joystick/);
-  assert.match(source, /!isP4Runtime && controlRows\.map/);
+  assert.match(map, /board-button-map__body--p4/);
+  assert.match(map, /board-button-map__control-deck/);
+  assert.match(map, /id: "p4_sw1", label: "SW1"[^}]+x: 84/);
+  assert.match(map, /id: "p4_sw2", label: "SW2"[^}]+x: 150/);
+  assert.match(map, /id: "p4_sw3", label: "SW3"[^}]+x: 216/);
+  assert.match(map, /board-button-map__encoder--p4[\s\S]*cx="328" cy="242"/);
+  assert.match(map, /x=\{x\} y="218" width="48" height="48" rx="12"/);
+  assert.match(map, /board-button-map__encoder-label/);
+  assert.match(map, /p4_joystick/);
+  assert.match(source, /viewBox="0 0 560 320"[\s\S]*controlRows\.map/);
   assert.match(source, /row\.controlId && hoveredButtonId === row\.controlId/);
 });
 

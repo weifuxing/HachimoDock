@@ -1,7 +1,7 @@
 /**
  * [Input] image + optional visual style + provider config + reusable preview checkpoint + onProgress callback + AbortSignal.
  * [Output] orchestrates Ark Seedream background editing + Responses prompt generation + low-resolution
- *          bounded parallel video tasks with shared-reference rejection stopping unsubmitted actions,
+ *          bounded parallel video tasks (Kling uses reference-based local prompts) with shared-reference rejection stopping unsubmitted actions,
  *          or a user-prompted single-family replacement; completed results remain available.
  *          Seedream input/output moderation stops preprocessing before prompt/video calls.
  *          Explicit recovery migrates old review policy; local inspection failures retain safe stage/code and downloaded bytes; prompts adapt to original morphology.
@@ -14,7 +14,7 @@ import { buildImagePayload, bytesToDataUrl, uint8ToBase64 } from "./image.js";
 import { processImageForPipeline } from "./image-processing.js";
 import { resolveGenerationSpeedConfig, THINKING_IMAGE_DIMENSION } from "./pipeline-defaults.js";
 import { requireAvailableVideoModel } from "./video-models.js";
-import { buildDryRunResponse, normalizeFamilies, normalizePromptResponse, parseModelJson } from "./prompts.js";
+import { buildDryRunResponse, buildReferencePromptResponse, normalizeFamilies, normalizePromptResponse, parseModelJson } from "./prompts.js";
 import { callThinkingModel, DEFAULT_THINKING_MODEL } from "./thinking-model.js";
 import { getVolcanoInputImageRejection, runVolcanoFamily } from "./providers/volcano.js";
 import { DEFAULT_VOLCANO_IMAGE_MODEL } from "./providers/volcano-image.js";
@@ -116,14 +116,7 @@ async function runProviderFamily({
 }) {
   if (providerConfig.provider === "kling") {
     return runKlingFamily({
-      config: {
-        accessKey: providerConfig.accessKey || providerConfig.apiKey,
-        secretKey: providerConfig.secretKey,
-        baseUrl: providerConfig.baseUrl,
-        model: providerConfig.model,
-        mode: providerConfig.mode,
-        duration: providerConfig.duration,
-      },
+      config: providerConfig,
       prompt,
       imageBase64: imagePayload.base64,
       signal,
@@ -289,8 +282,6 @@ function setStatus(progress, family, patch) {
  * @param {{
  *   provider: 'volcengine'|'kling'|'custom',
  *   apiKey?: string,
- *   accessKey?: string,
- *   secretKey?: string,
  *   baseUrl?: string,
  *   model?: string,
  *   imageEdit?: { apiKey?: string, baseUrl?: string, model?: string }, independent Ark Seedream image-edit config
@@ -353,7 +344,7 @@ export async function runAvatarPipeline({
     catch (error) { persistenceError = error; throw error; }
   };
   const saveResult = serialQueue();
-  const thinking = { apiKey: effectiveProviderConfig.apiKey || effectiveProviderConfig.accessKey || "",
+  const thinking = { apiKey: effectiveProviderConfig.apiKey || "",
     baseUrl: effectiveProviderConfig.baseUrl, model: resolveThinkingModelName(effectiveProviderConfig), apiUrlOverride: effectiveProviderConfig.thinkingApiUrl };
   let inputInspection;
   if (automatic && !dryRun) {
@@ -448,7 +439,7 @@ export async function runAvatarPipeline({
   // 1) Thinking model
   progress.stage = "thinking";
   await commit({ phase: "thinking" });
-  progress.message = "正在分析图片并生成 prompt…";
+  progress.message = effectiveProviderConfig.provider === "kling" ? "正在准备内置动作提示词…" : "正在分析图片并生成 prompt…";
   emit();
 
   let thinkingResult;
@@ -461,6 +452,8 @@ export async function runAvatarPipeline({
       prompts: dryRunResponse.prompts,
       raw: { dry_run: true },
     };
+  } else if (effectiveProviderConfig.provider === "kling") {
+    thinkingResult = buildReferencePromptResponse({ families: generationFamilies, personality });
   } else {
     if (retryReview && session?.thinkingResponse) {
       try {
@@ -482,7 +475,7 @@ export async function runAvatarPipeline({
     });
     thinkingResult = await callThinkingModel({
       thinking: {
-        apiKey: effectiveProviderConfig.apiKey || effectiveProviderConfig.accessKey || "",
+        apiKey: effectiveProviderConfig.apiKey || "",
         baseUrl: effectiveProviderConfig.baseUrl,
         model: resolveThinkingModelName(effectiveProviderConfig),
         apiUrlOverride: effectiveProviderConfig.thinkingApiUrl,
@@ -550,14 +543,7 @@ export async function runAvatarPipeline({
       } else if (effectiveProviderConfig.provider === "kling") {
         if (session) { session.actions ||= {}; session.actions[entry.family] = { intent: true }; await commit({}); }
         result = await runKlingFamily({
-          config: {
-            accessKey: effectiveProviderConfig.accessKey || effectiveProviderConfig.apiKey,
-            secretKey: effectiveProviderConfig.secretKey,
-            baseUrl: effectiveProviderConfig.baseUrl,
-            model: effectiveProviderConfig.model,
-            mode: effectiveProviderConfig.mode,
-            duration: effectiveProviderConfig.duration,
-          },
+          config: effectiveProviderConfig,
           prompt: withSubjectMotionPolicy(entry.prompt),
           imageBase64: imagePayload.base64,
           signal,
@@ -774,14 +760,7 @@ export async function runSingleFamilyRetry({
 
   if (effectiveProviderConfig.provider === "kling") {
     return runKlingFamily({
-      config: {
-        accessKey: effectiveProviderConfig.accessKey || effectiveProviderConfig.apiKey,
-        secretKey: effectiveProviderConfig.secretKey,
-        baseUrl: effectiveProviderConfig.baseUrl,
-        model: effectiveProviderConfig.model,
-        mode: effectiveProviderConfig.mode,
-        duration: effectiveProviderConfig.duration,
-      },
+      config: effectiveProviderConfig,
       prompt,
       imageBase64,
       signal,

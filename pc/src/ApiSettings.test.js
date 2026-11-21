@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { LLM_PRESETS, DEFAULT_LLM_PROVIDER, selectLlmProvider, changeLlmEndpoint, describeLlmPreset } from "./lib/api-configuration.js";
+import { LLM_PRESETS, MIMO_CONNECTIONS, DEFAULT_LLM_PROVIDER, selectLlmProvider, changeLlmEndpoint, describeLlmPreset } from "./lib/api-configuration.js";
 
 const srcDir = dirname(fileURLToPath(import.meta.url));
 const readSource = (file) => readFileSync(join(srcDir, file), "utf8");
@@ -118,13 +118,14 @@ test("LLM scope explanation belongs to header and usage spacing is page-scoped",
 test("API settings owns voice and generation credential inputs", () => {
   const source = readSource("ApiSettings.jsx");
 
-  assert.match(source, /title="设置"/);
+  assert.match(source, /title="模型配置"/);
   assert.match(source, /load_device_asr_settings/);
   assert.match(source, /save_device_asr_settings/);
   assert.match(source, /test_device_asr_settings/);
   assert.match(source, /VIDEO_PROVIDERS\.map/);
-  assert.match(source, /Access Key/);
-  assert.match(source, /Secret Key/);
+  assert.doesNotMatch(source, /Access Key|Secret Key/);
+  assert.match(source, /KlingVideoSettings/);
+  assert.match(source, /href=\{KLING_KEY_URL\}/);
   assert.match(source, /type=\{showSecrets \? "text" : "password"\}/);
   assert.match(source, /saveProviderConfig/);
   assert.match(source, /emitApiConfigurationUpdated/);
@@ -135,8 +136,9 @@ test("API settings owns voice and generation credential inputs", () => {
   assert.match(source, /https:\/\/ark\.volcengine\.com\/model\/detail\?name=doubao-seedance-2-0-mini/);
   assert.match(source, /provider\.id === "volcengine"/);
   assert.equal((source.match(/Key 获取方式/g) || []).length, 2);
-  assert.equal((source.match(/target="_blank"/g) || []).length, 2);
-  assert.equal((source.match(/rel="noreferrer"/g) || []).length, 2);
+  assert.equal((source.match(/target="_blank"/g) || []).length, 3);
+  assert.equal((source.match(/rel="noreferrer"/g) || []).length, 3);
+  assert.doesNotMatch(source, /devin_cloud_|Devin 云端会话/);
 });
 
 test("saved ASR credentials are broadcast before the optional cloud probe", () => {
@@ -159,7 +161,7 @@ test("app exposes API configuration as a first-level sidebar page", () => {
 
   assert.match(app, /const ApiSettings = lazy\(\(\) => import\("\.\/ApiSettings"\)\)/);
   assert.match(app, /activeTab = view === "api"/);
-  assert.match(app, /title="设置"/);
+  assert.match(app, /title="模型配置"/);
   assert.match(app, /view === "api"[\s\S]*<ApiSettings/);
   assert.match(app, /onOpenApiSettings/);
 });
@@ -182,4 +184,19 @@ test("API settings uses a responsive provider grid", () => {
   assert.match(css, /\.api-settings__provider-grid\s*\{/);
   assert.match(css, /@media \(max-width: 900px\)[\s\S]*\.api-settings__provider-grid/);
   assert.match(css, /@media \(max-width: 620px\)[\s\S]*\.api-settings__form--asr/);
+});
+
+
+test("MiMo only lists pay-as-you-go and China Token Plan with separate credentials", () => {
+  assert.deepEqual(MIMO_CONNECTIONS.map(({ id, baseUrl }) => [id, baseUrl]), [
+    ["mimo", "https://api.xiaomimimo.com/v1"],
+    ["mimo-token-plan-cn", "https://token-plan-cn.xiaomimimo.com/v1"],
+  ]);
+  const payg = { llmProvider: "mimo", llmApiKey: "draft-paying-key",
+    llmApiKeyMasks: { mimo: "old-payg", "mimo-token-plan-cn": "old-token-plan" } };
+  const token = selectLlmProvider(payg, "mimo-token-plan-cn");
+  assert.equal(token.llmApiKey, "");
+  assert.equal(token.llmApiKeyMasked, "old-token-plan");
+  assert.equal(token.llmBaseUrl, MIMO_CONNECTIONS[1].baseUrl);
+  assert.equal(selectLlmProvider(token, "mimo").llmApiKeyMasked, "old-payg");
 });

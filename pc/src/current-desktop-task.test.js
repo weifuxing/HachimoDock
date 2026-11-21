@@ -4,6 +4,24 @@ import { readFileSync } from "node:fs";
 
 const rust = (name) => readFileSync(new URL(`../src-tauri/src/${name}`, import.meta.url), "utf8");
 
+test("DeepSeek SW1 submits an existing foreground draft without a recording or replay", () => {
+  const source = rust("lib.rs");
+  const entry = source.split("fn is_deepseek_draft_send_press(")[1].split("fn schedule_device_voice_cleanup(")[0];
+  for (const guard of [
+    'payload["event"] == "button.sw1.short_press"', 'payload["context"] == "main"',
+    'payload["handledLocally"] == false', "active.is_none()",
+    "status.connection_id == expected.connection_id", "status.boot_id == expected.boot_id",
+    "CodexComposerBridge::is_agent_frontmost(AGENT)",
+  ]) assert.ok(entry.includes(guard), guard);
+  assert.equal((entry.match(/bridge\.confirm\(/g) || []).length, 1);
+  assert.doesNotMatch(entry, /\.update\(|dispatch_task|\/voice\/submit/);
+
+  const mac = rust("codex_composer_macos.rs").split("fn confirm_voice_inner(")[1];
+  const once = mac.split("if state.agent == MacosAgent::DeepSeekHarness && expected.is_some()")[0];
+  assert.match(once, /DeepSeekHarness\) && expected.is_none\(\)[\s\S]*submit_once\(/);
+  assert.doesNotMatch(once, /wait_for_submit_readback/);
+});
+
 test("realtime delegation targets the current editor independently of display-follow bindings", () => {
   const source = rust("desktop_agent.rs");
   assert.match(source, /CodexComposerBridge::start_current_task_for\(owned.agent.id\(\)\)/);
@@ -42,7 +60,7 @@ test("Windows current-task lookup rejects ambiguous windows without using launch
   assert.equal((dispatch.match(/Invoke-SendButton/g) || []).length,1);
   assert.match(dispatch, /submission = \$submission/);
   assert.doesNotMatch(dispatch, /PressEnter|Start-Sleep|readbackDeadline/);
-  assert.match(source, /if \(\$state.Agent -eq 'deepseek-harness' -or \$strictButton -or -not \$allowQueue\) \{ throw 'DESKTOP_TASK_SEND_UNAVAILABLE' \}/);
+  assert.match(source, /if \(\$strictButton -or -not \$allowQueue\) \{ throw 'DESKTOP_TASK_SEND_UNAVAILABLE' \}/);
   assert.match(source, /\$submission = Invoke-SendButton \$state \$true \$true/);
 });
 
@@ -118,7 +136,7 @@ test("both platforms append live drafts without waiting for old receipts", () =>
 test("WorkBuddy snapshots share the safe task protocol but keep native adapters isolated", () => {
   const windows = rust("codex_composer.rs");
   const snapshot = windows.split("function Get-TaskDraftSnapshot")[1].split("function Test-CodexSubmitPoint")[0];
-  assert.match(snapshot, /@\('codex','workbuddy','deepseek-harness'\) -notcontains \$state.Agent/);
+  assert.match(snapshot, /@\('codex','workbuddy','devin','deepseek-harness'\) -notcontains \$state.Agent/);
   assert.match(snapshot, /agent = \$state.Agent/);
   assert.match(snapshot, /@\('agent','processId'/);
   const dispatch = windows.split("'dispatch' {")[1].split("'release' {")[0];

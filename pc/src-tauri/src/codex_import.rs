@@ -657,70 +657,102 @@ fn validate_community_pet_id(pet_id: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-fn npx_candidates() -> Vec<&'static str> {
+fn community_npx_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(path) = crate::merged_host_path(None) {
+        for dir in std::env::split_paths(&path).filter(|dir| dir.is_absolute()) {
+            crate::push_unique_path(&mut dirs, dir);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    for dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        crate::push_unique_path(&mut dirs, PathBuf::from(dir));
+    }
+    #[cfg(unix)]
+    if let Ok(home) = crate::get_home_dir() {
+        for relative in [".volta/bin", ".asdf/shims", ".local/share/mise/shims"] {
+            crate::push_unique_path(&mut dirs, home.join(relative));
+        }
+    }
     #[cfg(windows)]
-    {
-        vec!["npx.cmd", "npx.exe", "npx"]
+    for key in ["NVM_SYMLINK", "ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(path) = std::env::var_os(key).map(PathBuf::from).filter(|p| p.is_absolute()) {
+            let dir = if key == "NVM_SYMLINK" { path } else { path.join("nodejs") };
+            crate::push_unique_path(&mut dirs, dir);
+        }
     }
+    dirs
+}
+
+fn run_community_npx(
+    dirs: &[PathBuf],
+    pet_id: &str,
+    extra_ca: Option<&Path>,
+) -> Result<std::process::Output, String> {
+    #[cfg(windows)]
+    let names = ["npx.cmd", "npx.exe", "npx"];
     #[cfg(not(windows))]
-    {
-        vec!["npx"]
+    let names = ["npx"];
+
+    let mut launch_error = None;
+    for dir in dirs {
+        for name in names {
+            let npx = dir.join(name);
+            if !npx.is_file() {
+                continue;
+            }
+            // npm's npx shim needs Node on PATH. Prefer its own directory so
+            // a second Node installation does not take precedence.
+            let path = std::env::join_paths(
+                std::iter::once(dir).chain(dirs.iter().filter(|other| *other != dir)),
+            )
+            .map_err(|err| format!("无法构造社区导入的 PATH：{err}"))?;
+            let mut command = crate::command_for_host(&npx);
+            command.env("PATH", path);
+            if let Some(file) = extra_ca {
+                command.env("NODE_EXTRA_CA_CERTS", file);
+            }
+            match command
+                .args(["--yes", "codex-pets", "add", pet_id])
+                .stdin(Stdio::null())
+                .output()
+            {
+                Ok(output) => return Ok(output),
+                Err(err) => launch_error = Some(format!("无法启动 npx（{}）：{err}", npx.display())),
+            }
+        }
     }
+    Err(launch_error.unwrap_or_else(|| {
+        "未找到可用的 npx。请确认 Node.js/npm 已安装并在系统或用户 PATH 中。".to_string()
+    }))
 }
 
 pub fn install_codex_community_pet(pet_id: &str) -> Result<CodexCommunityInstallResult, String> {
     let pet_id = validate_community_pet_id(pet_id)?;
-    let mut not_found = true;
-    let mut last_error = String::new();
     let extra_ca = crate::llm_network::community_ca_file()?;
-
-    for npx in npx_candidates() {
-        let mut command = crate::command_for_host(npx);
-        if let Some(file) = &extra_ca { command.env("NODE_EXTRA_CA_CERTS", file.path()); }
-        let output = command
-            .args(["--yes", "codex-pets", "add", &pet_id])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output();
-
-        match output {
-            Ok(output) => {
-                not_found = false;
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                if output.status.success() {
-                    return Ok(CodexCommunityInstallResult {
-                        pet_id: pet_id.clone(),
-                        command: format!("npx --yes codex-pets add {}", pet_id),
-                        stdout,
-                        stderr,
-                    });
-                }
-                let detail = if stderr.is_empty() {
-                    stdout.clone()
-                } else {
-                    stderr.clone()
-                };
-                last_error = format!(
-                    "执行 npx codex-pets add {} 失败 (exit {:?}){}{}",
-                    pet_id,
-                    output.status.code(),
-                    if detail.is_empty() { "" } else { ": " },
-                    detail
-                );
-            }
-            Err(err) => {
-                last_error = err.to_string();
-            }
-        }
+    let output = run_community_npx(
+        &community_npx_search_dirs(),
+        &pet_id,
+        extra_ca.as_ref().map(|file| file.path()),
+    )?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if output.status.success() {
+        return Ok(CodexCommunityInstallResult {
+            command: format!("npx --yes codex-pets add {pet_id}"),
+            pet_id,
+            stdout,
+            stderr,
+        });
     }
 
-    if not_found {
-        Err("未找到 npx，请先安装 Node.js/npm 后重试。".to_string())
-    } else {
-        Err(last_error)
-    }
+    let detail = if stderr.is_empty() { &stdout } else { &stderr };
+    let separator = if detail.is_empty() { "" } else { "： " };
+    Err(format!(
+        "执行 npx codex-pets add {pet_id} 失败 (exit {:?}){separator}{detail}",
+        output.status.code(),
+    ))
 }
 
 /// Port of the Python reference's `is_magenta_halo_pixel`: detects the
@@ -1114,6 +1146,44 @@ mod tests {
         assert!(MAPPING.iter().any(|row| row.family == "working"));
         assert!(!MAPPING.iter().any(|row| row.family == "working.thinking"));
         assert!(!MAPPING.iter().any(|row| row.family == "working.default"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn community_npx_can_run_with_node_next_to_the_shim() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let node_bin = root.path().join("node install");
+        fs::create_dir(&node_bin).unwrap();
+        for (name, script) in [
+            ("npx", "#!/usr/bin/env node\n"),
+            ("node", r#"#!/bin/sh
+printf '%s\n' "$2" "$3" "$4" "$5" "$NODE_EXTRA_CA_CERTS"
+"#),
+        ] {
+            let path = node_bin.join(name);
+            fs::write(&path, script).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let ca = root.path().join("test-ca.pem");
+        let dirs = [PathBuf::from("/usr/bin"), node_bin];
+        let output = run_community_npx(&dirs, "xiaoba", Some(&ca)).unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("--yes\ncodex-pets\nadd\nxiaoba\n{}\n", ca.display())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn community_npx_distinguishes_missing_and_failed_launch() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = [root.path().to_path_buf()];
+        assert!(run_community_npx(&dirs, "xiaoba", None).unwrap_err().contains("未找到"));
+        fs::write(root.path().join("npx"), b"not executable").unwrap();
+        assert!(run_community_npx(&dirs, "xiaoba", None).unwrap_err().contains("无法启动"));
     }
 
     #[test]

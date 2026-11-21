@@ -225,3 +225,27 @@ test('already-aborted request performs no network I/O', async t => {
   let calls = 0; const { adapter } = await fixture(t, (_, res) => { calls++; res.end() })
   const c = new AbortController(); c.abort(); const events = await collect(adapter, { sessionId: 'a', text: 'voice', signal: c.signal }); assert.equal(events[0].code, 'CANCELLED'); assert.equal(calls, 0)
 })
+
+test('strict monitor polling distinguishes empty live registry from outage without logging private errors', async t => {
+  let mode = 'empty'
+  const { adapter } = await fixture(t, (_, res) => {
+    if (mode === 'empty') res.end(JSON.stringify({ version: 2, sessions: [] }))
+    else if (mode === 'bad-version') res.end(JSON.stringify({ version: 1, sessions: [] }))
+    else if (mode === 'denied') { res.statusCode = 401; res.end('private-auth-detail') }
+    else res.end('private-invalid-json')
+  })
+  adapter.log = () => assert.fail('strict polling must not log raw endpoint or credential errors')
+  assert.deepEqual(await adapter.listSessions({ strict: true }), [])
+  for (mode of ['bad-version', 'denied', 'invalid']) {
+    await assert.rejects(adapter.listSessions({ strict: true }), { message: 'DSH snapshot unavailable' })
+  }
+  adapter._auth = () => { throw Error('private-path/private-token') }
+  await assert.rejects(adapter.listSessions({ strict: true }), { message: 'DSH snapshot unavailable' })
+})
+
+test('normalized DSH snapshots retain exact live sequence for follow stale-event guards', () => {
+  const row = _internal.normalizeSession({ id: 'fixture', epoch: 'a'.repeat(64), sourceSeq: 123, transitionRevision: 4 })
+  assert.equal(row.sourceSeq, 123)
+  assert.equal(row.transitionRevision, 4)
+  for (const sourceSeq of [-1, 1.5, '123', Infinity]) assert.equal(_internal.normalizeSession({ id: 'fixture', sourceSeq }).sourceSeq, undefined)
+})

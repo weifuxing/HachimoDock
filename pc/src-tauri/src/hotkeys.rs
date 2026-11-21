@@ -167,6 +167,16 @@ pub fn send(chord: &Chord) -> Result<(), String> {
     native_send(chord)
 }
 
+pub(crate) fn send_voice_preset(profile: &str) -> Result<(), String> {
+    let chord = match (platform(), profile) {
+        ("macos", "mac-ctrl-alt-d") => Chord { modifiers: vec!["ctrl".into(), "alt".into()], key: "d".into() },
+        ("windows", "win-h") => Chord { modifiers: vec!["cmd".into()], key: "h".into() },
+        ("windows", "win-ctrl") => Chord { modifiers: vec!["ctrl".into()], key: "left-win".into() },
+        _ => return Err("请选择与当前电脑系统匹配的语音快捷键".into()),
+    };
+    send(&chord)
+}
+
 #[cfg(target_os = "macos")]
 fn native_send(chord: &Chord) -> Result<(), String> {
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
@@ -256,7 +266,7 @@ fn win_vk(key: &str) -> Option<u16> {
     Some(match key {
         "f1" => 0x70, "f2" => 0x71, "f3" => 0x72, "f4" => 0x73, "f5" => 0x74, "f6" => 0x75, "f7" => 0x76, "f8" => 0x77,
         "f9" => 0x78, "f10" => 0x79, "f11" => 0x7A, "f12" => 0x7B, "enter" => 0x0D, "esc" => 0x1B, "tab" => 0x09,
-        "space" => 0x20, "backspace" => 0x08, "delete" => 0x2E, "up" => 0x26, "down" => 0x28, "left" => 0x25,
+        "space" => 0x20, "backspace" => 0x08, "delete" => 0x2E, "left-win" => 0x5B, "up" => 0x26, "down" => 0x28, "left" => 0x25,
         "right" => 0x27, "home" => 0x24, "end" => 0x23, "pageup" => 0x21, "pagedown" => 0x22, "minus" => 0xBD,
         "equal" => 0xBB, "comma" => 0xBC, "period" => 0xBE, "slash" => 0xBF, "semicolon" => 0xBA, "quote" => 0xDE,
         "backquote" => 0xC0, "lbracket" => 0xDB, "rbracket" => 0xDD, "backslash" => 0xDC,

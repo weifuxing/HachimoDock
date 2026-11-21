@@ -1,3 +1,4 @@
+#include "pet_p4_render_cache_memory.h"
 #include <assert.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -133,6 +134,8 @@ static void assert_empty(void) {
   pet_resource_usage_t u = usage();
   assert(!u.live_owners && !u.revoked_owners && !u.leases[PET_RESOURCE_ASSET_BUFFER] && !u.leases[PET_RESOURCE_ASSET_PREPARE]);
   assert(allocations == frees);
+  pet_render_cache_memory_t cache=pet_p4_renderer_cache_memory();
+  assert(!cache.stream_bytes&&!cache.stream_slots&&!cache.mutations);
 }
 static void valid_source(void) {
   memset(source_bytes, 0x80, sizeof(source_bytes));

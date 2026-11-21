@@ -276,7 +276,8 @@ def test_real_package_targets_and_unused_sprite_generations(tmp_path, sprites):
 #define MINIAPP_SPRITE_FILE_HEADER_SIZE 8
 typedef struct{uint8_t fps,frame_width,frame_height,frames;size_t data_offset,data_length;} sprite_t;
 typedef sprite_t pet_p4_miniapp_sprite_t;
-typedef struct{uint8_t count;size_t data_length;sprite_t items[PET_P4_MINIAPP_SPRITE_MAX];uint8_t pixels[128];} pet_p4_miniapp_sprite_pack_t;
+typedef struct{uint8_t count;size_t data_length,wasm_size;sprite_t items[PET_P4_MINIAPP_SPRITE_MAX];uint8_t pixels[128];} pet_p4_miniapp_sprite_pack_t;
+#define HACHI_WASM_FILE_INDEX 254u
 static uint32_t g_catalog_sequence=4;
 static char g_storage_failure[160];
 static bool storage_work_current(void){return true;}

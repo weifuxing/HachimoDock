@@ -88,12 +88,9 @@ test('particle producer and real core readiness share generation; visibility cle
  assert.match(s,/actions=\{particleActions\} active=\{particleActive\} generation=\{particleGeneration\}/);
  assert.match(layer,/!actions\?\.isCurrent\(emitters,generation\)/);assert.match(layer,/actions\?\.take\(emitters,generation\)/);
 });
-test('preview capabilities stay strict without turning optional device support into an install gate',()=>{
- const s=src('../ComponentCenter.jsx');
- const start=s.indexOf('function gameInstallBlockedReason('),end=s.indexOf('\nfunction localInstallBlockedReason(',start);
- const check=new Function(`${s.slice(start,end)};return gameInstallBlockedReason;`)();
- assert.equal(check({appRuntime:{form:{engine:'p4-app-form-v3'}}},{capabilities:{}}),'');
+test('preview capabilities remain specific to the declared engine',()=>{
  assert.equal(previewFormCapabilityAccepts('p4-app-form-v3',{widgetAppForm:'p4-app-form-v1'}),false);
+ assert.equal(previewFormCapabilityAccepts('p4-app-form-v2',{widgetAppFormV2:'p4-app-form-v2'}),true);
  assert.equal(previewCanvasCapabilityAccepts('p4-canvas-v2','p4-canvas-v1'),false);
 });
 test('page visibility reaches mixed/nonmixed previews; readonly journey/default and service lifecycle remain',()=>{

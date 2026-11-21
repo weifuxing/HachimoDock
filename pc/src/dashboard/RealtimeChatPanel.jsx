@@ -1,9 +1,9 @@
 /**
  * [Input] `useDeviceContext()` realtime chat status, the current on-device appearance (with its
- *         `personaVoice`), USB connectivity, and the start/stop helpers.
+ *         `personaVoice`), Wi-Fi or USB connectivity, and the start/stop helpers.
  * [Output] The 实时对话 card on the device dashboard: which persona will talk, whether the board
  *          key is bound, live state (listening / thinking / speaking), the last transcript and
- *          reply, errors, prerequisite checks and actionable setup links, plus PC-side 开始/结束聊天 buttons.
+ *          reply, public search sources, errors, prerequisite checks and actionable setup links, plus PC-side 开始/结束聊天 buttons.
  * [Pos] dashboard node in ref/src/dashboard, rendered by DeviceDashboard.jsx.
  * [Sync] If this file changes, update this header and `ref/src/.folder.md`.
  */
@@ -32,7 +32,7 @@ export function realtimeStateLabel(state) {
 }
 
 export default function RealtimeChatPanel({ keyBound = false, onOpenApiSettings, onOpenGallery, onOpenPersona }) {
-  const { realtimeChat, startRealtimeChat, stopRealtimeChat, currentDisplay, deviceOnline } = useDeviceContext();
+  const { realtimeChat, startRealtimeChat, stopRealtimeChat, currentDisplay, usb, realtimeWifiReady } = useDeviceContext();
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState("");
   const appearance = currentDisplay?.appearance || null;
@@ -43,6 +43,7 @@ export default function RealtimeChatPanel({ keyBound = false, onOpenApiSettings,
   const recovering = !localError && isRecoveringAsr(realtimeChat);
   const [check, setCheck] = useState({ loading: true });
   const [checkRevision, setCheckRevision] = useState(0);
+
   useEffect(() => {
     let cancelled = false;
     let sequence = 0;
@@ -61,7 +62,7 @@ export default function RealtimeChatPanel({ keyBound = false, onOpenApiSettings,
     window.addEventListener("focus", load);
     return () => { cancelled = true; window.removeEventListener(API_CONFIGURATION_UPDATED_EVENT, load); window.removeEventListener("focus", load); };
   }, [checkRevision]);
-  const readiness = realtimeReadiness({ deviceOnline, appearance, personaReady, ...check });
+  const readiness = realtimeReadiness({ deviceOnline: usb.connected || realtimeWifiReady, appearance, personaReady, ...check });
   const nextAction = readiness?.action === "api" ? onOpenApiSettings
     : readiness?.action === "persona" ? onOpenPersona
     : readiness?.action === "appearance" ? onOpenGallery
@@ -119,6 +120,22 @@ export default function RealtimeChatPanel({ keyBound = false, onOpenApiSettings,
           {realtimeChat.transcript && <div><span className="muted small">你：</span>{realtimeChat.transcript}</div>}
           {realtimeChat.reply && <div><span className="muted small">{realtimeChat.displayName || "它"}：</span>{realtimeChat.reply}</div>}
         </div>
+      )}
+      {realtimeChat?.searchState === "searching" && <p className="muted small" role="status">正在联网检索…</p>}
+      {realtimeChat?.searchState === "failed" && <p className="muted small" role="status">{realtimeChat.searchError}</p>}
+      {realtimeChat?.searchSources?.length > 0 && (
+        <details className="usage-help">
+          <summary>联网来源（{realtimeChat.searchSources.length}）{realtimeChat.searchProvider && ` · ${realtimeChat.searchProvider}`}</summary>
+          <ul>
+            {realtimeChat.searchSources.map(source => (
+              <li key={source.url}>
+                <a href={source.url} target="_blank" rel="noopener noreferrer">{source.title}</a>
+                {source.publishedAt && <span className="muted small"> · {source.publishedAt.slice(0, 10)}</span>}
+              </li>
+            ))}
+          </ul>
+          {realtimeChat.searchRetrievedAt && <p className="muted small">查询时间 {new Date(realtimeChat.searchRetrievedAt).toLocaleString()}</p>}
+        </details>
       )}
       {error && <div role={recovering ? "status" : "alert"} className={recovering ? "usage-help" : "message-banner message-banner--error"}>{recovering ? "" : "实时对话失败："}{error}</div>}
       <details className="usage-help"><summary>问题排查与日志</summary><p>遇到问题时，可提供报错信息及诊断日志。日志位于应用数据目录 / logs / realtime-chat.jsonl，不记录录音与完整对话。</p></details>

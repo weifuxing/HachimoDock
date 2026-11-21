@@ -1,6 +1,6 @@
 /**
  * [Input] Detected local coding agents, persisted appearance records, and localStorage bridge assignment state.
- * [Output] ChatGPT（Codex）-first fixed Agent ordering, explicit first-run selection, shared per-channel appearance mapping, and single active desktop-channel helpers used by setup, dashboard, and gallery.
+ * [Output] Fixed Agent display ordering, explicit first-run selection, shared per-channel appearance mapping, and single active desktop-channel helpers used by setup, dashboard, and gallery.
  * [Pos] lib node in pc/src/lib
  * [Sync] If this file changes, update `pc/src/.folder.md` and consumers that persist agent assignments.
  */
@@ -9,13 +9,28 @@ import { BUILTIN_TERRIER_APPEARANCE_ID } from "./builtin-appearances.js";
 
 export const AGENT_APPEARANCE_MAP_STORAGE_KEY = "pet-manager.agent-appearance-map";
 export const ENABLED_AGENTS_STORAGE_KEY = "pet-manager.enabled-agents";
-export const DEFAULT_AGENT_ID = "codex";
+export const DEFAULT_AGENT_ID = "workbuddy";
 
 export const FIXED_AGENT_OPTIONS = [
+  {
+    id: "workbuddy",
+    label: "WorkBuddy",
+    detail: "WorkBuddy 状态与气泡跟随；向当前可见对话追加语音草稿",
+  },
   {
     id: "codex",
     label: "ChatGPT（Codex）",
     detail: "ChatGPT 客户端的 Codex 任务与状态渠道",
+  },
+  {
+    id: "deepseek-harness",
+    label: "DeepSeek Harness",
+    detail: "DeepSeek Harness 桌面对话与本地桥接渠道",
+  },
+  {
+    id: "mimocode",
+    label: "MiMo Desktop / MiMoCode",
+    detail: "跟随小米 MiMo 桌面应用和 MiMoCode 的会话状态",
   },
   {
     id: "claude-code",
@@ -28,19 +43,14 @@ export const FIXED_AGENT_OPTIONS = [
     detail: "OpenClaw 本地运行时渠道",
   },
   {
-    id: "mimocode",
-    label: "MiMoCode",
-    detail: "MiMoCode 本地会话与实时状态渠道",
+    id: "hermes",
+    label: "Hermes Agent",
+    detail: "跟随 Hermes 本地会话状态",
   },
   {
-    id: "deepseek-harness",
-    label: "DeepSeek Harness",
-    detail: "DeepSeek Harness 桌面对话与本地桥接渠道",
-  },
-  {
-    id: "workbuddy",
-    label: "WorkBuddy",
-    detail: "WorkBuddy 状态与气泡跟随；向当前可见对话追加语音草稿",
+    id: "devin",
+    label: "Devin",
+    detail: "Devin 云端会话状态与气泡；向 Devin Desktop 当前对话追加语音草稿",
   },
 ];
 

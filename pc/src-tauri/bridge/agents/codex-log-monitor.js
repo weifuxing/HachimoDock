@@ -376,6 +376,11 @@ function desktopLogTurnId(body) {
 function completedTaskItem(item) {
   if (item?.status !== "completed") return false;
   if (item.type === "fileChange") return Array.isArray(item.changes) && item.changes.length > 0;
+  // The rollout uses a path-keyed map. Desktop history normalizes it to an array.
+  if (item.type === "FileChange") {
+    const changes = item.changes;
+    return Boolean(changes && typeof changes === "object" && !Array.isArray(changes) && Object.keys(changes).length);
+  }
   if (item.type === "imageGeneration") return true;
   return item.type === "mcpToolCall" && item.readOnlyHint === false
     && !item.error && !item.result?.isError;

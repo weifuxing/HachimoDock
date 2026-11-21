@@ -10,13 +10,18 @@ typedef struct {
   bool touch,boot;
 } pet_logical_common_plan_t;
 typedef struct {pet_logical_common_plan_t plan;bool valid;} pet_logical_retention_t;
+enum {
+  PET_CONNECTION_NONE, PET_CONNECTION_OFFLINE, PET_CONNECTION_USB, PET_CONNECTION_WIFI
+};
+static inline uint8_t pet_connection_banner(bool usb, bool wifi) {
+  return usb ? PET_CONNECTION_USB : wifi ? PET_CONNECTION_WIFI : PET_CONNECTION_OFFLINE;
+}
 static inline pet_logical_common_plan_t pet_logical_common_plan(bool state_present,
-    bool touch,int32_t x,int32_t y,bool connected,bool assets,bool device_id,
-    bool mounted,bool seen_host,bool boot){
+    bool touch,int32_t x,int32_t y,uint8_t banner,bool boot){
   pet_logical_common_plan_t p={.boot=boot};
   if(!state_present)return p;
   p.touch=touch;if(touch){p.touch_x=x;p.touch_y=y;}
-  p.banner=connected?(assets?0:1):device_id?2:(mounted||seen_host)?3:4;
+  p.banner=banner;
   return p;
 }
 static inline bool pet_logical_common_equal(pet_logical_common_plan_t a,pet_logical_common_plan_t b){

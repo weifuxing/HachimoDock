@@ -167,7 +167,7 @@ test("saved persona refreshes the device target and the active session without s
 test("firmware implements conversation capture, streamed playback, the key action and the HUD", () => {
   const audio = read("firmware/main/pet_p4_audio.c");
   assert.match(audio, /esp_err_t pet_p4_audio_conversation_set\(bool enabled, bool half_duplex, const char \*session_id\)/);
-  assert.match(audio, /esp_err_t pet_p4_audio_stream_push\(const uint8_t \*pcm, size_t length\)/);
+  assert.match(audio, /esp_err_t pet_p4_audio_stream_push\(const uint8_t \*pcm, size_t (?:length|bytes)\)/);
   assert.match(audio, /PET_P4_AUDIO_STREAM_START_BYTES 6400/);
   assert.match(audio, /if \(playback_gates_capture\(now_ms\)\) \{/);
   assert.match(audio, /if \(atomic_load\(&g_instrument_enabled\) \|\| pet_p4_audio_conversation_active\(\)\s*\|\| atomic_load_explicit\(&g_stream_active, memory_order_acquire\)\) return;/);
@@ -178,7 +178,7 @@ test("firmware implements conversation capture, streamed playback, the key actio
   }
   assert.match(protocol, /if \(!strcmp\(state->conversation_state, "listening"\)\) return "notification";/);
   const input = read("firmware/main/pet_p4_input.c");
-  assert.match(input, /"voice_ptt",\n\s+"realtime_chat",/);
+  assert.match(input, /static bool action_is_allowed[\s\S]*?"voice_ptt",[\s\S]*?"realtime_chat",/);
   const view = read("firmware/main/pet_p4_view.c");
   assert.match(view, /conversation_active\(state\)/);
   const doc = read("firmware/protocol.md");

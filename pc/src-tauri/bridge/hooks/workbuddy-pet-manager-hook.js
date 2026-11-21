@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 const { postStateToRunningServer } = require("./server-config");
-const { hookDisplay, readCompletionReceipt } = require("./workbuddy-display");
+const { hookDisplay, readCompletionReceipt, readSessionTitle } = require("./workbuddy-display");
 const { createHash } = require("node:crypto");
 const STATES = {
   SessionStart: "idle", SessionEnd: "sleeping", UserPromptSubmit: "working",
@@ -17,6 +17,7 @@ function stateForHook(payload, options) {
   // Explicitly allow bounded display text only; never forward the raw hook,
   // reasoning, tool arguments, auth, or transcript filesystem paths.
   const content = hookDisplay(payload, options);
+  const sessionTitle = readSessionTitle(payload, options);
   const generation = typeof payload.generation_id === "string" && payload.generation_id.length <= 512 ? payload.generation_id : "";
   const taskCorrelation = {
     userHash: event === "UserPromptSubmit" && typeof payload.prompt === "string" && payload.prompt.trim()
@@ -31,7 +32,8 @@ function stateForHook(payload, options) {
     taskCorrelation.receiptSource = receipt.receiptSource;
     taskCorrelation.userTimestamp = receipt.userTimestamp;
   }
-  return { agent_id: "workbuddy", session_id: id, event, state: STATES[event], session_title: "WorkBuddy 会话", session_title_explicit: false,
+  return { agent_id: "workbuddy", session_id: id, event, state: STATES[event],
+    session_title: sessionTitle || "WorkBuddy 会话", session_title_explicit: Boolean(sessionTitle),
     task_correlation: taskCorrelation,
     ...((receipt?.reply || content) ? { display_content: receipt?.reply || content } : {}) };
 }

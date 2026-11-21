@@ -42,3 +42,9 @@ export function firmwareUpdateDisposition(currentVersion, bundledVersion) {
   if (comparison === null) return "unknown";
   return comparison < 0 ? "update" : "latest";
 }
+
+export function currentFirmwareCompletion(usb, completed) {
+  return usb.connected === true && usb.runtime === "esp-p4" && usb.boardDeviceId && usb.connectionId
+    && completed?.boardDeviceId === usb.boardDeviceId && completed.connectionId === usb.connectionId
+    ? completed : null;
+}

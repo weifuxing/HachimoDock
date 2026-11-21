@@ -34,6 +34,7 @@ static bool apply_local_action(pet_p4_runtime_state_t *s,const pet_p4_input_bind
 static void send_input_event(pet_p4_runtime_state_t *s,pet_p4_send_line_fn f,void *c,const pet_p4_input_event_t *e,const char *n,const char *g,const pet_p4_input_binding_t *b,const char *a,bool h){(void)s;(void)f;(void)c;(void)e;(void)n;(void)g;(void)a;(void)h;emitted++;copy_text(emitted_action,sizeof(emitted_action),b?b->action:"");}
 static void send_ignored_component_event(pet_p4_runtime_state_t *s,pet_p4_send_line_fn f,void *c,const pet_p4_input_event_t *e,const char *n,const char *g){(void)s;(void)f;(void)c;(void)e;(void)n;(void)g;}
 static bool dispatch_component_binding_event(pet_p4_runtime_state_t *s,pet_p4_send_line_fn f,void *c,const pet_p4_input_event_t *e,const char *n,const char *g){(void)s;(void)f;(void)c;(void)e;(void)n;(void)g;package_calls++;return package_claims;}
+static bool pet_p4_native_voice_key_tap(const char *value){(void)value;assert(!"unexpected native voice shortcut");return false;}
 static int pet_p4_audio_capture_start(bool b){(void)b;return 0;}
 static int pet_p4_audio_capture_stop(void){return 0;}
 static void pet_p4_media_stop_background(pet_p4_send_line_fn f,void *ctx){(void)f;(void)ctx;assert(false);}

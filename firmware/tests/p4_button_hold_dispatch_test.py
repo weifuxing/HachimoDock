@@ -11,7 +11,7 @@ def test_physical_hold_owns_depression_without_legacy_ptt_or_release_replay(tmp_
     controls = controls[:controls.index("typedef struct {\n  gpio_num_t")]
     priority = source[source.index("static const pet_p4_input_binding_t *active_global_priority_binding("):]
     priority = priority[:priority.index("static bool dispatch_component_binding_event(")]
-    process = source[source.index("static void process_button_event("):]
+    process = source[source.index("#define DEVICE_DOUBLE_PRESS_MS"):]
     process = process[:process.index("void pet_p4_input_process(")]
     queue = source[source.index("static void queue_button_flags("):]
     queue = queue[:queue.index("static bool read_joystick_axes(")]
@@ -23,20 +23,29 @@ def test_physical_hold_owns_depression_without_legacy_ptt_or_release_replay(tmp_
 #include <string.h>
 #include "pet_p4_input_core.h"
 #define PET_P4_INPUT_EVENT_MAX 64
-typedef struct { char screen_page[24]; } pet_p4_runtime_state_t;
+#define PET_P4_PAGE_MAX 24
+typedef struct { char screen_page[24]; unsigned long long last_update_ms; bool approval_active, session_voice_active; } pet_p4_runtime_state_t;
+#include "pet_p4_center_layout.h"
+static pet_center_filter_t pet_p4_miniapp_center_filter(void) {return PET_CENTER_ALL;}
+static bool pet_p4_miniapp_center_set_filter(pet_center_filter_t f) {(void)f;return true;}
 typedef struct { char action[40]; } pet_p4_input_binding_t;
 typedef void (*pet_p4_send_line_fn)(const char *,void *);
 ''' + controls + r'''
-static pet_p4_runtime_state_t state={"app"};
-static pet_p4_input_binding_t hold={"voice_ptt"}, short_binding={"disabled"}, long_binding={"disabled"};
+static pet_p4_runtime_state_t state={.screen_page="app"};
+static pet_p4_input_binding_t hold={"voice_ptt"}, short_binding={"disabled"}, long_binding={"disabled"}, double_binding={"disabled"};
 static bool conversation, motion=true, press, accept=true;
 static int starts, releases, cancels, dispatched, voice_events;
 static unsigned long long now;
+static unsigned int g_input_config_epoch;
+static unsigned doubles;
+static uint64_t pet_p4_miniapp_input_context(void){return 1;}
+static void copy_text(char *out,size_t size,const char *text){snprintf(out,size,"%s",text);}
 static const char *button_event_prefix(pet_p4_input_control_t c){return c==PET_P4_INPUT_CONTROL_SW1?"button.sw1":"button.sw2";}
 static const pet_p4_input_binding_t *active_binding(const char *e){
   if(!strcmp(e,"button.sw1.hold"))return &hold;
   if(!strcmp(e,"button.sw1.short_press"))return &short_binding;
   if(!strcmp(e,"button.sw1.long_press"))return &long_binding;
+  if(!strcmp(e,"button.sw1.double_press"))return &double_binding;
   return NULL;
 }
 static bool pet_p4_conversation_active(const pet_p4_runtime_state_t *s){(void)s;return conversation;}
@@ -51,13 +60,17 @@ static bool pet_p4_miniapp_hold_event(const char *a,int phase,unsigned owner,uns
   return true;
 }
 static void dispatch_binding_event(pet_p4_runtime_state_t *s,pet_p4_send_line_fn f,void *c,const pet_p4_input_event_t *e,const char *n,const char *g){
-  (void)s;(void)f;(void)c;(void)e;(void)g;dispatched++;
+  (void)s;(void)f;(void)c;(void)e;dispatched++;
+  if(!strcmp(g,"double_press"))doubles++;
   const pet_p4_input_binding_t *b=active_binding(n);
   if(b&&!strcmp(b->action,"voice_ptt"))voice_events++;
 }
 ''' + priority + process + r'''
 static void queue_event(pet_p4_input_control_t c,pet_p4_input_gesture_t g,int d){
-  pet_p4_input_event_t e={c,g,d,now};process_button_event(&state,NULL,NULL,&e);
+  pet_p4_input_event_t e={c,g,d,now};
+  if(g==PET_P4_INPUT_GESTURE_LONG_PRESS)g_pending_clicks[c].waiting=false;
+  finish_pending_clicks(&state,NULL,NULL,now);
+  process_button_event(&state,NULL,NULL,&e);
 }
 ''' + queue + r'''
 static void samples(pet_p4_button_decoder_t *d,bool down,int ms){
@@ -93,6 +106,21 @@ int main(void){
   motion=false;press=true;reset();stroke(500);assert(starts==0&&dispatched==1);
   strcpy(hold.action,"disabled");reset();stroke(500);assert(dispatched==1&&starts==0);
   motion=true;press=false;reset();stroke(500);assert(starts==1&&releases==1&&dispatched==0);
+
+  strcpy(state.screen_page,"main"); motion=false; reset();
+  stroke(50); assert(dispatched==1); // No mapping, no latency.
+  strcpy(double_binding.action,"agent_prompt");reset();
+  stroke(50); assert(dispatched==0);
+  stroke(50); assert(dispatched==1&&doubles==1);
+  reset();stroke(50);
+  finish_pending_clicks(&state,NULL,NULL,now+280);
+  assert(dispatched==1&&doubles==1);
+  reset();stroke(50);++g_input_config_epoch;
+  finish_pending_clicks(&state,NULL,NULL,now+280);
+  assert(dispatched==0);
+  reset();stroke(50);strcpy(state.screen_page,"components");
+  finish_pending_clicks(&state,NULL,NULL,now+280);
+  assert(dispatched==0);
 }
 '''
     file = tmp_path / "button-hold.c"

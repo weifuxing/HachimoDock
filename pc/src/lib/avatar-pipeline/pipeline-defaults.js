@@ -24,7 +24,7 @@ export const FAST_VIDEO_GENERATION_PROFILE = Object.freeze({
   }),
   kling: Object.freeze({
     duration: 5,
-    mode: "standard",
+    resolution: "720p",
   }),
   custom: Object.freeze({
     duration: 2,
@@ -63,7 +63,6 @@ export function resolveGenerationSpeedConfig(providerConfig = {}) {
       ratio: pickExplicit(providerConfig.ratio, profile.ratio || PIPELINE_OUTPUT_ASPECT_RATIO.label),
       resolution: pickExplicit(providerConfig.resolution, profile.resolution),
       quality: pickExplicit(providerConfig.quality, profile.quality),
-      mode: pickExplicit(providerConfig.mode, profile.mode),
     },
   };
 }

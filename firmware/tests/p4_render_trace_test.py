@@ -438,17 +438,17 @@ int main(void) {
   assert(!g_render_trace.validate_us && !g_render_trace.restart_reason && !g_render_trace.decode_outer_us);
   assert(g_render_trace.scale_us == 10 && starts == 1 && decodes == 1);
   begin(3);
-  assert(render_h264_asset_frame(&asset, "idle", &stream, 150));
+  assert(render_h264_asset_frame(&asset, "idle", &stream, 1));
   assert(!g_render_trace.restart_reason && g_render_trace.decode_outer_us == 43);
   begin(4);
   assert(render_h264_asset_frame(&asset, "idle", &stream, 0));
   assert(g_render_trace.restart_reason == PET_RENDER_RESTART_REWIND && starts == 2);
   begin(5);
-  assert(render_h264_asset_frame(&asset, "other", &stream, 250));
+  assert(render_h264_asset_frame(&asset, "other", &stream, 2));
   assert(g_render_trace.restart_reason == PET_RENDER_RESTART_PATH && g_render_trace.validate_us == 0);
   assert(g_h264_decoded_frame == 0); /* Original one-frame work bound is intact. */
   begin(6); fail_decode = true;
-  assert(!render_h264_asset_frame(&asset, "other", &stream, 150));
+  assert(!render_h264_asset_frame(&asset, "other", &stream, 1));
   assert(g_render_trace.decode_outer_us == 43 && !g_render_trace.scale_us);
   begin(7); fail_decode = false; stream.single_slice_valid = false;
   assert(!render_h264_asset_frame(&asset, "unsafe", &stream, 0));

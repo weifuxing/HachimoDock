@@ -222,8 +222,8 @@ def compile_component_sprites(package: Path, widget: dict) -> list[dict]:
     return compiled
 
 
-def sprite_pack_checksum(sprites: list[dict]) -> int:
-    if not sprites:
+def sprite_pack_checksum(sprites: list[dict], wasm: bytes | None = None) -> int:
+    if not sprites and not wasm:
         return 0
     checksum = 2166136261
 
@@ -246,4 +246,7 @@ def sprite_pack_checksum(sprites: list[dict]) -> int:
         else:
             include(data[4:8])
             include(data[8:])
+    if wasm:
+        include(struct.pack("<I", len(wasm)))
+        include(wasm)
     return checksum

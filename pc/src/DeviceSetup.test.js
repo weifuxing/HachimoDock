@@ -65,7 +65,7 @@ test("setup completion refreshes shared device context before dashboard render",
   const source = readSource("App.jsx");
 
   assert.match(source, /useDeviceContext/);
-  assert.match(source, /const\s+\{\s*refresh,\s*usb\s*\}\s*=\s*useDeviceContext\(\)/);
+  assert.match(source, /const\s+\{\s*refresh,\s*usb(?:\s*,\s*\w+)*\s*\}\s*=\s*useDeviceContext\(\)/);
   assert.match(source, /const\s+handleSetupCompleteWithRefresh\s*=\s*useCallback\(\s*async\s*\(\)\s*=>/);
   assert.match(source, /await\s+refresh\(\)/);
   assert.match(source, /<DeviceSetup\s+onComplete=\{handleSetupCompleteWithRefresh\}/);

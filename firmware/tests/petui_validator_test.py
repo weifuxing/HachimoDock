@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import shutil
 import struct
 import sys
 import tempfile
@@ -440,6 +441,48 @@ class LiveDataTests(unittest.TestCase):
         self.assertEqual(result["visibleActions"], ["home", "next", "previous"])
         self.assertFalse(result["networkVerified"])
 
+    def test_wifi_feed_map_requires_device_capability_and_public_https(self):
+        values = self.fixture()
+        data = values["runtime/widget.json"]["data"]
+        mapping = {"rows": "data.items", "id": "record.id", "label": "Name", "tone": "signal"}
+        data.update(source="wifi.feed", url="https://feeds.example.org/today.json", response_map=mapping)
+        caps = VALIDATOR.load_capabilities(None)
+        caps["widgetWifiFeed"] = "p4-wifi-feed-v1"
+        result = self.run_values(values, caps)
+        self.assertTrue(any("p4-wifi-feed-map-v1" in e for e in result["errors"]), result)
+        caps["widgetWifiFeedMap"] = "p4-wifi-feed-map-v1"
+        result = self.run_values(values, caps)
+        self.assertTrue(result["ok"], result)
+        for invalid in (None, {}, dict(mapping, rows="data..items"),
+                        dict(mapping, id="a.b.c.d.e"), dict(mapping, label="x" * 64),
+                        dict(mapping, value="item[0]"), dict(mapping, ttlMs="ttl")):
+            data["response_map"] = invalid
+            result = self.run_values(values, caps)
+            self.assertTrue(any("data.response_map" in e for e in result["errors"]), result)
+        data["response_map"] = mapping
+        data["url"] = "https://127.0.0.1/today.json"
+        self.assertFalse(self.run_values(values, caps)["ok"])
+        data.pop("url")
+        data["source"] = "stocks.watchlist"
+        result = self.run_values(values, caps)
+        self.assertTrue(any("data.response_map" in e for e in result["errors"]), result)
+
+    def test_wifi_feed_http_options_require_capability(self):
+        values = self.fixture()
+        data = values["runtime/widget.json"]["data"]
+        data.update(source="wifi.feed", url="https://feeds.example.org/today.json",
+                    http={"accept": "application/geo+json", "revalidate": True, "cache": "last-good"})
+        caps = VALIDATOR.load_capabilities(None)
+        caps["widgetWifiFeed"] = "p4-wifi-feed-v1"
+        result = self.run_values(values, caps)
+        self.assertTrue(any("p4-wifi-feed-http-v1" in e for e in result["errors"]), result)
+        caps["widgetWifiFeedHttp"] = "p4-wifi-feed-http-v1"
+        self.assertTrue(self.run_values(values, caps)["ok"])
+        for invalid in (None, {}, {"method": "POST"}, {"headers": {"Authorization": "data"}},
+                        {"revalidate": 1}, {"accept": "text/html"}, {"cache": "always"}):
+            data["http"] = invalid
+            self.assertFalse(self.run_values(values, caps)["ok"], invalid)
+
     def test_live_list_rejects_invalid_data_contract(self):
         for data in (None, {}, {"source": "https://example.com", "page_var": "page"},
                      {"source": "stocks.watchlist", "page_var": "missing"},
@@ -548,7 +591,7 @@ class GameplaySmokeTests(unittest.TestCase):
         self.assertTrue(any("得分规则" in error for error in result["errors"]), result)
 
     def test_interactive_tool_scene_exercises_every_action_and_tick(self) -> None:
-        package = WORKSPACE_ROOT / "pc" / "builtin-clawpkgs" / "bloomfrog_companion"
+        package = WORKSPACE_ROOT / "pc" / "optional-clawpkgs" / "bloomfrog_companion"
         result = run_smoke_test(package)
         self.assertTrue(result["ok"], result)
         self.assertTrue(result["interactiveToolScene"], result)
@@ -587,6 +630,33 @@ class GameplaySmokeTests(unittest.TestCase):
         broken = self.smoke_values(values)
         self.assertFalse(broken["ok"], broken)
         self.assertTrue(any("feed_pet" in error for error in broken["errors"]), broken)
+
+
+def test_verified_native_wasm_uses_its_canvas_and_input_abi(tmp_path):
+    source = WORKSPACE_ROOT / "pc" / "builtin-clawpkgs" / "wasm-2046"
+    package = tmp_path / "wasm"
+    shutil.copytree(source, package)
+    widget_file = package / "runtime" / "widget.json"
+    widget = json.loads(widget_file.read_text())
+    widget["transitions"] = []
+    widget["dashboard"]["visualStyle"] = "classic"
+    for field in ("visualPalette", "visualLayout", "visualSprite", "eyebrow"):
+        widget["dashboard"].pop(field, None)
+    widget_file.write_text(json.dumps(widget))
+    fallback_file = package / "negative-screen.json"
+    fallback = json.loads(fallback_file.read_text())
+    fallback["dashboard"]["eyebrow"] = "玩法"
+    fallback_file.write_text(json.dumps(fallback))
+
+    legacy_errors = VALIDATOR.validate_widget(package)
+    assert any("未出现在 transitions" in error for error in legacy_errors)
+    assert VALIDATOR.validate_widget(package, verified_wasm_gameplay=True) == []
+
+    widget["hachiWasm"] = "0" * 64
+    widget_file.write_text(json.dumps(widget))
+    errors = VALIDATOR.validate_widget(package, verified_wasm_gameplay=True)
+    assert any("WASM 摘要" in error for error in errors)
+    assert any("未出现在 transitions" in error for error in errors)
 
 
 if __name__ == "__main__":

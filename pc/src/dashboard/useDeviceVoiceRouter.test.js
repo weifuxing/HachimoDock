@@ -46,6 +46,8 @@ test("WorkBuddy describes final-only append without promising streaming editor w
   assert.match(transcriptMessage({ agentId: "workbuddy" }, "listening", "visible"), /松开后.*一次追加/);
   assert.match(transcriptMessage({ agentId: "workbuddy" }, "partial", "visible"), /松开后一次写入/);
   assert.match(transcriptMessage({ agentId: "workbuddy" }, "draft_ready", "visible"), /已追加到 WorkBuddy/);
+  assert.match(transcriptMessage({ agentId: "devin" }, "listening", "visible"), /一次追加到 Devin 输入框/);
+  assert.match(transcriptMessage({ agentId: "devin" }, "partial", "visible"), /一次写入 Devin/);
   assert.match(transcriptMessage({ agentId: "codex" }, "partial", "visible"), /实时识别并同步/);
 });
 

@@ -26,6 +26,7 @@ import Button from "../shell/Button.jsx";
 import DeviceScreenPreview from "./DeviceScreenPreview.jsx";
 import ComponentCover from "./ComponentCover.jsx";
 import {componentDisplayAuthor} from "./component-authors.js";
+import {legacyAudioInstallBlockedReason} from "./library-order.js";
 import {refreshGate} from "./community-refresh.js";
 import {readCenterPreference,saveCenterPreference} from './catalog-state.js';
 import {commentStorage,readCommentIdentity,saveCommentName} from './comment-identity.js';
@@ -199,18 +200,34 @@ function Publish({ localItems, owned, onClose, onPublished, selectedPath }) {
     releaseNotes: "",
     sourceUrl: "",
   });
-  const [covers, setCovers] = useState([]);
+  const [selectedCovers, setSelectedCovers] = useState(null);
+  const [readingCovers, setReadingCovers] = useState(false);
   const [busy, setBusy] = useState(false),
     [checking, setChecking] = useState(false),
+    [prepareError, setPrepareError] = useState(""),
+    [prepareAttempt, setPrepareAttempt] = useState(0),
     [error, setError] = useState("");
   const pending = useRef(null),
+    coverSeq = useRef(0),
     prepareSeq = useRef(0);
+  const currentPackage = prepared?.path === path ? prepared : null;
+  const covers = selectedCovers ?? (currentPackage?.coverDataUrl ? [currentPackage.coverDataUrl] : []);
+  let publishBlocker = prepareError;
+  if (!path) publishBlocker = "请先选择要发布的本地组件。";
+  else if (checking) publishBlocker = "正在检查组件文件…";
+  else if (!publishBlocker && !currentPackage?.canPublish)
+    publishBlocker = currentPackage?.warning || "组件文件尚未通过发布检查。";
+  else if (!publishBlocker && readingCovers) publishBlocker = "正在读取截图…";
+  else if (!publishBlocker && !covers.length) publishBlocker = "请添加至少一张组件截图。";
   useExitProtection(busy ? "社区发布尚未完成，请勿重复提交" : dirty.current ? "组件发布内容尚未提交" : "");
   useEffect(() => {
     const seq = ++prepareSeq.current;
     setPrepared(null);
+    setPrepareError("");
     setError("");
-    setCovers([]);pending.current=null;dirty.current=false;
+    setSelectedCovers(null);
+    setReadingCovers(false);
+    pending.current=null;dirty.current=false;
     if (!path) {
       setChecking(false);
       return;
@@ -220,7 +237,7 @@ function Publish({ localItems, owned, onClose, onPublished, selectedPath }) {
       .then(
         (value) => {
           if (seq !== prepareSeq.current) return;
-          setPrepared(value);
+          setPrepared({ ...value, path });
           const old = owned[value.id];
           setForm((f) => ({
             ...f,
@@ -229,23 +246,28 @@ function Publish({ localItems, owned, onClose, onPublished, selectedPath }) {
             summary: old?.summary || value.description?.slice(0, 160) || "",
             description: old?.description || value.description || "",
             license: old?.license || "",
-            category: old?.category || "tool",
+            category: old?.category || (value.kind === "game" ? "game" : "tool"),
             releaseNotes: "",
           }));
         },
-        (error) => seq === prepareSeq.current && setError(errorText(error)),
+        (error) => seq === prepareSeq.current && setPrepareError(errorText(error)),
       )
       .finally(() => seq === prepareSeq.current && setChecking(false));
     return () => {
       prepareSeq.current++;
     };
-  }, [path]);
+  }, [path, prepareAttempt]);
   async function readCovers(files) {
     const seq=prepareSeq.current;
+    const selection=++coverSeq.current;
+    const current=()=>seq===prepareSeq.current && selection===coverSeq.current;
     setError("");
-    setCovers([]);
+    setReadingCovers(false);
+    if (!files.length) {
+      setSelectedCovers(null);
+      return;
+    }
     if (
-      !files.length ||
       files.length > 3 ||
       files.some(
         (file) =>
@@ -253,9 +275,10 @@ function Publish({ localItems, owned, onClose, onPublished, selectedPath }) {
           !["image/png", "image/jpeg", "image/webp"].includes(file.type),
       )
     ) {
-      setError("请选择 1–3 张 PNG、JPEG 或 WebP 截图，每张不超过 2 MB");
+      setError("截图未更换。请选择 1–3 张 PNG、JPEG 或 WebP 截图，每张不超过 2 MB。");
       return;
     }
+    setReadingCovers(true);
     try {
       const next=await Promise.all(
           files.map(
@@ -268,14 +291,16 @@ function Publish({ localItems, owned, onClose, onPublished, selectedPath }) {
               }),
           ),
         );
-      if(seq===prepareSeq.current)setCovers(next);
+      if(current())setSelectedCovers(next);
     } catch {
-      setError("截图读取失败，请重新选择");
+      if(current())setError("截图读取失败，已保留原图。");
+    } finally {
+      if(current())setReadingCovers(false);
     }
   }
   async function submit(event) {
     event.preventDefault();
-    if (busy || submitting.current || !prepared?.canPublish) return;
+    if (busy || submitting.current || publishBlocker) return;
     submitting.current=true;
     setBusy(true);
     setError("");
@@ -320,7 +345,7 @@ function Publish({ localItems, owned, onClose, onPublished, selectedPath }) {
       setBusy(false);
     }
   }
-  const field = (key, title, limit, multiline = false) => (
+  const field = (key, title, limit, multiline = false, required = true) => (
     <label>
       {title}
       {multiline ? (
@@ -328,14 +353,14 @@ function Publish({ localItems, owned, onClose, onPublished, selectedPath }) {
           rows={3}
           maxLength={limit}
           value={form[key]}
-          required
+          required={required}
           onChange={(e) => setForm({ ...form, [key]: e.target.value })}
         />
       ) : (
         <input
           maxLength={limit}
           value={form[key]}
-          required={key !== "sourceUrl"}
+          required={required}
           onChange={(e) => setForm({ ...form, [key]: e.target.value })}
         />
       )}
@@ -350,7 +375,7 @@ function Publish({ localItems, owned, onClose, onPublished, selectedPath }) {
           <div>
             <h3>把创作分享给更多桌面</h3>
             <p>
-              从本地正式组件库提交。新作品和更新均需审核，审核通过后才会公开。
+              选择组件后，社区会预检组件包。新作品和更新均需审核，审核通过后才会公开。
             </p>
           </div>
         </div>
@@ -365,7 +390,7 @@ function Publish({ localItems, owned, onClose, onPublished, selectedPath }) {
           >
             <option value="">选择已经验证过的本地作品</option>
             {localItems
-              .filter((item) => item.isLocal && item.libraryPath)
+              .filter((item) => item.isLocal && item.libraryPath && !legacyAudioInstallBlockedReason(item))
               .map((item) => (
                 <option key={item.libraryPath} value={item.libraryPath}>
                   {item.name} · {item.version || "待检查版本"}
@@ -374,6 +399,10 @@ function Publish({ localItems, owned, onClose, onPublished, selectedPath }) {
           </select>
         </label>
         {checking && <p role="status">正在检查组件文件…</p>}
+        {prepareError && <div className="community-error" role="alert">
+          <p>{prepareError}</p>
+          <Button type="button" variant="secondary" onClick={() => setPrepareAttempt((n) => n + 1)}>重新检查</Button>
+        </div>}
         {prepared && (
           <div className="community-package-check">
             <ShieldCheck size={20} />
@@ -417,10 +446,10 @@ function Publish({ localItems, owned, onClose, onPublished, selectedPath }) {
         </div>
         {field("summary", "一句话介绍", 160)}
         {field("description", "玩法与使用说明", 3000, true)}
-        {field("releaseNotes", "本次更新说明", 2000, true)}
-        {field("sourceUrl", "来源链接（选填，派生作品请注明公开来源）", 500)}
+        {field("releaseNotes", "本次更新说明（选填）", 2000, true, false)}
+        {field("sourceUrl", "来源链接（选填，派生作品请注明公开来源）", 500, false, false)}
         <label>
-          真实组件截图 · 1–3 张
+          组件截图 · 1–3 张
           <input
             key={path}
             type="file"
@@ -430,6 +459,9 @@ function Publish({ localItems, owned, onClose, onPublished, selectedPath }) {
             onChange={(e) => readCovers([...e.target.files])}
           />
         </label>
+        {selectedCovers === null && currentPackage?.coverDataUrl && (
+          <small>已带入组件封面，可选择其他截图替换。</small>
+        )}
         <div className="community-publish-shots">
           {covers.map((src, index) => (
             <img key={index} src={src} alt={`发布截图 ${index + 1}`} />
@@ -440,6 +472,7 @@ function Publish({ localItems, owned, onClose, onPublished, selectedPath }) {
             {error}
           </p>
         )}
+        {publishBlocker && !prepareError && <p role="status">{publishBlocker}</p>}
         <footer>
           <small>
             需要下架或删除社区作品，请联系开发者。更新不会自动覆盖用户设备。
@@ -447,11 +480,7 @@ function Publish({ localItems, owned, onClose, onPublished, selectedPath }) {
           <Button
             type="submit"
             variant="primary"
-            disabled={
-              !prepared?.canPublish ||
-              !covers.length ||
-              checking
-            }
+            disabled={Boolean(publishBlocker)}
             loading={busy}
             loadingLabel="校验并提交…"
           >
@@ -476,6 +505,7 @@ export default function CommunityCenter({
   onOpenLocal,
   onCreate,
   onImported,
+  deviceInstallTargetKey,
   refreshKey,
   children,
 }) {
@@ -511,6 +541,7 @@ export default function CommunityCenter({
   const unpublished = publicationItems.filter(
     (item) =>
       item.isLocal &&
+      !legacyAudioInstallBlockedReason(item) &&
       !provenance.data?.reservedIds?.includes(item.id) &&
       !owned[item.id] &&
       !provenance.data?.downloaded?.[item.id],
@@ -549,7 +580,7 @@ export default function CommunityCenter({
           </Button>
         </div>
       )}
-      {["discover","favorites"].includes(tab) && <CommunityWeb key={tab} view={tab} localItems={localItems} inventory={inventory} onImported={onImported} onOpenLocal={onOpenLocal}/>}
+      {["discover","favorites"].includes(tab) && <CommunityWeb key={tab} view={tab} localItems={localItems} inventory={inventory} deviceInstallTargetKey={deviceInstallTargetKey} onImported={onImported} onOpenLocal={onOpenLocal}/>}
       {tab === "local" && (
         <section role="tabpanel" aria-label="我的组件">
           <div className="community-section-title">

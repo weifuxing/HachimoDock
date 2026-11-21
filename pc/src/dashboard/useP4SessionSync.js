@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { agentSessionFeedFresh } from "./useAgentSessionFeed.js";
 import {
   deviceSessionTerminalUntilMs,
   deviceSessionTransitionRevision,
@@ -218,10 +219,10 @@ export function useP4SessionSync({
   }, [agentId, boardDeviceId]);
 
   useEffect(() => {
-    if (!enabled || !boardDeviceId || !agentId) return undefined;
+    if (!agentId) return undefined;
     const timer = setInterval(requestBindingSync, P4_SESSION_LEASE_REFRESH_MS);
     return () => clearInterval(timer);
-  }, [agentId, boardDeviceId, enabled]);
+  }, [agentId]);
 
   useEffect(() => {
     if (sessionId === "auto") return undefined;
@@ -240,7 +241,7 @@ export function useP4SessionSync({
   }, [agentId, onSessionChange, selection.selectedAt, sessionId, switchCandidates]);
 
   useEffect(() => {
-    if (!enabled || !boardDeviceId || !agentId) return;
+    if (!agentId) return;
     const pendingNotice = pendingNoticeRef.current;
     const matchedNotice = pendingNotice?.sessionId === sessionId ? pendingNotice : null;
     const notice = matchedNotice?.message || "";
@@ -254,6 +255,21 @@ export function useP4SessionSync({
     const requestedSessionId = autoFollow
       ? normalizeText(selectedRoutingSession?.id)
       : sessionId;
+    if (!usbConnected && sessionsLoaded && agentSessionFeedFresh(agentId)) {
+      invoke("lan_agent_sessions", {
+        input: {
+          agentId,
+          sessionId: requestedSessionId,
+          title: selectedDeviceSessionTitle,
+          index: selectedSessionIndex,
+          count: selectableSessions.length,
+          sessions: buildP4DeviceSessionTransportPayload(deviceSessions),
+          activeSessionIds,
+          displayEnabled: cardsEnabled,
+        },
+      }).catch(() => {});
+    }
+    if (!enabled || !boardDeviceId) return;
     if (matchedNotice) pendingNoticeRef.current = null;
     const isCurrent = () => bindingScopeRef.current === bindingScope;
     const bindingPromise = enqueueP4SessionBinding(bindingQueueRef.current, isCurrent,

@@ -1,17 +1,21 @@
-//! Local-only telemetry and todo feed. Uses the existing serialized USB writer.
-use crate::widget_data::{DataRow, DataSnapshot, PROTOCOL};
+//! Local telemetry, todo, shared location and authorized provider snapshots.
+use crate::{
+    lan_agent::widget_data::{Route, Target},
+    widget_data::{DataRow, DataSnapshot},
+};
 use std::{
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 static COMPUTER: OnceLock<Mutex<Option<(Instant, DataSnapshot)>>> = OnceLock::new();
+const COMPUTER_STATUS_TTL_MS: u32 = 30_000;
 fn cache() -> &'static Mutex<Option<(Instant, DataSnapshot)>> {
     COMPUTER.get_or_init(Default::default)
 }
 pub fn computer_status() -> DataSnapshot {
     match cache().lock().ok().and_then(|s| s.clone()) {
         Some((at, mut data)) => {
-            if at.elapsed() > Duration::from_secs(30) {
+            if at.elapsed() > Duration::from_millis(COMPUTER_STATUS_TTL_MS.into()) {
                 data.status = "error".into();
                 data.message = "电脑状态已过期，等待恢复采样".into();
             }
@@ -35,7 +39,7 @@ fn snapshot(rows: Vec<DataRow>, status: &str, message: &str) -> DataSnapshot {
         schema: 1,
         date: chrono::Local::now().format("%Y-%m-%d").to_string(),
         source: "computer.status".into(),
-        ttl_ms: 30_000,
+        ttl_ms: COMPUTER_STATUS_TTL_MS,
         status: status.into(),
         message: message.into(),
         rows,
@@ -147,50 +151,62 @@ impl Sampler {
     }
 }
 pub fn start(usb: crate::usb_serial::UsbSerialManager) {
+    let providers_usb = usb.clone();
+    // Provider HTTP deadlines must not stall the local sampler or expiry updates.
+    std::thread::Builder::new()
+        .name("widget-providers".into())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(2));
+            let Some(target) = Target::current(&providers_usb) else {
+                continue;
+            };
+            for source in crate::auth_provider::push_sources() {
+                if let Ok(snapshot) = crate::auth_provider::snapshot(source) {
+                    if let Ok(payload) = serde_json::to_value(snapshot) {
+                        let _ = target.publish(&providers_usb, &payload);
+                    }
+                }
+            }
+        })
+        .expect("start widget providers");
     // Sampling runs away from async audio/network workers and never enumerates processes.
     std::thread::Builder::new()
         .name("local-widget-sampler".into())
         .spawn(move || {
             let mut sampler = Sampler::new();
-            let mut location_sent: Option<(Instant, String)> = None;
+            let mut location_sent: Option<(Route, Instant, String)> = None;
             loop {
                 std::thread::sleep(Duration::from_secs(2));
                 let sample = sampler.sample();
                 if let Ok(mut data) = cache().lock() {
                     *data = Some((Instant::now(), sample.clone()));
                 }
-                let status = usb.status();
-                if !status.connected
-                    || status
-                        .capabilities
-                        .get("widgetData")
-                        .and_then(serde_json::Value::as_str)
-                        != Some(PROTOCOL)
-                {
+                let Some(target) = Target::current(&usb) else {
+                    location_sent = None;
                     continue;
-                }
-                let mut snapshots = vec![sample, crate::todos::snapshot()];
-                let location = crate::shared_location::snapshot();
-                if status.capabilities["widgetDataExpiry"] == "p4-data-expiry-v1" {
-                if let Ok(serialized) = serde_json::to_string(&location) {
-                    if location_sent.as_ref().is_none_or(|(at, old)| *old != serialized || at.elapsed() >= Duration::from_secs(20)) {
-                        if let Ok(mut payload) = serde_json::to_value(&location) {
-                            payload["clearOnExpire"]=true.into();
-                            if usb.send_widget_data(&status.board_device_id, &payload).is_ok() {
-                                location_sent = Some((Instant::now(), serialized));
-                            }
-                        }
+                };
+                for snapshot in [sample, crate::todos::snapshot()] {
+                    if let Ok(payload) = serde_json::to_value(snapshot) {
+                        let _ = target.publish(&usb, &payload);
                     }
                 }
-                }
-                // Authorized providers only; their fetches are cached/backed off inside the provider.
-                for source in crate::auth_provider::push_sources() {
-                    if let Ok(snapshot) = crate::auth_provider::snapshot(source) { snapshots.push(snapshot); }
-                }
-                for snapshot in snapshots {
-                    if let Ok(payload) = serde_json::to_value(snapshot) {
-                        // send_widget_data skips busy asset transfers; next tick retries.
-                        let _ = usb.send_widget_data(&status.board_device_id, &payload);
+                if target.supports_expiry() {
+                    let location = crate::shared_location::snapshot();
+                    if let Ok(serialized) = serde_json::to_string(&location) {
+                        let due = location_sent.as_ref().is_none_or(|(route, at, previous)| {
+                            *route != target.route
+                                || *previous != serialized
+                                || at.elapsed() >= Duration::from_secs(20)
+                        });
+                        if !due {
+                            continue;
+                        }
+                        if let Ok(mut payload) = serde_json::to_value(&location) {
+                            payload["clearOnExpire"] = true.into();
+                            if target.publish(&usb, &payload).is_ok() {
+                                location_sent = Some((target.route, Instant::now(), serialized));
+                            }
+                        }
                     }
                 }
             }

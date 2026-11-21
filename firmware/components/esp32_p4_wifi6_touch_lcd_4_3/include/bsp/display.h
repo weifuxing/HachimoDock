@@ -32,9 +32,15 @@
 #define BSP_LCD_H_RES              (480)
 #define BSP_LCD_V_RES              (640)
 
-// ST7701S two-lane limit is 550 Mbps/lane. Start at 500 pending panel validation.
-#define BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS (500)
-#define BSP_LCD_MIPI_DSI_LANE_NUM          (2)    // HD28091C40-V1 adapter routes D0 and D1
+#define BSP_LCD_MIPI_DSI_LANE_NUM CONFIG_BSP_LCD_DSI_DATA_LANES
+#define BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS CONFIG_BSP_LCD_DSI_LANE_BITRATE_MBPS
+
+#if CONFIG_ESP32P4_REV_MIN_FULL >= 300
+// Preserve the HD28091 v3 display comparison profile.
+#define BSP_LCD_DPI_CLOCK_MHZ 20
+#else
+#define BSP_LCD_DPI_CLOCK_MHZ 25
+#endif
 
 // HD28091 adapter Rev A uses independent RC resets for LCD and CST328.
 #define BSP_LCD_POWER_ON_DELAY_MS         (1000)

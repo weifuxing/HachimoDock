@@ -51,7 +51,7 @@ export function serialQueue() {
 }
 
 export function publicGenerationConfig(config = {}) {
-  const saved = Object.fromEntries(["provider", "model", "thinkingModel", "fastGeneration", "duration", "resolution", "ratio", "generateAudio", "cameraFixed", "watermark", "seed"]
+  const saved = Object.fromEntries(["provider", "model", "thinkingModel", "fastGeneration", "duration", "resolution", "ratio", "generateAudio", "cameraFixed", "watermark", "seed", "endFrame"]
     .filter(key => config[key] !== undefined).map(key => [key, config[key]]));
   // Pin the effective non-secret model, using the same precedence as the runner.
   // Credentials and URL overrides never enter the durable task journal.

@@ -1,3 +1,4 @@
+#include "pet_p4_render_cache_memory.h"
 /* R145 worker-pack variant of the deterministic native-adapter harness: the
  * ACTUAL prefetch include runs with PET_P4_H264_WORKER_PACK=1. Native decoder
  * and RTOS are seams (the pack task runs synchronously inside xTaskNotifyGive);
@@ -38,7 +39,7 @@ typedef void *esp_h264_dec_handle_t;typedef int esp_h264_err_t;
 typedef struct {int pic_type;}esp_h264_dec_cfg_sw_t;
 typedef struct {struct{uint8_t *buffer;uint32_t len;}raw_data;uint32_t consume;}esp_h264_dec_in_frame_t;
 typedef struct {uint8_t *outbuf;uint32_t out_size;}esp_h264_dec_out_frame_t;
-typedef struct {int frames,width,height;}pet_p4_asset_selection_t;
+typedef struct {int frames,width,height;bool play_once;uint64_t selection_ms;}pet_p4_asset_selection_t;
 typedef struct {const uint8_t *plane_y,*plane_u,*plane_v;uint8_t *packed;size_t packed_stride;int src_w,src_stride,row_begin,row_end;}pet_p4_h264_pack_job_t;
 static unsigned critical,notifications,codec_calls,codec_frees,freed_buffers,render_packs,worker_pack_rows,split_packs;
 static unsigned hook;static bool fail_new,fail_decode,fail_worker_layout,playback_busy,pack_given;
@@ -154,7 +155,7 @@ static void fresh_source(void){
  asset_cache_release(&g_asset_cache[0]);pet_p4_asset_cache_entry_t *s=&g_asset_cache[0];
  assert(pet_resources_device_owner_open(PET_RESOURCE_MASK(PET_RESOURCE_ASSET_BUFFER),&s->owner)==PET_RESOURCE_OK);
  assert(pet_resources_device_acquire(s->owner,PET_RESOURCE_ASSET_BUFFER,32,&s->buffer_lease)==PET_RESOURCE_OK);
- s->bytes=malloc(32);assert(s->bytes);memset(s->bytes,0x19,32);s->size=32;s->finished=true;s->h264=true;s->single_slice_valid=true;
+ cache_memory_begin();s->bytes=malloc(32);assert(s->bytes);cache_memory_end(32,1,UINT32_MAX);memset(s->bytes,0x19,32);s->size=32;s->finished=true;s->h264=true;s->single_slice_valid=true;
 }
 /* Model the actual render-call boundary; native work from the previous
  * tail may finish between frames. Never execute new work during conversion. */
@@ -164,6 +165,7 @@ static bool harness_frame(const pet_p4_asset_selection_t *asset,const char *path
  h264_frame_offer_begin();
  bool rendered=render_h264_asset_frame_async(asset,path,source,duration);
  assert(g_h264_prefetch_lifetime.phase!=PET_PREFETCH_QUEUED);
+ if(rendered&&g_h264_presented_frame==asset->frames-1)g_h264_tail_confirmed=true;
  h264_frame_offer_end(true);
  assert(!g_h264_frame_offer.active&&!g_h264_frame_offer.pending&&!g_h264_frame_offer.source);
  return rendered;
@@ -172,7 +174,7 @@ int main(void){
  _Static_assert(sizeof(g_h264_worker_packed)==2*640*480*3/2,"two logical-frame packed buffers");
  assert(((uintptr_t)g_h264_worker_packed[0]&127U)==0&&((uintptr_t)g_h264_worker_packed[1]&127U)==0);
  g_asset_prepare_task=1;g_h264_pack_task=2;g_h264_pack_done=(void*)&g_h264_pack_done;
- pet_p4_asset_selection_t asset={3,16,16};fresh_source();
+ pet_p4_asset_selection_t asset={.frames=3,.width=16,.height=16};fresh_source();
  /* Offer carries the back buffer; a cleanup-only offer carries none. */
  assert(!harness_frame(&asset,"a",&g_asset_cache[0],300)&&g_asset_cache_pending);
  assert(g_h264_prefetch_lifetime.phase==PET_PREFETCH_QUEUED&&g_asset_cache[0].decoder_readers==1);

@@ -1,10 +1,11 @@
 // Local-only QA. This config and artifact inputs are not production build entries.
 import {defineConfig} from 'vite';
 import react from '@vitejs/plugin-react';
+import {wasmPreviewFontPlugin} from './scripts/wasm-preview-font.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { componentUiMetadataPlugin } from './scripts/component-ui-metadata.mjs';
-export default defineConfig({plugins:[componentUiMetadataPlugin(),react(),{name:'app-fixtures',configureServer(server){
+export default defineConfig({plugins:[componentUiMetadataPlugin(),wasmPreviewFontPlugin(),react(),{name:'app-fixtures',configureServer(server){
   server.middlewares.use('/__app_fixtures',(_req,res)=>{
     try{
       const root=process.env.PET_APP_PACKAGE_DIR;if(!root)throw Error('未配置测试包');

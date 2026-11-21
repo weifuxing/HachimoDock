@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import io
 import json
+import re
 from pathlib import Path
 import wave
 import zlib
@@ -50,7 +51,7 @@ def restore(planes):
     return bytes(raw)
 
 
-def outputs():
+def outputs(encode):
     packed, rows, pcm_offset = bytearray(), [], 0
     for name in NAMES:
         path = ROOT.parent / 'pc/public/terrier-clips' / (name + '.wav')
@@ -62,7 +63,7 @@ def outputs():
         if not pcm or len(pcm) % 2:
             raise ValueError('Invalid PCM length: ' + name)
         planes = transform(pcm)
-        encoded = zlib.compress(planes, 9)
+        encoded = encode(planes)
         if restore(zlib.decompress(encoded)) != pcm:
             raise ValueError('Non-exact cue pack: ' + name)
         rows.append(dict(name=name, wavBytes=len(wav), pcmBytes=len(pcm),
@@ -101,8 +102,33 @@ def outputs():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true')
+    parser.add_argument('--zopfli', action='store_true', help='repack cues with a denser zlib encoder')
     args = parser.parse_args()
-    result = outputs()
+    if args.check:
+        metadata = json.loads((ROOT / 'assets/audio/system_cues_packed.json').read_bytes())
+        initializer = (ROOT / 'main/pet_p4_cue_packed_data.inc').read_text().split('};', 1)[0]
+        packed = bytes(int(value, 16) for value in re.findall(r'0x[0-9a-f]{2}', initializer))
+        chunks = iter(metadata['cues'])
+
+        def encode(planes):
+            row = next(chunks)
+            offset = row['packedOffset']
+            encoded = packed[offset:offset + row['packedBytes']]
+            decoder = zlib.decompressobj()
+            raw = decoder.decompress(encoded) + decoder.flush()
+            if not decoder.eof or decoder.unused_data or raw != planes:
+                raise ValueError('Packed cue bytes differ from the original PCM')
+            return encoded
+    elif args.zopfli:
+        from zopfli.zlib import compress
+
+        def encode(planes):
+            return compress(planes, numiterations=15)
+    else:
+        def encode(planes):
+            return zlib.compress(planes, 9)
+
+    result = outputs(encode)
     for name, data in result.items():
         path = ROOT / name
         if args.check:

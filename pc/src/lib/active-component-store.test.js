@@ -40,6 +40,17 @@ test("active components are isolated by explicit USB and SSH targets", () => {
   ), null);
 });
 
+test("USB and Wi-Fi share the same component record for a board", () => {
+  const storage = memoryStorage();
+  const usb = { transport: "usb", boardDeviceId: "board-a" };
+  const wifi = { transport: "wifi", boardDeviceId: "board-a", bootId: "0123456789abcdef" };
+  writeActiveComponentForTarget({ id: "timer" }, usb, storage);
+  assert.equal(readActiveComponentForTarget(wifi, storage).id, "timer");
+  writeActiveComponentForTarget({ id: "clock" }, wifi, storage);
+  assert.equal(readActiveComponentForTarget(usb, storage).id, "clock");
+  assert.equal(readActiveComponentForTarget({ ...wifi, boardDeviceId: "board-b" }, storage), null);
+});
+
 test("legacy global records are unverified and never gain an inferred target", () => {
   const storage = memoryStorage({
     [ACTIVE_COMPONENT_STORAGE_KEY]: JSON.stringify({ id: "token-usage", name: "Token" }),

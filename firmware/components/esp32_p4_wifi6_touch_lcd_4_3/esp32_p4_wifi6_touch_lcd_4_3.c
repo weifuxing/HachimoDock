@@ -575,13 +575,7 @@ esp_err_t bsp_display_new_with_handles(const bsp_display_config_t *config, bsp_l
 
     esp_lcd_dpi_panel_config_t dpi_config = {
         .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
-#if CONFIG_ESP32P4_REV_MIN_FULL >= 300
-        // Use an exact divider on v3 so the SDK cannot shorten the line
-        // below the supplier's RTNI minimum when rounding 25 MHz to 24 MHz.
-        .dpi_clock_freq_mhz = 20,
-#else
-        .dpi_clock_freq_mhz = 25,
-#endif
+        .dpi_clock_freq_mhz = BSP_LCD_DPI_CLOCK_MHZ,
         .virtual_channel = 0,
         .pixel_format = BSP_LCD_PIXEL_FORMAT,
         .num_fbs = 1,
@@ -630,7 +624,9 @@ esp_err_t bsp_display_new_with_handles(const bsp_display_config_t *config, bsp_l
     ret_handles->panel = panel_handle;
     ret_handles->control = NULL;
 
-    ESP_LOGI(TAG, "Display initialized");
+    ESP_LOGI(TAG, "Display initialized: DSI %u lane(s) at %lu Mbps per lane, pixel clock %lu MHz",
+             (unsigned)bus_config.num_data_lanes, (unsigned long)bus_config.lane_bit_rate_mbps,
+             (unsigned long)dpi_config.dpi_clock_freq_mhz);
 
     return ret;
 

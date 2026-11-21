@@ -5,6 +5,8 @@
  * [Sync] If this file changes, update `pc/src/.folder.md`.
  */
 
+import { invoke } from "@tauri-apps/api/core";
+
 export const AGENT_BUS_URL = "http://127.0.0.1:8181";
 export const AGENT_BUS_REQUEST_TIMEOUT_MS = 3000;
 
@@ -13,18 +15,20 @@ function normalizeText(value) {
 }
 
 export async function fetchAgentBusJson(url, signal) {
-  const ctl = new AbortController();
-  const abortFromCaller = () => ctl.abort();
-  if (signal?.aborted) {
-    ctl.abort();
-  } else {
+  const parsed = new URL(url);
+  if (parsed.origin !== AGENT_BUS_URL) throw new Error("invalid local bridge route");
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+  let timeoutId, abortFromCaller;
+  const cancelled = new Promise((_, reject) => {
+    abortFromCaller = () => reject(new DOMException("Aborted", "AbortError"));
     signal?.addEventListener("abort", abortFromCaller, { once: true });
-  }
-  const timeoutId = setTimeout(() => ctl.abort(), AGENT_BUS_REQUEST_TIMEOUT_MS);
+    timeoutId = setTimeout(abortFromCaller, AGENT_BUS_REQUEST_TIMEOUT_MS);
+  });
   try {
-    const response = await fetch(url, { signal: ctl.signal });
-    if (!response.ok) throw new Error(`agent bus http ${response.status}`);
-    return await response.json();
+    return await Promise.race([
+      invoke("local_bridge_request", { route: parsed.pathname + parsed.search, body: null }),
+      cancelled,
+    ]);
   } finally {
     clearTimeout(timeoutId);
     signal?.removeEventListener("abort", abortFromCaller);

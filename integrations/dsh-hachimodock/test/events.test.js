@@ -210,6 +210,7 @@ test('assistant text is exposed as bounded displayContent for the P4 body', asyn
   const session = createFakeSession('session-assistant-text', { cwd: '/tmp/text' })
   const ctx = createFakeCtx({ sessions: [session] })
   const { url } = await startTestBridge(t, ctx)
+  appendSessionEvent(ctx, session, { type: 'turn/start', data: { turn: 1 } })
   appendSessionEvent(ctx, session, {
     type: 'assistant/message',
     time: 5000,

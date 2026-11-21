@@ -27,7 +27,20 @@ pub fn require_capability(runtime: &Value, capabilities: &Value) -> Result<(), S
 }
 /// Strict data extension (select_var, filters, refresh_action).
 pub fn config(data: &Value, runtime: Option<&Value>) -> Result<Config, String> {
-    let o = data.as_object().filter(|o| o.contains_key("source") && o.contains_key("page_var") && o.keys().all(|k| ["source","page_var","select_var","filters","refresh_action"].contains(&k.as_str()))).ok_or_else(bad)?;
+    let o = data.as_object().filter(|o| o.contains_key("source") && o.contains_key("page_var") && o.keys().all(|k| ["source","page_var","select_var","filters","refresh_action","url","response_map","http","connection"].contains(&k.as_str()))).ok_or_else(bad)?;
+    if let Some(http) = o.get("http") {
+        let valid = data["source"] == "wifi.feed" && http.as_object().is_some_and(|fields| {
+            !fields.is_empty() && fields.iter().all(|(key, value)| match key.as_str() {
+                "accept" => matches!(value.as_str(), Some(
+                    "application/json" | "application/geo+json" | "application/hal+json" | "application/vnd.api+json"
+                )),
+                "revalidate" => value.as_bool() == Some(true),
+                "cache" => value.as_str() == Some("last-good"),
+                _ => false,
+            })
+        });
+        if !valid { return Err("data.http 仅用于 wifi.feed，包含受控 accept、revalidate 或 cache".into()); }
+    }
     let page_var = o["page_var"].as_str().unwrap_or("");
     let int_var = |name: &str| -> Result<(), String> {
         if !ident(name) || name == page_var { return Err(bad()); }

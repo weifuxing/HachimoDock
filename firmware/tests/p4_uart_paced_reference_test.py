@@ -9,6 +9,8 @@ def test_actual_drained_pacing_is_private_bounded_and_keeps_observed_failures(tm
     function='static void uart_write_all('+source.split('static void uart_write_all(',1)[1].split('static int transport_log_vprintf(',1)[0]
     code=r'''
 #include <assert.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 #include "pet_p4_transport_audit.h"
 #include "pet_p4_uart_pacing.h"
@@ -85,6 +87,8 @@ def test_actual_screenshot_uart_pacing_preserves_deadline_audio_and_short_write_
     source=function((ROOT/'main/pet_p4_main.c').read_text(),'screenshot_write_all')
     code=r'''
 #include <assert.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>

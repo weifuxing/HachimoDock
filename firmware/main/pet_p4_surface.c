@@ -2,6 +2,7 @@
 #include <string.h>
 #include <math.h>
 #include "pet_p4_app_icons.h"
+#include "pet_p4_app_icons_data.inc"
 #if PET_P4_DATA_ROWS
 #include "pet_p4_data_rows.h"
 #endif

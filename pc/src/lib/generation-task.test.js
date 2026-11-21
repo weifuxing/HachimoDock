@@ -82,7 +82,7 @@ test("failed preprocessing releases durable task lock and a fresh request reache
 test("wizard defaults to full subject cleaning and warns before explicit original-image mode",()=>{
   const source=readFileSync(new URL('../CustomAvatarWizard.jsx',import.meta.url),'utf8');
   assert.match(source,/\[removeBg, setRemoveBg\] = useState\(true\)/);
-  assert.match(source,/skipProcessing: !removeBg/);
+  assert.match(source,/skipProcessing: !processBackground/);
   assert.match(source,/图片处理费用/);
   assert.match(source,/原图中的手、桌面、人物和杂物可能进入视频/);
   assert.doesNotMatch(source,/云端不可用时会保留原图继续生成/);

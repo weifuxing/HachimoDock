@@ -11,6 +11,10 @@ const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
+const isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-http-home-"));
+process.env.HOME = isolatedHome;
+process.env.USERPROFILE = isolatedHome;
+test.after(() => fs.rmSync(isolatedHome, { recursive: true, force: true }));
 const headlessSource = fs.readFileSync(
   path.join(__dirname, "../packages/clawd-backend-service/src/headless-mqtt.js"),
   "utf8",
@@ -34,7 +38,7 @@ const {
 } = require("../packages/clawd-backend-service/src/status-metrics");
 const { createAgentSessionBus, MockAdapter } = require("../packages/agent-session-bus/src/index");
 
-function postJson(port, pathname, body) {
+function postJson(port, pathname, body, headers = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request({
       host: "127.0.0.1",
@@ -43,6 +47,7 @@ function postJson(port, pathname, body) {
       path: pathname,
       headers: {
         "Content-Type": "application/json",
+        ...headers,
       },
     }, (res) => {
       const chunks = [];
@@ -383,7 +388,7 @@ test("HookHttpServer /mock-button-inject delegates request to callback", async (
     const response = await postJson(port, "/mock-button-inject", {
       text: "hello from test",
       agentId: "codex",
-    });
+    }, server.capability.headers("control"));
     assert.equal(response.statusCode, 200);
     assert.equal(response.body.ok, true);
     assert.equal(response.body.action, "mock-button-inject");
@@ -561,7 +566,7 @@ test("injectViaAgentBus retries Codex metadata session failures with a fresh voi
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = server.address().port;
-  const fakeBus = { port_: () => port };
+  const fakeBus = { port_: () => port, authorizationHeaders: () => ({ Authorization: "Bearer mock-control" }) };
   try {
     const result = await injectViaAgentBus(fakeBus, {
       agentId: "codex",

@@ -1,10 +1,10 @@
 # HachimoDock ESP32-P4 固件
 
-当前源码版本 **0.7.103-p4-r178**，配套桌面端 **0.1.197**。`main` 可包含发布后的修正；源码与已发布二进制的对应关系见 [Release 源码说明](https://github.com/YizhengWw/HachimoDock/releases/tag/v0.1.197)。默认公开构建和诊断/实验配置应分别看待，不将编译或主机测试作为实机与声学验收。
+当前源码版本 **0.7.107-p4-r292 / R292**，配套桌面端 **0.1.245**。完整烧录包见 [发布页](https://github.com/ai-maker-lab/HachimoDock/releases/latest)。
 
-本目录是 HachimoDock 当前使用的 ESP32-P4 固件源码，与 [PC 客户端](../pc/) 配合使用：PC 负责 Agent 状态监听、语音识别服务对接、素材预处理与传输；设备负责 USB 通信、按键与摇杆输入、屏幕渲染、形象播放及组件运行。
+本目录是 HachimoDock 当前使用的 ESP32-P4 固件源码，与 [PC 客户端](../pc/) 配合使用：PC 负责 Agent 状态监听、语音识别服务对接、素材预处理与传输；设备负责 USB 通信、受支持板型的 Wi-Fi／蓝牙、按键与摇杆输入、屏幕渲染、形象播放及组件运行。
 
-为设备安装固件，请下载 [完整烧录包](https://github.com/YizhengWw/HachimoDock/releases/latest)，解压后按中文指南操作。已能连接 Pet Manager 的设备，可直接使用客户端内的“固件升级”。需要自行编译时，请参考 [构建与烧录指南](BUILD.md)。
+为设备安装固件，请下载 [完整烧录包](https://github.com/ai-maker-lab/HachimoDock/releases/latest)，解压后按中文指南操作。已能连接 Pet Manager 的设备，可直接使用客户端内的“固件升级”。需要自行编译时，请参考 [构建与烧录指南](BUILD.md)。
 
 ## 目标硬件
 
@@ -22,9 +22,9 @@
 
 ### HD28091C40-V1 屏幕适配
 
-当前工作树采用 `hardware/screen-adapter/README.md` 中的 Rev A 转接板，并将 `TP_INT` 测试焊盘（触摸 J3 第 3 脚）飞线接到微雪开发板 GPIO22。LCD 和 CST328 各自通过 RC 上电复位，初始化前等待至少 1 秒，LCD 软件复位后再等待 120 ms。触摸通过 GPIO7/SDA、GPIO8/SCL 在地址 `0x1A` 通信，GPIO22 配为上拉输入、下降沿中断，触摸复位引脚设为 NC。CST328 校验信息模式标识和 480 × 640 坐标范围，按屏幕原生坐标旋转到横向界面。
+当前工作树采用 [Rev A 转接板](../hardware/screen-adapter/README.md)，触摸 J3 第 3 脚默认悬空。LCD 和 CST328 各自通过 RC 上电复位，初始化前等待至少 1 秒，LCD 软件复位后再等待 120 ms。触摸通过 GPIO7/SDA、GPIO8/SCL 在地址 `0x1A` 通信，默认每 15 ms 轮询一次。CST328 校验信息模式标识和 480 × 640 坐标范围，按屏幕原生坐标旋转到横向界面。
 
-中断处理函数发送任务通知，由触摸任务执行 I²C 读帧。启动时主动同步一次，此后任务等待中断，静止按住的 700 ms 长按由任务计时触发。已消费报文维持当前状态，有效抬起、多点或通信错误结束当前手势。通信失败时最多追加两次间隔 15 ms 的读取重试，再尝试一次 ACK 清理并保留错误状态。将 `BSP_LCD_TOUCH_INT` 改为 NC 可使用 15 ms 轮询及其 150 ms 鲜度检查。寄存器协议依据 Hynitron 数据手册，读后确认及消费标识处理参考公开驱动。[CST328 数据手册](https://www.cdtech-display.com/wp-content/uploads/2024/07/CST328-DataSheet-V2.2.pdf) [微雪 CST328 驱动](https://github.com/waveshareteam/Waveshare-ESP32-components/blob/master/display/touch/esp_lcd_touch_cst328/esp_lcd_touch_cst328.c) [Linux Hynitron 驱动](https://github.com/torvalds/linux/blob/master/drivers/input/touchscreen/hynitron_cstxxx.c)
+轮询路径保留 150 ms 鲜度检查，有效抬起、多点或通信错误结束当前手势。可选将 TP_INT 飞线接到 GPIO22，并在构建标志追加 `-DBSP_LCD_TOUCH_INT=22`。此时 ISR 通知触摸任务执行 I²C 读帧，静止按住的 700 ms 长按由任务计时触发，通信失败时最多追加两次读取重试。寄存器协议依据 Hynitron 数据手册，读后确认及消费标识处理参考公开驱动。[CST328 数据手册](https://www.cdtech-display.com/wp-content/uploads/2024/07/CST328-DataSheet-V2.2.pdf) [微雪 CST328 驱动](https://github.com/waveshareteam/Waveshare-ESP32-components/blob/master/display/touch/esp_lcd_touch_cst328/esp_lcd_touch_cst328.c) [Linux Hynitron 驱动](https://github.com/torvalds/linux/blob/master/drivers/input/touchscreen/hynitron_cstxxx.c)
 
 初始化表来自用户提供的 `BOE2.8IPS(ZV028V0Q-N10-1QP0 )_ADS(480X640)_FW(Customer)-45Duty-190802.ini.txt`，包含厂方电压、Gamma、GIP 参数及 `11 → 等待120ms → 36 00 → 35 00 → 29` 的结束顺序。外部 VBP/VFP 分别设置为 16/14 行，满足文件开头的约束。
 
@@ -51,7 +51,7 @@ ESP32-P4-WIFI6-M 的 M 表示焊接排针，不代表芯片版本。v1 与 v3 �
 
 ### 当前功能边界
 
-- P4 固件尚未提供原生 Wi-Fi / MQTT 运行路径，当前以 USB 直连为主。
+- WiFi6 固件支持同局域网配对、Agent 跟随及实时对话按键和状态传输，USB 在线时优先使用 USB；设备仍需供电，PC 协同功能仍需管理端运行。Pico 固件不包含 Wi-Fi／蓝牙栈。
 - 设备不直接播放 MP4；PC 先生成设备可用的 H.264 素材包。
 - 设备不运行完整 HTML / JavaScript 页面，也不接受组件自带的任意网络读取器。
 - ASR / TTS 不在设备本地执行，需要 PC 端及用户配置的服务。
@@ -59,7 +59,7 @@ ESP32-P4-WIFI6-M 的 M 表示焊接排针，不代表芯片版本。v1 与 v3 �
 
 ## 页面与默认操作
 
-ESP32-P4-Pico 使用 `esp32_p4_pico`（v1）或 `esp32_p4_pico_v3`（v3）构建。沿用外接按键板的相同排针位置时，SW1/SW2 分别对应 Pico 的 GPIO14/GPIO6；WIFI6 对应 GPIO50/GPIO49。SW3 为 GPIO5，编码器中键/B/A 为 GPIO4/3/2，摇杆 X/Y 为 GPIO21/20，触摸 INT 为 GPIO22。握手中的 `capabilities.controls.sw1/sw2` 上报所选板型的实际引脚。[Pico 引脚图](https://docs.waveshare.com/ESP32-P4-Pico#pinout-definition) [WIFI6 引脚图](https://docs.waveshare.com/ESP32-P4-WIFI6#pinout-definition)
+ESP32-P4-Pico 使用官方 `esp32_p4_pico_v1`（v1）或 `esp32_p4_pico_v3`（v3）构建，旧的 `esp32_p4_pico` 保留为 v1 别名。SW1/SW2 分别对应 Pico 的 GPIO14/GPIO6，WIFI6 对应 GPIO50/GPIO49。SW3 为 GPIO5，编码器中键/B/A 为 GPIO4/3/2，摇杆 X/Y 为 GPIO21/20。触摸默认轮询，可选 INT 引脚为 GPIO22。握手中的 `capabilities.controls.sw1/sw2` 上报所选板型的实际引脚。[Pico 引脚图](https://docs.waveshare.com/ESP32-P4-Pico#pinout-definition) [WIFI6 引脚图](https://docs.waveshare.com/ESP32-P4-WIFI6#pinout-definition)
 
 宠物主界面 `main` 和组件中心 `components` 是同级页面；组件运行页 `app` 是组件中心的子页面。宠物页面不显示顶部页面指示圆点。
 
@@ -70,7 +70,7 @@ ESP32-P4-Pico 使用 `esp32_p4_pico`（v1）或 `esp32_p4_pico_v3`（v3）构建
 | SW2 短按 | 切换宠物主界面与组件中心；组件运行中若绑定了 SW2，则执行组件动作 |
 | SW2 长按 | 开始 / 结束实时对话 |
 | SW3 短按 | 返回 / 取消；组件内按全局返回动作退出 |
-| SW3 长按 | 不绑定 |
+| SW3 长按 | 打开系统设置 |
 | 摇杆中键短按 | 确认 |
 | 摇杆中键长按 | 不绑定 |
 | 摇杆向上 / 向下 | 上一个 / 下一个；主界面选择会话气泡，组件中心选择组件 |
@@ -80,79 +80,52 @@ ESP32-P4-Pico 使用 `esp32_p4_pico`（v1）或 `esp32_p4_pico_v3`（v3）构建
 
 ## 默认组件
 
-出厂配置包含 **29 个组件**，顺序及初始选择以 [factory-config.json](factory-config.json) 为准。当前初始选择为城市电台（`city-radio`），设备开机仍进入宠物主界面。
+出厂配置包含 **27 个组件**，设备组件目录最多支持 40 个可见组件。顺序及初始选择以 [factory-config.json](factory-config.json) 为准。当前初始选择为城市电台，设备开机仍进入宠物主界面。
 
 | 顺序 | 名称 | ID |
 | --- | --- | --- |
 | 1 | 城市电台 | `city-radio` |
-| 2 | 云端跳一跳 | `cloud-hop` |
-| 3 | 自选股行情 | `stock-watchlist` |
-| 4 | 静心木鱼 | `wooden-fish` |
-| 5 | 每日新鲜事 | `daily-news` |
-| 6 | 每天一本书 | `book-pocket` |
-| 7 | 像素方块 | `block-combo` |
-| 8 | 番茄钟 | `tomato-clock` |
-| 9 | 鲜果一刀 | `fresh-fruit-slice` |
-| 10 | 自然声景 | `hachimi-sounds` |
-| 11 | 像素贪吃蛇 | `snake-turn` |
-| 12 | 像素飞鸟 | `flappy-bird` |
-| 13 | 每日新知 | `hachimi-learn` |
-| 14 | 哈基米小屋 | `hachimi-home` |
-| 15 | 宠物旅行 | `hachimi-travel` |
-| 16 | 专注花园 | `hachimi-garden` |
-| 17 | 蛙蛙养成 | `bloomfrog_companion` |
-| 18 | 双键接球 | `two-key-pong` |
-| 19 | 今日气象 | `hachimi-weather` |
-| 20 | 每日黄历 | `daily-almanac` |
-| 21 | 近期待办 | `upcoming-todos` |
-| 22 | 电脑状态 | `computer-status` |
-| 23 | 喝水提醒 | `drink-reminder` |
-| 24 | 活力间歇 | `hachimi-break` |
-| 25 | 灵感胶囊 | `hachimi-notes` |
-| 26 | Token 仪表盘 | `token-usage` |
-| 27 | 纠结扭蛋机 | `decision-capsule` |
-| 28 | 答案之书 | `answer-book` |
-| 29 | 盼头列车 | `hope-train` |
+| 2 | 墨线五子棋 | `inkline-gomoku` |
+| 3 | 静心木鱼 | `wooden-fish` |
+| 4 | 自选股行情 | `stock-watchlist` |
+| 5 | 模拟琴键 | `wasm-piano` |
+| 6 | 消星星 | `cozy-pop-stars` |
+| 7 | 中国象棋 | `xiangqi` |
+| 8 | 像素贪吃蛇 | `snake-turn` |
+| 9 | 2046 | `wasm-2046` |
+| 10 | 云端跳一跳 | `cloud-hop` |
+| 11 | 今天吃点什么 | `today-meal-menu` |
+| 12 | 成语笺 | `chengyu-jian` |
+| 13 | 鲜果一刀 | `fresh-fruit-slice` |
+| 14 | 每天一本书 | `book-pocket` |
+| 15 | 像素方块 | `block-combo` |
+| 16 | 番茄钟 | `tomato-clock` |
+| 17 | 像素飞鸟 | `flappy-bird` |
+| 18 | 每日新知 | `hachimi-learn` |
+| 19 | 自然声景 | `hachimi-sounds` |
+| 20 | 双键接球 | `two-key-pong` |
+| 21 | 电脑状态 | `computer-status` |
+| 22 | 喝水提醒 | `drink-reminder` |
+| 23 | 灵感胶囊 | `hachimi-notes` |
+| 24 | Token 仪表盘 | `token-usage` |
+| 25 | 纠结扭蛋机 | `decision-capsule` |
+| 26 | 答案之书 | `answer-book` |
+| 27 | 盼头列车 | `hope-train` |
 
 普通 OTA 更新应用内的内置组件资源，尊重已持久化的用户卸载记录；不会为了恢复出厂列表而删除用户组件或自动补回用户主动移除项。完整烧录则重新初始化出厂资源。依赖 PC 数据或媒体的组件需要客户端保持运行，内容源与可用性以对应组件配置为准。
 
 ## 构建固件
 
-先安装 Git、Python 3.10+、PlatformIO Core 6.1.19+ 和 Pillow；v3 不支持 Core 6.1.18。首次构建需要联网下载 ESP-IDF、编译器及锁定版本的依赖。详细工具版本、v3 命令与 DSI 接线要求见 [BUILD.md](BUILD.md)。完整烧录包的工具固定使用 esptool 5.4.0。
+安装 Python 3.10+、PlatformIO Core 6.1.19、Node.js 22 和素材工具依赖，按 [BUILD.md](BUILD.md) 准备锁定 SDK、WAMR 与资源。公开目标区分板型和芯片修订版：
 
-### macOS / Linux
+| 板型 / 芯片 | 构建环境 | 串口运行参数 |
+| --- | --- | --- |
+| WiFi6 v1 | `esp32_p4_wifi6_system_settings_v1` | 4 Mbaud |
+| WiFi6 v3 | `esp32_p4_wifi6_system_settings_v3` | 4 Mbaud |
+| Pico v1 | `esp32_p4_pico_v1` | 4 Mbaud |
+| Pico v3 | `esp32_p4_pico_v3` | 4 Mbaud |
 
-在仓库根目录执行：
-
-```sh
-python -m pip install Pillow
-python firmware/tools/build_builtin_bundle.py --check
-cd firmware
-python -m platformio run -e esp32_p4_evboard
-```
-
-### Windows
-
-在仓库根目录执行：
-
-```powershell
-cd firmware
-.\tools\p4.ps1 setup
-.\tools\p4.ps1 doctor
-.\tools\p4.ps1 build
-```
-
-`setup` 配置纯 ASCII 路径的 PlatformIO 缓存和 Python UTF-8 模式；`doctor` 检查仓库、Python、工具链和临时目录，避免非 ASCII 路径导致工具链响应文件损坏。需要自定义缓存时使用 `-PlatformIoCoreDir`，路径应为纯 ASCII 且不超过 48 个字符。
-
-两种桌面端的固件环境见 [platformio.ini](platformio.ini)：
-
-| 构建环境 | 串口运行参数 |
-| --- | --- |
-| `esp32_p4_evboard` | Windows/macOS 共用，4 Mbaud |
-| `esp32_p4_evboard_windows` | 兼容旧构建命令的别名，继承同一 4 Mbaud 配置 |
-| `esp32_p4_evboard_v3` | v3.x 芯片，Windows/macOS 共用，4 Mbaud |
-
-发布时分别构建 v1 和 v3 环境，每种芯片的同一应用镜像用于两端 PC 与对应完整出厂包；无需按照电脑系统分别刷固件。旧 Windows 构建命令保留为 v1 同配置别名。v1 与 v3 烧录包不可互刷，具体版本可以咨询客服进行确认。
+例如在仓库根目录进入 `firmware` 后执行 `python -m platformio run -e esp32_p4_wifi6_system_settings_v3`。四个目标的完整命令和桌面 OTA 文件映射见 [构建指南](BUILD.md)。同一板型和芯片的应用镜像由 Windows/macOS 共用，WiFi6/Pico、v1/v3 不可混刷。
 
 ## 烧录与升级
 
@@ -160,14 +133,18 @@ cd firmware
 
 已完成出厂初始化的设备，优先使用 Pet Manager 内的固件升级。普通 OTA 只写应用分区，保留形象、用户组件和配置；新固件启动后执行内置组件迁移。
 
-需要串口救援时，Windows 可执行以下受保护操作。请将 `COM5` 换为实际端口：
+串口救援应按 [构建与烧录指南](BUILD.md) 选择实际板型与芯片；先核对设备分区布局，并在写入后核验版本和镜像。不要将旧工具的通用 v1 默认值当作四板通用目标。
+
+### Windows 通用开发板与旧分区维护
+
+以下 PowerShell 命令适用于 `esp32_p4_evboard` 通用开发板。从 `firmware` 目录运行，先核对板型、芯片、分区表和端口。WiFi6 或 Pico 成品板请选对应的完整烧录包或客户端 OTA。
 
 ```powershell
-cd firmware
+.\tools\p4.ps1 build
 .\tools\p4.ps1 flash -Port COM5
 ```
 
-工具核对分区布局、校验写入结果并检查启动后的版本。请先确认设备已采用当前 A/B 分区布局。
+如需将兼容的早期通用开发板恢复至出厂状态，先备份设备数据，再使用 `.\tools\p4.ps1 factory-flash -Port COM5 -FactoryReset`。仍使用旧版单应用分区和 16 MiB SPIFFS 的通用开发板可用 `.\tools\migrate_to_ab.ps1 -Port COM5 -FactoryReset` 迁移。工具会先备份旧 SPIFFS，再执行完整烧录。旧文件系统不会原样写回较小的新分区。
 
 ### 首次烧录 / 恢复出厂
 
@@ -175,28 +152,15 @@ cd firmware
 
 生成出厂镜像：
 
-```powershell
+```sh
 cd firmware
-.\tools\p4.ps1 factory
+# 示例仅用于 WiFi6 v3；其他板型使用上表对应环境。
+python -m platformio run -e esp32_p4_wifi6_system_settings_v3 -t factory
 ```
 
-默认输出为 `.pio/build/esp32_p4_evboard/pet-manager-p4-factory.bin`，附带记录 SHA-256 和分段布局的 JSON 清单。生成可分发 ZIP 的步骤见 [构建与烧录指南](BUILD.md)。
+默认输出为 `.pio/build/<所选环境>/pet-manager-p4-factory.bin`，附带记录 SHA-256 和分段布局的 JSON 清单。生成可分发 ZIP 的步骤见 [构建与烧录指南](BUILD.md)。
 
-**出厂烧录会覆盖设备原有配置、形象和组件，请先备份。** 工具要求显式提供 `-FactoryReset`：
-
-```powershell
-cd firmware
-.\tools\p4.ps1 factory-flash -Port COM5 -FactoryReset
-```
-
-旧版单应用、16 MiB SPIFFS 分区设备不能直接用普通上传命令迁移。以下专用工具仅适用于其明确支持的旧布局；先验证布局、读取并校验备份，再重新初始化：
-
-```powershell
-cd firmware
-.\tools\migrate_to_ab.ps1 -Port COM5 -FactoryReset
-```
-
-旧文件系统不会原样写回较小的新分区，备份仅供手动恢复或提取。请保留备份，直到设备诊断、形象及组件均确认正常。
+**出厂烧录会覆盖设备原有配置、形象和组件，请先备份。** 使用与板型、芯片修订版相符的公开完整包及其说明；不要运行未指定目标的通用烧录命令。旧分区迁移需单独核验布局和备份，普通 OTA 不会修改分区表。
 
 ## Flash 分区
 
@@ -305,11 +269,4 @@ Windows 也可使用 `.\tools\p4.ps1 test`，再运行 `build`。源代码测试
 
 媒体切图升级：0.7.79-p4 提供 widgetSurfaceImages=p4-surface-images-v1，支持有界调色板压缩图片与播放状态驱动旋转。图片由组件包提供，不内置电台专用美术。
 
-## Unreleased framework snapshot boundary
-
-The experimental r28 source uses one native runtime snapshot for App/media
-layout, changed images, side-scene state and confirmation overlays. Host bindings
-come from one captured reply. Render-only snapshots never authorize actions.
-Boot-lifetime stall counters supplement, not replace, the existing rolling
-window diagnostics. See [BUILD.md](BUILD.md) for disabled capabilities and gates;
-this does not update bundled/public firmware or establish hardware/AEC acceptance.
+Wi-Fi 6 firmware uses one P4 image per supported P4 silicon revision. The Hosted handshake recognizes the standard ESP32-C6 and the DB board’s ESP32-C5. The C5 must already carry compatible ESP-Hosted coprocessor firmware. The normal P4 OTA does not flash it. Validate the same P4 image on both boards before advertising DB support.

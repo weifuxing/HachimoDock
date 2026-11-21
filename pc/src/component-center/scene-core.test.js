@@ -6,7 +6,11 @@ import {createSceneCore} from './scene-core.js';
 import {initialApp,appAction,appHit,appPage} from './app-runtime.js';
 const bytes=fs.readFileSync(new URL('./classic-core.wasm',import.meta.url));
 const root=process.env.PET_APP_PACKAGE_DIR||fileURLToPath(new URL('../../builtin-clawpkgs',import.meta.url));
-const load=id=>JSON.parse(fs.readFileSync(`${root}/${id}/runtime/widget.json`,'utf8'));
+const load=id=>{
+  const builtin=`${root}/${id}/runtime/widget.json`;
+  const file=fs.existsSync(builtin)||process.env.PET_APP_PACKAGE_DIR ? builtin : new URL(`../../optional-clawpkgs/${id}/runtime/widget.json`, import.meta.url);
+  return JSON.parse(fs.readFileSync(file,'utf8'));
+};
 test('frog real shared core moves, shows reactions and clears them on tick',{skip:!root},async()=>{
   const r=load('bloomfrog_companion'),c=await createSceneCore(bytes,r.scene);
   const before=c.snapshot();assert.equal(before.running,true);

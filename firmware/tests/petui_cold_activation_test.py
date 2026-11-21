@@ -22,7 +22,8 @@ def test_cold_activation_queue_prepare_publish_cancel_and_faults(tmp_path):
         end = source.index("\n}\n", start) + 3
         return source[start:end]
     code = "\n".join(function(signature) for signature in (
-        "static bool catalog_item_visible(", "static bool catalog_entry_visible(",
+        "static bool catalog_id_visible(", "static bool catalog_item_visible(", "static bool catalog_entry_visible(",
+        "static bool catalog_entry_matches(", "static int catalog_filtered_index(",
         "static int catalog_visible_index(", "bool pet_p4_miniapp_catalog_select(")) + code
     slot = source[source.index("typedef struct {\n  uint64_t serial;"):
                   source.index("bool pet_p4_miniapp_storage_lane_configure(")]
@@ -38,6 +39,7 @@ def test_cold_activation_queue_prepare_publish_cancel_and_faults(tmp_path):
 #include <string.h>
 #include "pet_p4_storage_lane.h"
 #include "pet_p4_resources.h"
+#include "pet_p4_center_layout.h"
 #define PET_P4_MINIAPP_WIDGET_ID_MAX 48
 static bool held=true,critical,audio,fail_alloc,fail_load,fail_restore,fail_write,fail_queue;
 static unsigned saves,fail_save_at,loads,restores,writes,unlocks,locks,allocations;
@@ -54,10 +56,11 @@ static bool boot;
 #define PET_WIDGET_TRACE_SCOPE(name,kind) int name=0
 #define pet_widget_trace_scope_end(p) ((void)(p))
 typedef struct {bool active,media;char widget_id[48];unsigned save_version;int counter;} miniapp_runtime_t;
-typedef struct {char widget_id[48];unsigned slot,package_generation,resource_state,checksum;} miniapp_catalog_item_t;
+typedef struct {char widget_id[48];unsigned slot,package_generation,resource_state,checksum,center_category;} miniapp_catalog_item_t;
 static miniapp_runtime_t g_runtime;
 static miniapp_catalog_item_t g_catalog[3];
 static size_t g_catalog_selected,g_catalog_count=3;
+static pet_center_filter_t g_center_filter=PET_CENTER_ALL;
 static uint32_t g_catalog_sequence,g_image_revision;
 static struct {bool active;} g_staging;
 static pet_storage_lane_t g_storage_lane;

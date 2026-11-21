@@ -1,0 +1,32 @@
+[
+  {
+    "action": "lab.left",
+    "control": "前方摇杆",
+    "event": "knob.rotate_ccw",
+    "label": "上一个候选字"
+  },
+  {
+    "action": "lab.right",
+    "control": "前方摇杆",
+    "event": "knob.rotate_cw",
+    "label": "下一个候选字"
+  },
+  {
+    "action": "lab.a",
+    "control": "SW1",
+    "event": "button.sw1.short_press",
+    "label": "开始、填字或继续"
+  },
+  {
+    "action": "lab.b",
+    "control": "SW2",
+    "event": "button.sw2.short_press",
+    "label": "切换卡片大小"
+  },
+  {
+    "action": "lab.down",
+    "control": "前方摇杆",
+    "event": "joystick.down",
+    "label": "切换笺色"
+  }
+]

@@ -1,13 +1,11 @@
 //! Shared cloud HTTP/download/speech networking. Never embeds a proxy or credential.
 //! The legacy settings filename is retained for upgrade compatibility; LAN stays separate.
-//! Internal builds may add an explicitly approved public CA chain to native trust.
 //! System mode honors reqwest's OS/environment proxy discovery and native TLS trust.
 use serde::{Deserialize, Serialize};
 use std::{fs, io::{Read, Write}, path::{Path, PathBuf}, sync::{Mutex, OnceLock}, time::{Duration, Instant}};
 
 const MAX_SETTINGS_BYTES: u64 = 256 * 1024;
 const FILE_NAME: &str = "llm-network.json";
-const BUNDLED_CA: &str = "";
 static STORAGE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +40,7 @@ pub struct NetworkStatus {
 
 impl Settings {
     fn status(&self) -> NetworkStatus {
-        NetworkStatus { mode: self.mode.clone(), proxy_url: self.proxy_url.clone(), certificate_configured: !self.ca_pem.is_empty(), bundled_certificate_configured: !BUNDLED_CA.is_empty() }
+        NetworkStatus { mode: self.mode.clone(), proxy_url: self.proxy_url.clone(), certificate_configured: !self.ca_pem.is_empty(), bundled_certificate_configured: false }
     }
 }
 
@@ -165,7 +163,6 @@ fn build_cloud_client(settings: &Settings, timeout: Option<Duration>, transport:
         ProxyMode::Manual => builder.no_proxy().proxy(reqwest::Proxy::https(&settings.proxy_url).map_err(|_| "代理配置无效")?),
     };
     for cert in certificates(&settings.ca_pem)? { builder = builder.add_root_certificate(cert); }
-    for cert in certificates(BUNDLED_CA)? { builder = builder.add_root_certificate(cert); }
     builder.build().map_err(|_| "网络客户端初始化失败，请检查代理和证书配置".into())
 }
 
@@ -177,8 +174,9 @@ pub fn download_client(timeout: Duration) -> Result<reqwest::Client, String> {
 /// Keep this file alive until npx exits; no keys or proxy overrides are exported.
 pub fn community_ca_file() -> Result<Option<tempfile::NamedTempFile>, String> {
     let settings = load()?;
-    if settings.ca_pem.is_empty() && BUNDLED_CA.is_empty() { return Ok(None); }
-    let mut pem = format!("{}\n{}\n", BUNDLED_CA, settings.ca_pem);
+    if settings.ca_pem.is_empty() { return Ok(None); }
+    let mut pem = settings.ca_pem;
+    pem.push('\n');
     if let Some(path) = std::env::var_os("NODE_EXTRA_CA_CERTS").filter(|p| !p.is_empty()) {
         let existing = read_bounded(Path::new(&path))?;
         certificates(&existing)?;
@@ -341,7 +339,6 @@ mod tests {
         let status = Settings::default().status();
         assert!(!status.certificate_configured);
         assert!(!status.bundled_certificate_configured);
-        assert!(BUNDLED_CA.is_empty());
         let cleared = updated(Settings::default(), NetworkInput {
             mode: ProxyMode::System, proxy_url: String::new(), ca_file: None, clear_certificate: true,
         }).unwrap();

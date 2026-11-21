@@ -95,8 +95,8 @@ mod tests {
         assert!(!observer.contains("activateWithOptions"));
         let current = source.split("pub(super) fn begin_current_voice(").nth(1).unwrap()
             .split("fn task_window_identity(").next().unwrap();
-        assert!(current.find("prepare_existing_workbuddy_for_voice_begin(agent)?").unwrap()
-            < current.find("find_current_visible_target(agent)?").unwrap());
+        assert!(current.find("prepare_existing_workbuddy_for_voice_begin(agent)").unwrap()
+            < current.find("find_current_visible_target(agent)").unwrap());
         let bound = source.split("pub(super) fn begin_voice(").nth(1).unwrap()
             .split("pub(super) fn begin_current_voice(").next().unwrap();
         assert!(bound.find("prepare_existing_workbuddy_for_voice_begin(agent)?").unwrap()

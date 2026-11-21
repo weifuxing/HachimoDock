@@ -1,12 +1,13 @@
 /**
- * [Input] A cargo-xwin-built HachimiDock x64 executable and prepared firmware, Node, audited LGPL FFmpeg, notice/source, bridge, and WebView resource sources.
+ * [Input] A cargo-xwin-built Hachimodock x64 executable and prepared firmware, Node, audited LGPL FFmpeg, notice/source, bridge, and WebView resource sources.
  * [Output] A current-user NSIS installer (explicit DEVELOPMENT filename when requested) with exact validated Windows P4 firmware, install-relative Node and LGPL FFmpeg resources, complete corresponding source/notices, and embedded WebView2 bootstrapper.
  * [Pos] Reproducible macOS-to-Windows installer bundler used after `build:win:portable`.
  * [Sync] If this file changes, update `scripts/.folder.md` and `docs/runtime-dependencies.md`.
  */
 
 import {
-  copyFileSync,
+  constants,
+  copyFileSync as copyFile,
   cpSync,
   existsSync,
   mkdirSync,
@@ -23,6 +24,8 @@ import { fileURLToPath } from "node:url";
 import { verifyVoiceRuntime, verifyVoiceBundle } from "./voice-runtime-resources.mjs";
 import { copyDependencyLicenses, copyNodeRuntimeLicense, dependencyLicenseResources } from "./dependency-license-resources.mjs";
 import {desktopBuildPaths,windowsExeIdentity,verifyBuildReceipt,readBuildReceipt,receiptArgument} from './desktop-build-artifact.mjs';
+
+const copyFileSync = (source, destination) => copyFile(source, destination, constants.COPYFILE_FICLONE);
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(scriptDir, "../..");
@@ -48,10 +51,10 @@ const appExeSource = resolve(
 const appIdentity=windowsExeIdentity(appExeSource,version);
 const receiptPath=receiptArgument(process.argv.slice(2));
 if(receiptPath)verifyBuildReceipt(appIdentity,readBuildReceipt(receiptPath));
-const appExeName = "HachimiDock.exe";
+const appExeName = "Hachimodock.exe";
 const flavor = process.env.PET_MANAGER_WINDOWS_INSTALLER_FLAVOR || "";
 if (flavor && flavor !== "DEVELOPMENT") throw new Error("Unsupported Windows installer flavor");
-const installerName = `HachimiDock_${version}${flavor ? `_${flavor}` : ""}_x64-setup.exe`;
+const installerName = `Hachimodock_${version}${flavor ? `_${flavor}` : ""}_x64-setup.exe`;
 const installerPath = join(bundleRoot, installerName);
 const webviewBootstrapperUrl =
   "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
@@ -81,7 +84,41 @@ function copyTree(source, destination) {
     recursive: true,
     dereference: true,
     force: true,
+    mode: constants.COPYFILE_FICLONE,
   });
+}
+
+// Use the product resource map, not a second hand-maintained DSH file list.
+// Copy only explicitly mapped files: integration tests/user state stay outside.
+function stageDshBridgeResources(configPath, resourceRoot, outputRoot) {
+  const resources = JSON.parse(readFileSync(configPath, "utf8")).bundle?.resources;
+  if (!resources || Array.isArray(resources) || typeof resources !== "object") {
+    throw new Error("DSH bridge requires an explicit Tauri resource map");
+  }
+  const entries = Object.entries(resources)
+    .filter(([, destination]) => typeof destination === "string" && destination.startsWith("dsh-bridge/"));
+  if (!entries.length) throw new Error("Tauri resource map contains no DSH bridge resources");
+  const destinations = new Set();
+  const files = entries.map(([source, destination]) => {
+    if (destination.includes("\\") || destination.includes(":")
+        || destination.split("/").some(part => !part || part === "." || part === "..")
+        || destinations.has(destination.toLowerCase())) {
+      throw new Error("Invalid or duplicate DSH bridge destination");
+    }
+    destinations.add(destination.toLowerCase());
+    const input = resolve(resourceRoot, source);
+    if (!existsSync(input) || !statSync(input).isFile()) {
+      throw new Error(`DSH bridge mapped source is not a file: ${source}`);
+    }
+    return { source: input, destination: join(outputRoot, destination), label: destination };
+  });
+  // Preflight every input before writing any of this resource group.
+  for (const file of files) {
+    mkdirSync(dirname(file.destination), { recursive: true });
+    copyFileSync(file.source, file.destination);
+    assertExactFileCopy(file.source, file.destination, file.label);
+  }
+  return files.map(file => file.destination);
 }
 
 async function acquireWebviewBootstrapper(tempRoot) {
@@ -112,7 +149,7 @@ function nsiPath(path) {
   return path.replaceAll("\\", "/").replaceAll("$", "$$").replaceAll('"', '$\\"');
 }
 
-assertPeExecutable(appExeSource, "HachimiDock Windows 主程序");
+assertPeExecutable(appExeSource, "Hachimodock Windows 主程序");
 const windowsNode = join(tauriRoot, "generated-runtime", "node.exe");
 assertPeExecutable(windowsNode, "Windows Node runtime");
 const windowsFfmpeg = join(tauriRoot, "generated-runtime", "ffmpeg.exe");
@@ -141,10 +178,12 @@ assertExactFileCopy(
   bundledFirmwareDestination,
   "Windows 内置 P4 固件",
 );
-const v3Source = join(dirname(bundledFirmwareSource), "firmware-v3.bin");
-const v3Destination = join(dirname(bundledFirmwareDestination), "firmware-v3.bin");
-copyFileSync(v3Source, v3Destination);
-assertExactFileCopy(v3Source, v3Destination, "Windows 内置 P4 v3 固件");
+for (const name of ["firmware-v3.bin", "firmware-pico-v1.bin", "firmware-pico-v3.bin"]) {
+  const source = join(dirname(bundledFirmwareSource), name);
+  const destination = join(dirname(bundledFirmwareDestination), name);
+  copyFileSync(source, destination);
+  assertExactFileCopy(source, destination, `Windows 内置固件 ${name}`);
+}
 copyTree(join(refRoot, "dist", "terrier-clips"), join(stageRoot, "terrier-clips"));
 copyTree(
   join(refRoot, "builtin-clawpkgs"),
@@ -194,6 +233,9 @@ copyTree(
   join(tauriRoot, "bridge", "hooks"),
   join(stageRoot, "bridge", "hooks"),
 );
+const dshBridgeResources = stageDshBridgeResources(
+  join(tauriRoot, "tauri.conf.json"), tauriRoot, stageRoot,
+);
 mkdirSync(join(stageRoot, "bridge", "runtime"), { recursive: true });
 copyFileSync(windowsNode, join(stageRoot, "bridge", "runtime", "node.exe"));
 copyNodeRuntimeLicense(windowsNode, join(repositoryRoot, "licenses"), join(stageRoot, "bridge", "runtime"));
@@ -201,6 +243,9 @@ mkdirSync(join(stageRoot, "tools"), { recursive: true });
 mkdirSync(join(stageRoot, "licenses"), { recursive: true });
 copyFileSync(join(repositoryRoot, "THIRD_PARTY_NOTICES.md"), join(stageRoot, "THIRD_PARTY_NOTICES.md"));
 copyDependencyLicenses(join(repositoryRoot, "licenses"), join(stageRoot, "licenses"));
+for (const name of ["WAMR-LICENSE.txt", "WAMR-ATTRIBUTIONS.md"]) {
+  copyFileSync(join(repositoryRoot, "licenses", name), join(stageRoot, "licenses", name));
+}
 copyFileSync(windowsFfmpeg, join(stageRoot, "tools", "ffmpeg.exe"));
 for (const notice of ["ffmpeg.LICENSE", "ffmpeg.README", "ffmpeg.SOURCE.txt", "zlib.LICENSE"]) {
   copyFileSync(
@@ -210,16 +255,30 @@ for (const notice of ["ffmpeg.LICENSE", "ffmpeg.README", "ffmpeg.SOURCE.txt", "z
 }
 mkdirSync(join(stageRoot, "tools", "source"), { recursive: true });
 copyFileSync(
-  join(tauriRoot, "generated-runtime", "ffmpeg-8.1.2.tar.xz"),
-  join(stageRoot, "tools", "source", "ffmpeg-8.1.2.tar.xz"),
+  join(tauriRoot, "generated-runtime", "ffmpeg-8.1.3.tar.xz"),
+  join(stageRoot, "tools", "source", "ffmpeg-8.1.3.tar.xz"),
 );
 copyTree(
   join(repositoryRoot, "pc", "skills", "petui"),
   join(stageRoot, "skills", "petui"),
 );
 
+copyTree(
+  join(tauriRoot, "authoring-runtime-bundle"),
+  join(stageRoot, "authoring-runtime"),
+);
+
+if (existsSync(join(stageRoot, "authoring-runtime", "python"))) {
+  throw new Error("Windows PetUI 工具不得包含内置 Python");
+}
+
 const requiredResources = [
   bundledFirmwareDestination,
+  ...dshBridgeResources,
+  join(stageRoot, "authoring-runtime", "manifest.json"),
+  join(stageRoot, "authoring-runtime", "bin", "clang.exe"),
+  join(stageRoot, "authoring-runtime", "bin", "wasm-ld.exe"),
+  join(stageRoot, "authoring-runtime", "bin", "petui-wasm-check.exe"),
   join(stageRoot, "THIRD_PARTY_NOTICES.md"),
   ...dependencyLicenseResources.map(({ name }) => join(stageRoot, "licenses", name)),
   join(stageRoot, "bridge", "runtime", "node.exe"),
@@ -229,7 +288,7 @@ const requiredResources = [
   join(stageRoot, "tools", "ffmpeg.README"),
   join(stageRoot, "tools", "ffmpeg.SOURCE.txt"),
   join(stageRoot, "tools", "zlib.LICENSE"),
-  join(stageRoot, "tools", "source", "ffmpeg-8.1.2.tar.xz"),
+  join(stageRoot, "tools", "source", "ffmpeg-8.1.3.tar.xz"),
   ...Object.keys(JSON.parse(readFileSync(join(
     tauriRoot, "bridge", "packages", "clawd-backend-service", "package.json",
   ), "utf8")).dependencies || {}).map((name) => join(
@@ -241,7 +300,7 @@ const requiredResources = [
   join(stageRoot, "builtin-clawpkgs", "stock-watchlist", "component.json"),
   join(stageRoot, "builtin-clawpkgs", "stock-watchlist", "runtime", "widget.json"),
   join(stageRoot, "builtin-clawpkgs", "computer-status", "runtime", "widget.json"),
-  join(stageRoot, "builtin-clawpkgs", "upcoming-todos", "runtime", "widget.json"),
+  join(stageRoot, "builtin-clawpkgs", "hachimi-notes", "runtime", "widget.json"),
   join(stageRoot, "skills", "petui", "SKILL.md"),
 ];
 for (const path of requiredResources) {
@@ -280,7 +339,7 @@ RequestExecutionLevel user
 !include "LogicLib.nsh"
 !include "x64.nsh"
 
-!define APPNAME "HachimiDock"
+!define APPNAME "Hachimodock"
 !define APPVERSION "${version}"
 !define APPGUID "com.petmanager.desktop"
 !define WEBVIEW2APPGUID "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
@@ -293,7 +352,7 @@ RequestExecutionLevel user
   Pop $1
   Pop $2
   ${"${If}"} $1 != 0
-    MessageBox MB_ICONSTOP "HachimiDock background services are still running. Close HachimiDock and retry.$\\r$\\n$2"
+    MessageBox MB_ICONSTOP "Hachimodock background services are still running. Close Hachimodock and retry.$\\r$\\n$2"
     Abort
   ${"${EndIf}"}
 !macroend
@@ -307,12 +366,12 @@ UninstallIcon "${iconPath}"
 VIProductVersion "${version}.0"
 VIAddVersionKey /LANG=1033 "ProductName" "${"${APPNAME}"}"
 VIAddVersionKey /LANG=1033 "ProductVersion" "${version}"
-VIAddVersionKey /LANG=1033 "CompanyName" "HachimiDock"
-VIAddVersionKey /LANG=1033 "FileDescription" "HachimiDock Setup"
+VIAddVersionKey /LANG=1033 "CompanyName" "Hachimodock"
+VIAddVersionKey /LANG=1033 "FileDescription" "Hachimodock Setup"
 
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_RUN "$INSTDIR\\${appExeName}"
-!define MUI_FINISHPAGE_RUN_TEXT "Launch HachimiDock"
+!define MUI_FINISHPAGE_RUN_TEXT "Launch Hachimodock"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
@@ -322,9 +381,9 @@ VIAddVersionKey /LANG=1033 "FileDescription" "HachimiDock Setup"
 !insertmacro MUI_LANGUAGE "SimpChinese"
 !insertmacro MUI_LANGUAGE "English"
 
-Section "HachimiDock" SEC_APP
+Section "Hachimodock" SEC_APP
   ${"${IfNot}"} ${"${RunningX64}"}
-    MessageBox MB_ICONSTOP "HachimiDock requires 64-bit Windows."
+    MessageBox MB_ICONSTOP "Hachimodock requires 64-bit Windows."
     Abort
   ${"${EndIf}"}
 
@@ -355,14 +414,16 @@ Section "HachimiDock" SEC_APP
   WriteUninstaller "$INSTDIR\\Uninstall.exe"
   Delete "$SMPROGRAMS\\Pet Manager.lnk"
   Delete "$DESKTOP\\Pet Manager.lnk"
-  CreateShortcut "$SMPROGRAMS\\HachimiDock.lnk" "$INSTDIR\\${appExeName}"
-  CreateShortcut "$DESKTOP\\HachimiDock.lnk" "$INSTDIR\\${appExeName}"
+  Delete "$SMPROGRAMS\\HachimiDock.lnk"
+  Delete "$DESKTOP\\HachimiDock.lnk"
+  CreateShortcut "$SMPROGRAMS\\Hachimodock.lnk" "$INSTDIR\\${appExeName}"
+  CreateShortcut "$DESKTOP\\Hachimodock.lnk" "$INSTDIR\\${appExeName}"
 
   WriteRegStr HKCU "${"${UNINSTALLKEY}"}" "DisplayName" "${"${APPNAME}"}"
   WriteRegStr HKCU "${"${UNINSTALLKEY}"}" "DisplayVersion" "${version}"
   WriteRegStr HKCU "${"${UNINSTALLKEY}"}" "DisplayIcon" "$INSTDIR\\${appExeName}"
   WriteRegStr HKCU "${"${UNINSTALLKEY}"}" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKCU "${"${UNINSTALLKEY}"}" "Publisher" "HachimiDock"
+  WriteRegStr HKCU "${"${UNINSTALLKEY}"}" "Publisher" "Hachimodock"
   WriteRegStr HKCU "${"${UNINSTALLKEY}"}" "UninstallString" '"$INSTDIR\\Uninstall.exe"'
   WriteRegStr HKCU "${"${UNINSTALLKEY}"}" "QuietUninstallString" '"$INSTDIR\\Uninstall.exe" /S'
   WriteRegDWORD HKCU "${"${UNINSTALLKEY}"}" "NoModify" 1
@@ -373,8 +434,8 @@ SectionEnd
 Section "Uninstall"
   SetRegView 64
   !insertmacro StopPetManagerOwnedRuntimes
-  Delete "$SMPROGRAMS\\HachimiDock.lnk"
-  Delete "$DESKTOP\\HachimiDock.lnk"
+  Delete "$SMPROGRAMS\\Hachimodock.lnk"
+  Delete "$DESKTOP\\Hachimodock.lnk"
   DeleteRegKey HKCU "${"${UNINSTALLKEY}"}"
   RMDir /r "$INSTDIR"
 SectionEnd

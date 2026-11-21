@@ -100,18 +100,64 @@ fn open_serial_pair(port_name: &str, baud: u32) -> SerialPortPairResult {
     Ok((Box::new(port), Box::new(reader)))
 }
 
+const SERIAL_OPEN_DEADLINE: Duration = Duration::from_secs(5);
+
 #[cfg(not(windows))]
 fn open_serial_pair(port_name: &str, baud: u32) -> SerialPortPairResult {
-    let mut port = serialport::new(port_name, baud)
-        .timeout(SERIAL_IO_TIMEOUT)
-        .dtr_on_open(false)
-        .open()
-        .map_err(|error| error.to_string())?;
-    // Runtime discovery is not a flashing/reset operation. Best effort keeps
-    // CDC drivers without modem-line ioctls compatible; do this before clone.
-    let _ = port.write_request_to_send(false);
-    let reader = port.try_clone().map_err(|error| error.to_string())?;
-    Ok((port, reader))
+    // A wedged USB-serial adapter (e.g. a CH340 hung inside the driver) can
+    // block open(2) indefinitely, pinning the caller in kernel U state. Run
+    // the blocking open on a helper thread with a bounded deadline so the
+    // connection path always returns. If we time out we abandon the helper;
+    // as soon as the kernel unblocks it (device re-plug) it closes its fd,
+    // so no port is held open by a zombie thread.
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static OPENING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let openings = OPENING.get_or_init(|| Mutex::new(HashSet::new()));
+    let port_name = port_name.to_string();
+    if !openings.lock().map_err(|_| "serial open guard unavailable")?.insert(port_name.clone()) {
+        return Err("serial open timed out after earlier attempt, still waiting for driver".into());
+    }
+    struct Opening(String);
+    impl Drop for Opening {
+        fn drop(&mut self) {
+            if let Some(openings) = OPENING.get() {
+                if let Ok(mut ports) = openings.lock() { ports.remove(&self.0); }
+            }
+        }
+    }
+    let opening = Opening(port_name.clone());
+    let port_name_for_msg = port_name.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::Builder::new().name("pet-serial-open".into()).spawn(move || {
+        let _opening = opening;
+        let result: Result<(SerialPortHandle, SerialPortHandle), String> = (|| {
+            let mut port = serialport::new(&port_name, baud)
+                .timeout(SERIAL_IO_TIMEOUT)
+                .dtr_on_open(true)
+                .open()
+                .map_err(|error| error.to_string())?;
+            // Runtime discovery is not a flashing/reset operation. Best
+            // effort keeps CDC drivers without modem-line ioctls compatible.
+            let _ = port.write_request_to_send(true);
+            let _ = port.write_data_terminal_ready(true);
+            let reader = port.try_clone().map_err(|error| error.to_string())?;
+            Ok((port, reader))
+        })();
+        // If the caller already timed out this send fails and the port is
+        // dropped here, releasing the fd.
+        let _ = tx.send(result);
+    }).map_err(|_| "could not start serial open helper")?;
+    match rx.recv_timeout(SERIAL_OPEN_DEADLINE) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "open of {port_name_for_msg} timed out after {}s (device may be wedged, re-plug USB)",
+            SERIAL_OPEN_DEADLINE.as_secs()
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("serial open helper failed".to_string())
+        }
+    }
 }
 
 pub(super) fn open_serial_pair_with_retry(port_name: &str, baud: u32) -> SerialPortPairResult {
@@ -121,7 +167,11 @@ pub(super) fn open_serial_pair_with_retry(port_name: &str, baud: u32) -> SerialP
             Ok(ports) => return Ok(ports),
             Err(error) => {
                 last_open_error = error;
-                if serial_open_error_is_transient(&last_open_error) && attempt < 5 {
+                // A wedged-device open timeout will not heal within one probe
+                // cycle; return it to the caller immediately instead of
+                // burning the full retry budget on repeated 5s deadlines.
+                let wedged = last_open_error.contains("timed out after");
+                if !wedged && serial_open_error_is_transient(&last_open_error) && attempt < 5 {
                     thread::sleep(Duration::from_millis(220));
                     continue;
                 }

@@ -69,7 +69,14 @@ function isLoopbackAddress(address) {
  */
 function boundString(value, max = MAX_EVENT_STRING) {
   if (typeof value !== 'string') return undefined
-  return value.length <= max ? value : `${value.slice(0, max - 1)}…`
+  const text = value.toWellFormed()
+  if (text.length <= max) return text
+  let end = Math.max(0, max - 1)
+  // Keep the existing UTF-16 size budget, but never send half an emoji as
+  // an escaped lone surrogate (native JSON decoders reject that string).
+  const last = text.charCodeAt(end - 1)
+  if (last >= 0xd800 && last <= 0xdbff) end--
+  return `${text.slice(0, end)}…`
 }
 
 /**

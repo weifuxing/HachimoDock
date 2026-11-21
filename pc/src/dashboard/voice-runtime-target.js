@@ -1,5 +1,10 @@
-// Runtime identity must come from the completed USB handshake, never a fallback.
-export function voiceRuntimeTarget(usb, agentId = '') {
+// Runtime identity comes from the USB handshake or the authenticated Wi-Fi status.
+export function voiceRuntimeTarget(usb, agentId = '', wifi = null) {
+  if (usb?.connected !== true && wifi?.wifiConnected === true && wifi.controlTrusted === true
+    && wifi.wirelessVoiceInput === true && wifi.panelControl === true
+    && /^p4-[0-9a-f]{12}$/.test(wifi.boardDeviceId || '') && /^[0-9a-f]{16}$/.test(wifi.bootId || '')) {
+    return {kind:'wifi',key:JSON.stringify(['wifi',wifi.boardDeviceId,wifi.bootId,agentId])};
+  }
   const runtime = String(usb?.runtime || '').trim().toLowerCase();
   const known = runtime === 'esp-p4' || ['linux','linux-board','raspberry-pi','raspberry','radxa'].includes(runtime);
   const connectionId = typeof usb?.connectionId === 'string'
@@ -25,7 +30,7 @@ export function createVoiceRuntimePoller({target, invoke, publish, isCurrent}) {
       }
       inFlight = true;
       try {
-        const result = target.kind === 'p4'
+        const result = target.kind === 'p4' || target.kind === 'wifi'
           ? await invoke('ensure_device_voice_runtime', {input:{interactive:false}})
           : await invoke('ensure_voice_runtime');
         if (!current()) return;

@@ -33,7 +33,7 @@ import { FAMILIES } from "./lib/avatar-pipeline/families.js";
 import { runSingleFamilyVideo } from "./lib/avatar-pipeline/run.js";
 import {
   DEFAULT_ADVANCED,
-  DEFAULT_PROVIDER_ID,
+  defaultGenerationProvider,
   VIDEO_PROVIDERS,
   VOLCENGINE_BASE_URL,
   VOLCENGINE_THINKING_MODEL,
@@ -123,7 +123,7 @@ function singleStateProgressFromPipeline(progress, fallbackFamily) {
   return { label: "生成中", percent: 24, message, tone: "running" };
 }
 
-export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onBack, onOpenApiSettings }) {
+export default function AppearanceDetail({ appearanceId, boardDeviceId = "", wifiConnected = false, onBack, onOpenApiSettings }) {
   const [record, setRecord] = useState(null);
   const [error, setError] = useState("");
   const [activeFamily, setActiveFamily] = useState("");
@@ -143,15 +143,13 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
   const [singleStateDialogOpen, setSingleStateDialogOpen] = useState(false);
   const [singleStateStep, setSingleStateStep] = useState(0);
   const singleStateInputRef = useRef(null);
-  const [providerId, setProviderId] = useState(DEFAULT_PROVIDER_ID);
+  const [providerId, setProviderId] = useState(defaultGenerationProvider);
   const provider = useMemo(
     () => VIDEO_PROVIDERS.find((item) => item.id === providerId) || VIDEO_PROVIDERS[0],
     [providerId],
   );
   const isVolcengine = providerId === "volcengine";
   const [apiKey, setApiKey] = useState("");
-  const [accessKey, setAccessKey] = useState("");
-  const [secretKey, setSecretKey] = useState("");
   const [baseUrl, setBaseUrl] = useState(provider.baseUrl);
   const [model, setModel] = useState(provider.models[0] || "");
   const [thinkingModel, setThinkingModel] = useState("");
@@ -160,6 +158,7 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
   const [openaiCompat, setOpenaiCompat] = useState(true);
   const [advanced, setAdvanced] = useState({ ...DEFAULT_ADVANCED });
   const [removeBg, setRemoveBg] = useState(true);
+  const processBackground = removeBg && (providerId !== "kling" || Boolean(loadArkImageConfig().apiKey));
   const [fastGeneration, setFastGeneration] = useState(true);
   const [videoParameters, setVideoParameters] = useState({});
 
@@ -215,8 +214,6 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
   const refreshProviderConfig = useCallback(() => {
     const saved = loadProviderConfig(providerId);
     setApiKey(saved.apiKey);
-    setAccessKey(saved.accessKey);
-    setSecretKey(saved.secretKey);
     setBaseUrl(saved.baseUrl);
     setModel(saved.model);
     setThinkingModel(saved.thinkingModel);
@@ -344,12 +341,10 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
 
   const singleStateGenerationReadyIssue = useMemo(() => {
     if (providerId === "kling") {
-      if (!accessKey.trim() || !secretKey.trim()) {
-        return "请先在 API 配置中保存 Kling Access Key 和 Secret Key。";
+      if (!apiKey.trim()) {
+        return "请先在 API 配置中保存可灵 AI 的 API Key。";
       }
-      if (!baseUrl.trim() || !model.trim()) {
-        return "请先填写接口地址和视频生成模型。";
-      }
+      if (!model.trim()) return "请先选择可灵视频生成模型。";
       return "";
     }
 
@@ -359,13 +354,11 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
     if (!apiKey.trim()) return "请先在 API 配置中保存当前服务的 API Key。";
     if (!baseUrl.trim() || !model.trim()) return "请先填写接口地址和视频生成模型。";
     return "";
-  }, [providerId, accessKey, secretKey, apiKey, baseUrl, model, isVolcengine]);
+  }, [providerId, apiKey, baseUrl, model, isVolcengine]);
 
   const persistSingleStateProviderConfig = useCallback(() => {
     return saveProviderConfig(providerId, {
       apiKey,
-      accessKey,
-      secretKey,
       baseUrl,
       model,
       thinkingModel,
@@ -374,7 +367,7 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
       videoParameters,
       advanced,
     });
-  }, [providerId, apiKey, accessKey, secretKey, baseUrl, model, thinkingModel, imageModel, fastGeneration, videoParameters, advanced]);
+  }, [providerId, apiKey, baseUrl, model, thinkingModel, imageModel, fastGeneration, videoParameters, advanced]);
 
   const handleSingleStateFile = useCallback((file) => {
     if (!file) return;
@@ -451,14 +444,12 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
     const providerConfig = {
       provider: providerId,
       apiKey,
-      accessKey,
-      secretKey,
       baseUrl: isVolcengine ? VOLCENGINE_BASE_URL : baseUrl,
       model: trimmedModel,
       imageEdit: loadArkImageConfig(),
       thinkingModel: thinkingModel.trim() || (isVolcengine ? VOLCENGINE_THINKING_MODEL : trimmedModel),
       fastGeneration,
-      ...(isVolcengine ? videoParameters : {}),
+      ...(providerId !== "custom" ? videoParameters : {}),
       advanced:
         providerId === "custom"
           ? {
@@ -483,7 +474,7 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
         family: activeRecord.family,
         prompt,
         providerConfig,
-        skipProcessing: !removeBg,
+        skipProcessing: !processBackground,
         onProgress: (progress) => {
           if (progress?.message) setSingleStateMessage(progress.message);
           setSingleStateProgress(singleStateProgressFromPipeline(progress, activeRecord.family));
@@ -533,8 +524,6 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
     providerId,
     isVolcengine,
     apiKey,
-    accessKey,
-    secretKey,
     baseUrl,
     model,
     thinkingModel,
@@ -542,7 +531,7 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
     videoParameters,
     advanced,
     openaiCompat,
-    removeBg,
+    processBackground,
   ]);
 
   const handleSyncSingleStateToDevice = useCallback(async () => {
@@ -552,6 +541,7 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
       setSingleStateMessage("当前不是桌面客户端运行环境，无法替换到板端。");
       return;
     }
+    if (!boardDeviceId) return;
 
     setSingleStateStatus("syncing");
     setSingleStateMessage("正在通过素材 OTA 通道替换到板端…");
@@ -855,7 +845,8 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
                       className="btn-primary"
                       type="button"
                       onClick={handleSyncSingleStateToDevice}
-                      disabled={singleStateBusy}
+                      disabled={singleStateBusy || !boardDeviceId}
+                      title={!boardDeviceId ? "替换板端素材需要 USB" : undefined}
                     >
                       {singleStateStatus === "syncing" ? <Loader size={14} className="spin" /> : <UploadCloud size={14} />}
                       替换到板端
@@ -870,7 +861,7 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
               </div>
             </section>
           )}
-          <GlobalAudioCuesPanel boardDeviceId={boardDeviceId} currentFamily={activeFamily}/>
+          <GlobalAudioCuesPanel boardDeviceId={boardDeviceId} currentFamily={activeFamily} wifiConnected={wifiConnected}/>
 
           {activeRecord?.ok && (
             <section className="detail-side-section detail-side-section--regenerate">
@@ -900,7 +891,8 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
                       className="btn-primary"
                       type="button"
                       onClick={handleSyncSingleStateToDevice}
-                      disabled={singleStateBusy}
+                      disabled={singleStateBusy || !boardDeviceId}
+                      title={!boardDeviceId ? "替换板端素材需要 USB" : undefined}
                     >
                       {singleStateStatus === "syncing" ? <Loader size={14} className="spin" /> : <UploadCloud size={14} />}
                       替换到板端
@@ -1041,11 +1033,7 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
                     videoParameters={videoParameters}
                     onVideoParameters={setVideoParameters}
                     providerId={providerId}
-                    credentialConfigured={providerCredentialsConfigured(providerId, {
-                      apiKey,
-                      accessKey,
-                      secretKey,
-                    })}
+                    credentialConfigured={providerCredentialsConfigured(providerId, { apiKey })}
                     onOpenApiSettings={onOpenApiSettings}
                     baseUrl={baseUrl}
                     onBaseUrl={setBaseUrl}
@@ -1065,7 +1053,7 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
                     canStart={!singleStateStartIssue && canRegenerateState}
                     generationReadyIssue={singleStateStartIssue}
                     submitError={singleStateStatus === "error" ? singleStateMessage : ""}
-                    removeBg={removeBg}
+                    removeBg={processBackground}
                     onRemoveBg={setRemoveBg}
                     fastGeneration={fastGeneration}
                     onFastGeneration={setFastGeneration}
@@ -1118,7 +1106,8 @@ export default function AppearanceDetail({ appearanceId, boardDeviceId = "", onB
                 <Button
                   variant="primary"
                   onClick={handleSyncSingleStateToDevice}
-                  disabled={!canSyncSingleState || singleStateBusy}
+                  disabled={!canSyncSingleState || singleStateBusy || !boardDeviceId}
+                  title={!boardDeviceId ? "替换板端素材需要 USB" : undefined}
                 >
                   <UploadCloud size={14} />
                   替换到板端

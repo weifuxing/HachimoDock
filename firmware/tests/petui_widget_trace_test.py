@@ -33,6 +33,13 @@ extern unsigned critical_depth;
         path.write_text(text)
     protocol=(ROOT/"main/pet_p4_protocol.c").read_text()
     miniapp=(ROOT/"main/pet_p4_miniapp.c").read_text()
+    # The extracted ACK handler uses the same commit outcomes as storage.
+    # Keep the production definitions rather than duplicating wire messages.
+    commit_errors = [
+        line for line in (ROOT/"main/pet_p4_miniapp.h").read_text().splitlines()
+        if line.startswith("#define PET_P4_WIDGET_COMMIT_")
+    ]
+    assert len(commit_errors) == 3
     helpers="\n".join(function(miniapp,name) for name in
         ("read_file_kind","read_file","read_binary_file","write_file_atomic","miniapp_checksum","remove_file_if_present"))
     handlers="\n".join(function(protocol,name) for name in
@@ -50,12 +57,15 @@ extern unsigned critical_depth;
 #include <stdlib.h>
 #include <string.h>
 #include "cJSON.h"
+/* COMMIT_ERRORS */
 unsigned critical_depth;
 static uint64_t now;
 static uintptr_t current_task=1;
 static unsigned logs, ack_count;
 static size_t longest_log;
 static bool handler_ok=true,audio_busy;
+static const char *handler_error;
+static cJSON *last_ack;
 static bool storage_work_current(void){return true;}
 int64_t esp_timer_get_time(void){errno=ERANGE;return (int64_t)now;}
 void *xTaskGetCurrentTaskHandle(void){return (void *)current_task;}
@@ -76,19 +86,23 @@ static const char *json_string(const cJSON *p,const char *key){
 static void copy_text(char *out,size_t size,const char *value){snprintf(out,size,"%s",value);}
 static void send_topic_payload(pet_p4_send_line_fn send,void *ctx,const char *topic,cJSON *p){
  (void)send;(void)ctx;(void)topic;assert(trace_lanes[0].active&&trace_lanes[0].stage==PET_WTRACE_ACK);
+ cJSON_Delete(last_ack);last_ack=cJSON_Duplicate(p,true);assert(last_ack);
  ack_count++;now+=13;cJSON_Delete(p);
 }
 static bool action(const cJSON *p,char *error,size_t size){
- (void)p;(void)error;(void)size;PET_WIDGET_TRACE_SCOPE(trace, PET_WTRACE_PARSE);now+=7;return handler_ok;
+ (void)p;PET_WIDGET_TRACE_SCOPE(trace, PET_WTRACE_PARSE);
+ if(error&&size&&handler_error)copy_text(error,size,handler_error);
+ now+=7;return handler_ok;
 }
 /* RPC field validation is exercised against the real include by
  * p4_background_protocol_test; this test isolates the outer trace/ACK lane. */
 static bool handle_background_program_topic(pet_p4_runtime_state_t *s,const char *t,const cJSON *p,pet_p4_send_line_fn f,void *c){
  (void)s;(void)t;(void)f;(void)c;return action(p,NULL,0);
 }
-static bool pet_p4_miniapp_install_begin(const cJSON*p,char*e,size_t s){return action(p,e,s);}
-static bool pet_p4_miniapp_install_chunk(const cJSON*p,char*e,size_t s){return action(p,e,s);}
-static bool pet_p4_miniapp_install_commit(const cJSON*p,char*e,size_t s){return action(p,e,s);}
+static void pet_p4_miniapp_install_status(const cJSON *request,cJSON *payload){(void)request;(void)payload;assert(!"unexpected status route");}
+static bool pet_p4_miniapp_transfer_begin(const cJSON*p,char*e,size_t s){return action(p,e,s);}
+static bool pet_p4_miniapp_transfer_chunk(const cJSON*p,char*e,size_t s){return action(p,e,s);}
+static bool pet_p4_miniapp_transfer_commit(const cJSON*p,char*e,size_t s){return action(p,e,s);}
 static bool pet_p4_miniapp_resource_repair_active(void){return false;}
 static void pet_p4_miniapp_sync_stats(int *stats){*stats=3;}
 static bool send_widget_inventory(pet_p4_runtime_state_t*s,const cJSON*p,pet_p4_send_line_fn f,void*c){
@@ -193,6 +207,38 @@ static void test_protocol(void){
  }
  audio_busy=false;handler_ok=true;
 }
+static void test_commit_rejection_acks(void){
+ const struct {const char *message,*code;} cases[]={
+  {PET_P4_WIDGET_COMMIT_STORAGE_DEFERRED,"commit_storage_deferred"},
+  {PET_P4_WIDGET_COMMIT_AUDIO_BUSY,"commit_audio_busy"},
+  {PET_P4_WIDGET_COMMIT_STORAGE_INTERRUPTED,"commit_storage_interrupted"},
+  {"unclassified commit failure",NULL},
+ };
+ cJSON *request=cJSON_Parse("{\"widgetId\":\"SECRET-private\",\"transferId\":\"t\"}");assert(request);
+ for(unsigned i=0;i<sizeof(cases)/sizeof(*cases);i++){
+  pet_p4_runtime_state_t state={0};unsigned old_acks=ack_count,old_logs=logs;
+  handler_ok=false;handler_error=cases[i].message;
+  assert(!handle_widget_topic(&state,"widget/commit",request,NULL,NULL));
+  assert(ack_count==old_acks+1&&logs==old_logs+(PET_P4_SPARE_OPEN_TRACE?3:2));
+  assert(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(last_ack,"ok")));
+  assert(!strcmp(json_string(last_ack,"transferId"),"t"));
+  assert(!strcmp(json_string(last_ack,"phase"),"commit"));
+  assert(!strcmp(json_string(last_ack,"msg"),cases[i].message));
+  if(cases[i].code)assert(!strcmp(json_string(last_ack,"errorCode"),cases[i].code));
+  else assert(!cJSON_GetObjectItemCaseSensitive(last_ack,"errorCode"));
+  assert(!trace_lanes[0].active&&!trace_lanes[0].ok&&!trace_lanes[0].depth&&!trace_lanes[0].bad_scopes);
+  assert(trace_lanes[0].stages[PET_WTRACE_PARSE].count==1&&trace_lanes[0].stages[PET_WTRACE_PARSE].sum_us==7);
+  assert(trace_lanes[0].stages[PET_WTRACE_ACK].count==1&&trace_lanes[0].stages[PET_WTRACE_ACK].sum_us==13);
+ }
+ handler_error=NULL;handler_ok=true;
+ pet_p4_runtime_state_t state={0};
+ assert(handle_widget_topic(&state,"widget/commit",request,NULL,NULL));
+ assert(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(last_ack,"ok")));
+ assert(!cJSON_GetObjectItemCaseSensitive(last_ack,"errorCode"));
+ assert(!cJSON_GetObjectItemCaseSensitive(last_ack,"msg"));
+ assert(!trace_lanes[0].active&&trace_lanes[0].ok&&!trace_lanes[0].depth);
+ cJSON_Delete(request);
+}
 static void test_files(void){
  for(failure=0;failure<=6;failure++){
   remove("private.tmp");remove("private.dat");
@@ -228,9 +274,9 @@ static void test_open_purpose(void){
  pet_widget_trace_end(&op,true);assert(errno==ENOENT&&logs==old+3);
 #endif
 }
-int main(void){test_core();test_protocol();test_files();test_open_purpose();assert(longest_log<1024);return 0;}
+int main(void){test_core();test_protocol();test_commit_rejection_acks();test_files();test_open_purpose();assert(longest_log<1024);cJSON_Delete(last_ack);return 0;}
 '''
-    harness=harness.replace("/* PROTOCOL */",handlers).replace("/* FILE_HELPERS */",helpers)
+    harness=harness.replace("/* COMMIT_ERRORS */","\n".join(commit_errors)).replace("/* PROTOCOL */",handlers).replace("/* FILE_HELPERS */",helpers)
     source=tmp_path/"trace_test.c";source.write_text(harness);binary=tmp_path/"trace_test"
     vendor=ROOT/"tests/vendor/cjson"
     subprocess.run(["cc","-std=c11","-Wall","-Wextra","-Werror","-Wno-error=deprecated-declarations","-pthread",

@@ -28,7 +28,7 @@ use tokio::time::timeout;
 
 use crate::doubao_tts::{scale_pcm16, DoubaoTtsClient};
 use crate::persona_llm::{self, ChatTurn, SentenceSplitter};
-use crate::usb_serial::UsbSerialManager;
+use crate::usb_serial::{UsbConnectionStatus, UsbSerialManager};
 use crate::voice_chat_settings;
 use crate::realtime_chat_log as diagnostics;
 use crate::volcengine_asr::{StreamingSpeechEvent, StreamingSpeechRecognizer};
@@ -37,6 +37,10 @@ use crate::volcengine_asr::{StreamingSpeechEvent, StreamingSpeechRecognizer};
 mod barge_policy;
 #[path = "realtime_audio_ack.rs"]
 mod audio_ack;
+#[path = "realtime_chat/lan_audio.rs"]
+pub(crate) mod lan_audio;
+#[path = "realtime_chat/wifi.rs"]
+mod wifi;
 
 pub const STATE_EVENT: &str = "realtime-chat-state";
 pub const REQUEST_EVENT: &str = "realtime-chat-request";
@@ -80,7 +84,7 @@ impl VoiceSpec {
         if self.speed.is_finite() && self.speed > 0.0 { self.speed } else { 1.0 }
     }
     fn volume(&self) -> f32 {
-        if self.volume.is_finite() && self.volume > 0.0 { self.volume } else { 1.0 }
+        if self.volume.is_finite() && self.volume > 0.0 { self.volume } else { voice_chat_settings::DEFAULT_REALTIME_VOLUME }
     }
 }
 
@@ -122,20 +126,29 @@ pub struct RealtimeChatStatus {
     pub turns: u32,
     pub search_state: String,
     pub search_error: String,
+    pub search_provider: String,
+    pub search_sources: Vec<crate::web_search::Source>,
+    pub search_retrieved_at: String,
     pub device_stop_state: String,
 }
 
 fn clear_search(status: &mut RealtimeChatStatus) {
     status.search_state.clear();
     status.search_error.clear();
+    status.search_provider.clear();
+    status.search_sources.clear();
+    status.search_retrieved_at.clear();
 }
 
 fn update_search(status: &mut RealtimeChatStatus, event: crate::web_search::Event) {
     match event {
         crate::web_search::Event::Started => { clear_search(status); status.search_state="searching".into(); },
-        crate::web_search::Event::Finished(_) => {
-            // Sources stay inside the read-only tool result, not the PC UI snapshot.
-            status.search_state="completed".into(); status.search_error.clear();
+        crate::web_search::Event::Finished(result) => {
+            status.search_state = "completed".into();
+            status.search_error.clear();
+            status.search_provider = result.provider;
+            status.search_sources = result.sources;
+            status.search_retrieved_at = result.retrieved_at;
         },
         crate::web_search::Event::Failed(error) => {
             clear_search(status); status.search_state="failed".into(); status.search_error=error;
@@ -157,6 +170,7 @@ struct Session {
     id: String,
     board_device_id: String,
     transport: Option<CaptureTransport>,
+    wifi: Option<wifi::Link>,
     capture_stream: Mutex<Option<String>>,
     audio_requests: Arc<Mutex<audio_ack::Requests>>,
     audio_egress: Mutex<()>,
@@ -170,6 +184,7 @@ struct Session {
     completed_playback: Mutex<String>,
     pending_persona: Mutex<Option<RealtimeChatStartInput>>,
     playback_volume: AtomicU32,
+    corrupt_capture_streak: AtomicU32,
 }
 
 impl Session {
@@ -196,16 +211,59 @@ fn active_slot() -> &'static Mutex<Option<Arc<Session>>> {
     SLOT.get_or_init(|| Mutex::new(None))
 }
 
-fn refresh_device_stop_metadata(session:&Session){
-    let confirmed=session.audio_requests.lock().map(|r|r.stopped()).unwrap_or(false);
-    if confirmed&&session.cancelled.load(Ordering::SeqCst){
-        if let Ok(mut status)=session.status.lock(){status.active=false;status.state="ended".into();status.device_stop_state="acknowledged_idle_observed".into();}
+fn retire_stop_after_device_reboot(session: &Session, previous_boot: &str, current: &UsbConnectionStatus) -> bool {
+    // A different connection on the same boot is not evidence of a stopped
+    // microphone. Require this board's verified connection and new boot.
+    if !current.connected || current.board_device_id != session.board_device_id
+        || current.runtime != "esp-p4" || previous_boot.len() != 16
+        || current.boot_id.len() != 16 || current.boot_id == previous_boot
+        || !current.connection_id.parse::<u64>().is_ok_and(|id| id != 0)
+        || !session.cancelled.load(Ordering::Acquire)
+    {
+        return false;
+    }
+    let Ok(mut status) = session.status.lock() else { return false; };
+    if !status.active || status.state != "stop_unconfirmed" { return false; }
+    status.active = false;
+    status.state = "ended".into();
+    status.device_stop_state = "device_reboot_verified".into();
+    status.error.clear(); // Replug guidance no longer applies after verified recovery.
+    true
+}
+
+fn refresh_device_stop_metadata(session: &Session) {
+    if !session.cancelled.load(Ordering::Acquire) { return; }
+    if let Some(wifi) = &session.wifi {
+        if wifi.stopped() {
+            if let Ok(mut status) = session.status.lock() {
+                status.active = false;
+                status.state = "ended".into();
+                status.device_stop_state = "wifi_idle_verified".into();
+            }
+        }
+        return;
+    }
+    let confirmed = session.audio_requests.lock().is_ok_and(|r| r.stopped());
+    if confirmed {
+        if let Ok(mut status) = session.status.lock() {
+            if status.active {
+                status.active = false;
+                status.state = "ended".into();
+                status.device_stop_state = "acknowledged_idle_observed".into();
+            }
+        }
+    } else if session.status.lock().is_ok_and(|s| s.active && s.state == "stop_unconfirmed") {
+        if let Some(scope) = &session.transport {
+            if retire_stop_after_device_reboot(session, &scope.boot, &scope.usb.status()) {
+                diagnostics::record(&session.id, "device_reboot_recovered", json!({"ok": true}));
+            }
+        }
     }
 }
 fn active_session()->Option<Arc<Session>>{
     let session=active_slot().lock().ok().and_then(|slot|slot.clone())?;
     // A late exact stop ACK/status can resolve an earlier unknown without
-    // another physical send. No new owner is admitted before this actual proof.
+    // another physical send. A verified reboot also ends this boot's ownership.
     refresh_device_stop_metadata(&session);
     let active=session.status.lock().map(|s|s.active).unwrap_or(false);
     active.then_some(session)
@@ -234,7 +292,8 @@ fn publish(app: &AppHandle, session: &Session, update: impl FnOnce(&mut Realtime
                 let ended=!next.active&&next.state=="ended";
                 let stopping=next.active&&matches!(next.state.as_str(),"stopping"|"stop_unconfirmed");
                 if !ended&&!stopping { return; }
-                if stopping&&status.device_stop_state=="acknowledged_idle_observed"{return;}
+                if stopping && matches!(status.device_stop_state.as_str(),
+                    "acknowledged_idle_observed" | "device_reboot_verified") { return; }
                 next.reason = status.reason.clone();
                 next.error = status.error.clone();
             }
@@ -266,6 +325,7 @@ fn send_board(usb: &UsbSerialManager, board: &str, topic: &str, payload: Value) 
 }
 
 fn transport_current(session: &Session) -> bool {
+    if let Some(link) = &session.wifi { return link.current(); }
     session.transport.as_ref().is_none_or(|scope| {
         let status = scope.usb.status();
         status.connected && status.board_device_id == session.board_device_id
@@ -295,9 +355,26 @@ fn with_ordinary_audio_egress<T>(session:&Session,write:impl FnOnce()->Result<T,
 
 fn send_session_board(usb:&UsbSerialManager,session:&Session,topic:&str,payload:&Value)->Result<(),String>{
     with_ordinary_audio_egress(session,||{
-    if session.transport.is_some()&&(!transport_current(session)
+    if (session.transport.is_some() || session.wifi.is_some())&&(!transport_current(session)
         ||!active_slot().lock().ok().is_some_and(|slot|slot.as_ref().is_some_and(|s|std::ptr::eq(s.as_ref(),session)))){
         return Err("实时对话所有者或连接已变化，未发送".into());
+    }
+    if let Some(link) = &session.wifi {
+        let id = payload["sessionId"].as_str().unwrap_or("");
+        use lan_audio::Playback;
+        return match topic {
+            "audio/play_begin" => link.playback(Playback::Begin, id, &[]),
+            "audio/play_chunk" => {
+                let bytes = payload["data"].as_str().ok_or("Wi-Fi 播放缺少音频。")?;
+                let bytes = zeroize::Zeroizing::new(BASE64.decode(bytes).map_err(|_| "Wi-Fi 播放音频格式无效。")?);
+                link.playback(Playback::Pcm, id, &bytes)
+            }
+            "audio/play_end" => link.playback(Playback::End, id, &[]),
+            "audio/play_flush" => link.playback(Playback::Flush, id, &[]),
+            "ui/conversation" => wifi::Link::hud(session, payload),
+            "audio/play_subtitle" => Ok(()),
+            _ => Err("这条指令不属于 Wi-Fi 实时音频协议。".into()),
+        };
     }
     let mut request=payload.clone();
     if audio_ack::managed_topic(topic){
@@ -311,18 +388,23 @@ fn send_session_board(usb:&UsbSerialManager,session:&Session,topic:&str,payload:
 
 fn send_player_board(usb: &UsbSerialManager, session: &Session, topic: &str, payload: Value) {
     if send_session_board(usb, session, topic, &payload).is_err() {
-        request_failure(session, "playback_write_failed", Some("设备音频传输失败，请检查 USB 连接后重试"));
+        request_failure(session, "playback_write_failed", Some("设备音频传输失败，请检查设备连接后重试"));
     }
 }
 
-async fn begin_capture(usb: &UsbSerialManager, session: &Session, duplex: bool) -> Result<(), String> {
+async fn begin_capture(usb: &UsbSerialManager, session: &Arc<Session>, duplex: bool) -> Result<(), String> {
     session.capture_ready.store(false, Ordering::SeqCst);
     session.capture_armed.store(true, Ordering::SeqCst);
-    send_session_board(usb, session, "audio/conversation",
-        &json!({"enabled":true,"halfDuplex": !duplex,"sessionId":session.id}))?;
+    if session.wifi.is_some() {
+        wifi::Link::start(session)?;
+    } else {
+        send_session_board(usb, session, "audio/conversation",
+            &json!({"enabled":true,"halfDuplex": !duplex,"sessionId":session.id}))?;
+    }
     // Do not start the greeting speaker/reference clock until the DSP owner has
     // rebuilt its filters. Old firmware confirms through conversation status.
-    timeout(Duration::from_secs(3), async {
+    let readiness_timeout = if session.wifi.is_some() { 10 } else { 3 };
+    timeout(Duration::from_secs(readiness_timeout), async {
         loop {
             if session.cancelled.load(Ordering::SeqCst) {
                 let error=session.status.lock().map(|s|s.error.clone()).unwrap_or_default();
@@ -398,7 +480,17 @@ pub fn route_device_audio(topic: &str, payload: &Value) -> bool {
     route_session_audio(&session, topic, payload)
 }
 
+fn skip_corrupt_capture_frame(session: &Session, reason: &'static str) {
+    match session.corrupt_capture_streak.fetch_add(1, Ordering::Relaxed) {
+        0 => diagnostics::record(&session.id, "capture_frame_skipped", json!({ "reason": reason })),
+        2 => request_failure(session, "capture_frame_invalid",
+            Some("设备连续收到损坏的音频帧，本轮对话已停止")),
+        _ => {}
+    }
+}
+
 fn route_session_audio(session: &Session, topic: &str, payload: &Value) -> bool {
+    if session.wifi.is_some() { return false; } // Wi-Fi audio owns a separate authenticated socket.
     if let Some(scope) = &session.transport {
         if !transport_current(session) {
             request_failure(session, "capture_connection_changed", Some("设备连接已变化，实时对话已停止，请重新进入"));
@@ -526,7 +618,7 @@ fn route_session_audio(session: &Session, topic: &str, payload: &Value) -> bool 
         if let Some(data) = payload.get("data").and_then(Value::as_str) {
             if let Ok(pcm) = BASE64.decode(data) {
                 if pcm.len() != FRAME_BYTES {
-                    request_failure(session, "capture_frame_invalid", Some("设备音频帧长度无效，本轮对话已停止"));
+                    skip_corrupt_capture_frame(session, "frame_length");
                     return true;
                 }
                 if let Some(id) = payload["sessionId"].as_str().filter(|id| !id.is_empty()) {
@@ -537,13 +629,14 @@ fn route_session_audio(session: &Session, topic: &str, payload: &Value) -> bool 
                     request_failure(session, "capture_frame_invalid", Some("设备音频帧缺少录音身份，本轮对话已停止"));
                     return true;
                 }
+                session.corrupt_capture_streak.store(0, Ordering::Relaxed);
                 if session.input.try_send(Input::Pcm(pcm, if duplex {payload["vadSpeech"].as_bool()} else {None})).is_err() {
                     request_failure(session, "capture_overflow", Some("收音处理队列繁忙，请重新开始对话"));
                 }
                 return true;
             }
         }
-        request_failure(session, "capture_frame_invalid", Some("设备音频帧编码无效，本轮对话已停止"));
+        skip_corrupt_capture_frame(session, "base64_decode");
         return true;
     }
     if topic == "audio/error" {
@@ -564,22 +657,38 @@ fn realtime_entry_context(context: &str) -> bool {
     matches!(context, "main" | "app" | "components")
 }
 
+fn realtime_usb_input_matches(board: &str, connection: &str, boot: &str, payload: &Value) -> bool {
+    let incoming = &payload["_nativeUsbScope"];
+    !board.is_empty() && connection.parse::<u64>().is_ok_and(|id| id != 0)
+        && boot.len() == 16
+        && payload["boardDeviceId"].as_str() == Some(board)
+        && audio_ack::scope_matches((board, connection, boot),
+            (incoming["boardDeviceId"].as_str(), incoming["connectionId"].as_str(),
+             incoming["bootId"].as_str(), incoming["runtime"].as_str()))
+}
+
 pub fn handle_input_event(app: &AppHandle, payload: &Value) -> bool {
+    let realtime_action = payload["action"].as_str() == Some(ACTION_ID);
+    // Capture only once: an input for an ended session must not stop its successor.
     if let Some(session) = active_session() {
         if payload.get("boardDeviceId").and_then(Value::as_str) == Some(session.board_device_id.as_str()) {
-            if payload.get("action").and_then(Value::as_str) == Some(ACTION_ID) { request_stop(&session, "key"); }
+            if realtime_action && session.transport.as_ref().is_some_and(|scope|
+                transport_current(&session) && realtime_usb_input_matches(
+                    &session.board_device_id, &scope.connection, &scope.boot, payload)) {
+                request_stop(&session, "key");
+            }
             return true; // No Agent/session navigation or submission while realtime owns this board.
         }
+        return realtime_action; // A foreign board cannot toggle this session.
     }
-    if payload.get("action").and_then(Value::as_str) != Some(ACTION_ID) {
+    if !realtime_action {
         return false;
     }
-    let board = payload.get("boardDeviceId").and_then(Value::as_str).unwrap_or("").to_string();
+    let status = app.state::<UsbSerialManager>().status();
+    if !status.connected || !realtime_usb_input_matches(
+        &status.board_device_id, &status.connection_id, &status.boot_id, payload) { return true; }
+    let board = status.board_device_id;
     let context = payload.get("context").and_then(Value::as_str).unwrap_or("main").to_string();
-    if let Some(session) = active_session() {
-        request_stop(&session, "key");
-        return true;
-    }
     if !realtime_entry_context(&context) {
         // Global realtime input works on all supported device pages. Unknown
         // contexts still fail closed, rather than dispatching an Agent action.
@@ -623,12 +732,25 @@ fn start_guard() -> &'static Mutex<()> {
     START_GUARD.get_or_init(|| Mutex::new(()))
 }
 
-pub fn start(app: &AppHandle, mut input: RealtimeChatStartInput) -> Result<RealtimeChatStatus, String> {
-    let _guard = start_guard().lock().map_err(|_| "实时对话启动锁异常")?;
-    let board = input.board_device_id.trim().to_string();
-    if board.is_empty() {
-        return Err("缺少设备 id".to_string());
+pub fn start(app: &AppHandle, input: RealtimeChatStartInput) -> Result<RealtimeChatStatus, String> {
+    start_with_target(app, input, None)
+}
+pub(crate) fn stop_wifi_bound(board: &str, boot: &str, session_id: &str) -> Result<RealtimeChatStatus, String> {
+    let session = active_session().ok_or("Wi-Fi 对话已结束")?;
+    if session.id != session_id || session.board_device_id != board || session.transport.is_some()
+        || !session.wifi.as_ref().is_some_and(|link| link.boot_matches(boot)) {
+        return Err("对话连接已变化，未停止其他会话".into());
     }
+    request_stop(&session, "key");
+    let result = session.status.lock().map(|s| s.clone()).map_err(|_| "对话状态不可用".into());
+    result
+}
+pub(crate) fn start_wifi_bound(app: &AppHandle, input: RealtimeChatStartInput, target: crate::lan_agent::realtime::AudioTarget) -> Result<RealtimeChatStatus, String> {
+    start_with_target(app, input, Some(target))
+}
+fn start_with_target(app: &AppHandle, mut input: RealtimeChatStartInput, lan_target: Option<crate::lan_agent::realtime::AudioTarget>) -> Result<RealtimeChatStatus, String> {
+    let _guard = start_guard().lock().map_err(|_| "实时对话启动锁异常")?;
+    let mut board = input.board_device_id.trim().to_string();
     if input.system_prompt.trim().is_empty() {
         return Err("这个形象还没有人设，先在画廊里点「人设与声音」设置".to_string());
     }
@@ -644,14 +766,39 @@ pub fn start(app: &AppHandle, mut input: RealtimeChatStartInput) -> Result<Realt
     }
     let usb = app.state::<UsbSerialManager>().inner().clone();
     let usb_status = usb.status();
-    if !usb_status.connected || usb_status.board_device_id != board {
-        return Err("设备未通过 USB 连接，实时对话需要设备在线".to_string());
+    if lan_target.is_some() && usb_status.connected { return Err("USB 已接管，未启动旧 Wi-Fi 按键请求".into()); }
+    if let Some(previous) = active_session() {
+        let stopped_wifi = previous.cancelled.load(Ordering::Acquire)
+            && previous.wifi.as_ref().is_some_and(wifi::Link::observe_idle);
+        if !stopped_wifi {
+            return Err("已有实时对话，请先结束后再开始".into());
+        }
+        refresh_device_stop_metadata(&previous);
     }
-    if usb_status.connection_id.parse::<u64>().ok().filter(|id| *id != 0).is_none()
-        || usb_status.boot_id.len() != 16 {
-        return Err("设备连接身份尚未确认，请等待 USB 重新连接后进入对话".into());
+    if usb_status.connected && !board.is_empty() && usb_status.board_device_id != board {
+        return Err("USB 已连接另一台设备，请从当前设备发起实时对话。".into());
     }
-    if active_session().is_some() { return Err("已有实时对话，请先结束后再开始".into()); }
+    let (transport, wifi, duplex) = if usb_status.connected {
+        if board.is_empty() { board = usb_status.board_device_id.clone(); }
+        if usb_status.connection_id.parse::<u64>().ok().filter(|id| *id != 0).is_none()
+            || usb_status.boot_id.len() != 16 {
+            return Err("设备连接身份尚未确认，请等待 USB 重新连接后进入对话".into());
+        }
+        let duplex = usb_status.capabilities["features"]["audioAecRecovery"] == true
+            || ["audioAec","audioVad","audioFullDuplex"].iter().all(|key| usb_status.capabilities["features"][*key] == true);
+        (Some(CaptureTransport { usb:usb.clone(), connection:usb_status.connection_id.clone(), boot:usb_status.boot_id.clone() }), None, duplex)
+    } else {
+        let target = match lan_target {
+            Some(target) => {
+                if target.board_id() != board { return Err("Wi-Fi 按键目标设备已变化".into()); }
+                target.ensure_current_pair()?;
+                target
+            }
+            None => crate::lan_agent::realtime::AudioTarget::find(&board)?,
+        };
+        board = target.board_id().to_owned();
+        (None, Some(wifi::Link::new(target)), true)
+    };
     crate::component_notes::stop_recording_all();
     crate::component_audio::stop(None);
     // The native global setting is authoritative; ignore legacy per-pet gain
@@ -663,20 +810,20 @@ pub fn start(app: &AppHandle, mut input: RealtimeChatStartInput) -> Result<Realt
     let session = Arc::new(Session {
         id: session_id.clone(),
         board_device_id: board.clone(),
-        transport: Some(CaptureTransport { usb:usb.clone(), connection:usb_status.connection_id.clone(), boot:usb_status.boot_id.clone() }),
+        transport,
+        wifi,
         capture_stream: Mutex::new(None),
         audio_egress: Mutex::new(()),
         audio_requests: Arc::new(Mutex::new(Default::default())),
         cancelled: AtomicBool::new(false),
-        duplex: AtomicBool::new(usb_status.capabilities["features"]["audioAecRecovery"] == true
-            || ["audioAec","audioVad","audioFullDuplex"].iter().all(|key| usb_status.capabilities["features"][*key] == true)),
+        duplex: AtomicBool::new(duplex),
         capture_armed: AtomicBool::new(false),
         capture_ready: AtomicBool::new(false),
         stop_notify: tokio::sync::Notify::new(),
         input: tx,
         completed_playback: Mutex::new(String::new()),
         pending_persona: Mutex::new(None),
-        playback_volume: AtomicU32::new(input.voice.volume().to_bits()),
+        playback_volume: AtomicU32::new(input.voice.volume().to_bits()), corrupt_capture_streak: AtomicU32::new(0),
         status: Mutex::new(RealtimeChatStatus {
             active: true,
             state: "preparing".to_string(),
@@ -704,12 +851,18 @@ pub fn start(app: &AppHandle, mut input: RealtimeChatStartInput) -> Result<Realt
                 finish(&app_clone, &usb, &session, &reason, &error).await;
             }
             _ = async {
-                while transport_current(&session) && !session.cancelled.load(Ordering::SeqCst) {
+                while transport_current(&session) && !session.cancelled.load(Ordering::SeqCst) &&
+                    !(session.wifi.is_some() && usb.status().connected) {
                     // Status snapshot only; no serial reader, probe or command.
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             } => {
-                request_failure(&session, "capture_connection_changed", Some("设备连接已变化，实时对话已停止，请重新进入"));
+                let message = if session.wifi.is_some() && usb.status().connected {
+                    "USB 已接入，已结束本次 Wi-Fi 对话。重新开始将使用 USB。"
+                } else {
+                    "设备连接已变化，实时对话已停止，请重新进入"
+                };
+                request_failure(&session, "capture_connection_changed", Some(message));
                 finish(&app_clone, &usb, &session, "capture_connection_changed", "").await;
             }
             _ = run_session(app_clone.clone(), usb.clone(), session.clone(), input, rx) => {}
@@ -941,8 +1094,9 @@ impl Player {
 /// Dedicated thread: packs PCM into 100 ms `audio/play_chunk` frames and paces them so the board
 /// never holds more than ~1.2 s of audio ahead of real time.
 fn spawn_player(usb: UsbSerialManager, board: String, session: Arc<Session>) -> Player {
-    let subtitles = usb.status().capabilities.pointer("/features/conversationSubtitles").and_then(Value::as_bool) == Some(true);
-    let await_device = subtitles && active_session().map(|s| s.id == session.id).unwrap_or(false);
+    let subtitles = session.wifi.is_none() && usb.status().capabilities.pointer("/features/conversationSubtitles").and_then(Value::as_bool) == Some(true);
+    let await_device = session.wifi.is_some() || (subtitles && active_session().map(|s| s.id == session.id).unwrap_or(false));
+    let playback_lead_ms = if session.wifi.is_some() { wifi::PLAYBACK_LEAD_MS } else { PLAYBACK_LEAD_MS };
     let (tx, rx) = std_mpsc::channel::<(u64, PlayerCmd)>();
     let epoch = Arc::new(AtomicU64::new(0));
     let player = Player { tx, epoch: epoch.clone(), ack_requests:session.audio_requests.clone() };
@@ -968,7 +1122,7 @@ fn spawn_player(usb: UsbSerialManager, board: String, session: Arc<Session>) -> 
             }
             let started = *begin_at.get_or_insert_with(Instant::now);
             let lead_ms = (*sent_bytes * 1000 / 32_000) as i64 - started.elapsed().as_millis() as i64;
-            let wait = Duration::from_millis(lead_ms.saturating_sub(PLAYBACK_LEAD_MS as i64).max(0) as u64);
+            let wait = Duration::from_millis(lead_ms.saturating_sub(playback_lead_ms as i64).max(0) as u64);
             let until = Instant::now() + wait;
             while Instant::now() < until && !session.cancelled.load(Ordering::SeqCst) && epoch.load(Ordering::SeqCst) == expected { thread::sleep(Duration::from_millis(10)); }
             if session.cancelled.load(Ordering::SeqCst) || epoch.load(Ordering::SeqCst) != expected { return; }
@@ -988,7 +1142,7 @@ fn spawn_player(usb: UsbSerialManager, board: String, session: Arc<Session>) -> 
             }
             if let Err(error) = result {
                 eprintln!("[realtime-chat] device audio transport write failed: {error}");
-                request_failure(&session, "playback_write_failed", Some("设备音频传输失败，请检查 USB 连接后重试"));
+                request_failure(&session, "playback_write_failed", Some("设备音频传输失败，请检查设备连接后重试"));
                 return;
             }
             *seq += 1;
@@ -1051,7 +1205,7 @@ fn spawn_player(usb: UsbSerialManager, board: String, session: Arc<Session>) -> 
                             && epoch.load(Ordering::SeqCst) == expected
                             && !session.completed_playback.lock().map(|id| *id == turn_id).unwrap_or(false) {
                             if Instant::now() >= deadline {
-                                request_failure(&session, "playback_timeout", Some("设备播放完成确认超时，请检查 USB 连接"));
+                                request_failure(&session, "playback_timeout", Some("设备播放完成确认超时，请检查设备连接"));
                                 break;
                             }
                             thread::sleep(Duration::from_millis(10));
@@ -2041,6 +2195,49 @@ async fn finish(app:&AppHandle,usb:&UsbSerialManager,session:&Arc<Session>,reaso
         }
     }
     session.capture_armed.store(false,Ordering::SeqCst);session.capture_ready.store(false,Ordering::SeqCst);
+    if let Some(link) = &session.wifi {
+        let (reason,error,name)=session.status.lock().map(|s|(s.reason.clone(),s.error.clone(),s.display_name.clone())).unwrap_or_default();
+        let hint=match reason.as_str(){"tts"=>"语音合成失败，请查看 PC 实时对话提示","asr"=>"语音识别失败，请查看 PC 实时对话提示",_=>"实时对话失败，请查看 PC 提示"};
+        link.finish_hud(&json!({"sessionId":session.id,"state":if error.is_empty(){"ended"}else{"error"},
+            "name":name,"text":if error.is_empty(){""}else{hint}}));
+        publish(app,session,|s|{s.active=true;s.state="stopping".into();s.device_stop_state="wifi_awaiting_idle".into();});
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !link.stopped() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        crate::smart_home::clear_voice_pending(&session.id).await;
+        if !link.stopped() {
+            // Only read the same paired board's owner state. A lost socket is
+            // not proof of a stopped microphone, and capture is never restarted.
+            let owner = session.clone();
+            let idle = tauri::async_runtime::spawn_blocking(move || {
+                owner.wifi.as_ref().is_some_and(wifi::Link::observe_idle)
+            }).await.unwrap_or(false);
+            if !idle {
+                publish(app,session,|s|{s.active=true;s.state="stop_unconfirmed".into();s.device_stop_state="wifi_stop_unconfirmed".into();});
+                let owner = session.clone();
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    for _ in 0..10 {
+                        let candidate = owner.clone();
+                        let idle = tauri::async_runtime::spawn_blocking(move || {
+                            candidate.wifi.as_ref().is_some_and(wifi::Link::observe_idle)
+                        }).await.unwrap_or(false);
+                        if idle {
+                            publish(&app,&owner,|s|{s.active=false;s.state="ended".into();s.device_stop_state="wifi_idle_verified".into();});
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                });
+                return;
+            }
+        }
+        diagnostics::record(&session.id,"ended",json!({"deviceStopState":"wifi_idle_verified"}));
+        publish(app,session,|s|{s.active=false;s.state="ended".into();s.device_stop_state="wifi_idle_verified".into();if s.search_state=="searching"{clear_search(s);}});
+        return;
+    }
+
     let already_stopped=session.audio_requests.lock().map(|r|r.stopped()).unwrap_or(false);
     if !already_stopped{publish(app,session,|s|{s.active=true;s.state="stopping".into();s.device_stop_state="awaiting_ack".into();});}
     // No await between reserving the batch and BOTH physical attempts. A
@@ -2072,7 +2269,15 @@ async fn finish(app:&AppHandle,usb:&UsbSerialManager,session:&Arc<Session>,reaso
     crate::smart_home::clear_voice_pending(&session.id).await;
     let (stopped,stop_state)=session.audio_requests.lock().map(|r|(r.stopped(),r.stop_state())).unwrap_or((false,"state_unavailable"));
     if !stopped{
-        if let Ok(mut status)=session.status.lock(){if status.device_stop_state!="acknowledged_idle_observed"&&status.error.is_empty(){status.error="设备停止尚未确认，请只读检查设备；未自动重发终止指令".into();}}
+        let connection_changed = !transport_current(session);
+        if let Ok(mut status) = session.status.lock() {
+            if !matches!(status.device_stop_state.as_str(), "acknowledged_idle_observed" | "device_reboot_verified") {
+                if status.error.is_empty() { status.error = "设备停止尚未确认。".into(); }
+                if connection_changed {
+                    status.error.push_str(" 请断开 USB 后重新连接，等设备连上再发起实时对话。");
+                }
+            }
+        }
         publish(app,session,|s|{s.active=true;s.state="stop_unconfirmed".into();s.device_stop_state=stop_state.into();});
         diagnostics::record(&session.id,"stop_unconfirmed",json!({"stage":stop_state,"ok":false,"terminalSlots":2}));
         return; // Keep owner admission closed; never label an unknown device idle.
@@ -2109,7 +2314,8 @@ pub async fn preview(input: PersonaVoicePreviewInput) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn realtime_chat_start(app: AppHandle, input: RealtimeChatStartInput) -> Result<RealtimeChatStatus, String> {
-    start(&app, input)
+    tauri::async_runtime::spawn_blocking(move || start(&app, input))
+        .await.map_err(|_| "实时对话启动任务异常")?
 }
 
 #[tauri::command]
@@ -2153,6 +2359,21 @@ pub async fn clear_voice_chat_secret(which: String) -> Result<voice_chat_setting
 mod tests {
     include!("realtime_aec_ingress_tests.rs");
     #[test]
+    fn usb_realtime_input_rejects_foreign_or_retired_connection() {
+        use super::*;
+        let boot = "0123456789abcdef";
+        let event = json!({"boardDeviceId":"board-a", "_nativeUsbScope":{
+            "boardDeviceId":"board-a", "connectionId":"7", "bootId":boot, "runtime":"esp-p4"}});
+        assert!(realtime_usb_input_matches("board-a", "7", boot, &event));
+        assert!(!realtime_usb_input_matches("board-b", "7", boot, &event));
+        assert!(!realtime_usb_input_matches("board-a", "8", boot, &event));
+        assert!(!realtime_usb_input_matches("board-a", "7", "1123456789abcdef", &event));
+        assert!(!realtime_usb_input_matches("board-a", "7", boot, &json!({"boardDeviceId":"board-a"})));
+        let mut wrong = event.clone(); wrong["boardDeviceId"] = json!("board-b");
+        assert!(!realtime_usb_input_matches("board-a", "7", boot, &wrong));
+        assert!(!realtime_usb_input_matches("board-a", "0", boot, &event));
+    }
+    #[test]
     fn interruption_keeps_displayed_question_without_claiming_it_was_completed() {
         let mut history=Vec::new();
         let mut conversation=crate::desktop_agent::Conversation::default();
@@ -2186,12 +2407,50 @@ mod tests {
     fn routing_session() -> (super::Session, tokio::sync::mpsc::Receiver<super::Input>) {
         use super::*;
         let (input, rx) = mpsc::channel(8);
-        (Session { id:"rtc-new".into(), board_device_id:"board".into(), transport:None, capture_stream:Mutex::new(None), audio_egress:Mutex::new(()), audio_requests:Arc::new(Mutex::new({let mut r=audio_ack::Requests::default();r.playback(Some("rtc-new-turn")).unwrap();r})),
+        (Session { id:"rtc-new".into(), board_device_id:"board".into(), transport:None, wifi:None, capture_stream:Mutex::new(None), audio_egress:Mutex::new(()), audio_requests:Arc::new(Mutex::new({let mut r=audio_ack::Requests::default();r.playback(Some("rtc-new-turn")).unwrap();r})),
             cancelled:AtomicBool::new(false), duplex:AtomicBool::new(true),
             capture_armed:AtomicBool::new(false), capture_ready:AtomicBool::new(false),
             stop_notify:tokio::sync::Notify::new(), input,
             status:Mutex::new(RealtimeChatStatus {active:true, ..Default::default()}),
-            completed_playback:Mutex::new(String::new()), pending_persona:Mutex::new(None), playback_volume:AtomicU32::new(1.0f32.to_bits()) }, rx)
+            completed_playback:Mutex::new(String::new()), pending_persona:Mutex::new(None), playback_volume:AtomicU32::new(1.0f32.to_bits()), corrupt_capture_streak: AtomicU32::new(0), }, rx)
+    }
+
+    #[test]
+    fn verified_reboot_releases_only_the_old_unconfirmed_session() {
+        use super::*;
+        let (session, _rx) = routing_session();
+        let boot = "0123456789abcdef";
+        let mut current: UsbConnectionStatus = serde_json::from_value(json!({
+            "connected": true, "boardDeviceId": session.board_device_id,
+            "runtime": "esp-p4", "connectionId": "2", "bootId": boot,
+            "portName": "", "transport": "usb", "deviceModel": "", "firmware": "",
+            "wireProtocol": "", "capabilities": null
+        })).unwrap();
+        session.cancelled.store(true, Ordering::Release);
+        {
+            let mut status = session.status.lock().unwrap();
+            status.state = "stop_unconfirmed".into();
+            status.error = "设备音频传输失败".into();
+        }
+        assert!(!retire_stop_after_device_reboot(&session, boot, &current)); // USB reopen alone.
+        current.boot_id = "fedcba9876543210".into();
+        current.connected = false;
+        assert!(!retire_stop_after_device_reboot(&session, boot, &current));
+        current.connected = true;
+        current.board_device_id = "other-board".into();
+        assert!(!retire_stop_after_device_reboot(&session, boot, &current));
+        current.board_device_id = session.board_device_id.clone();
+        session.status.lock().unwrap().state = "stopping".into();
+        assert!(!retire_stop_after_device_reboot(&session, boot, &current));
+        session.status.lock().unwrap().state = "stop_unconfirmed".into();
+        assert!(retire_stop_after_device_reboot(&session, boot, &current));
+        assert!(!retire_stop_after_device_reboot(&session, boot, &current));
+        let status = session.status.lock().unwrap();
+        assert!(!status.active);
+        assert_eq!(status.state, "ended");
+        assert_eq!(status.device_stop_state, "device_reboot_verified");
+        assert!(status.error.is_empty());
+        assert!(!session.audio_requests.lock().unwrap().stopped()); // Never fabricate an ACK.
     }
 
     #[test]
@@ -2424,13 +2683,16 @@ mod tests {
         update_search(&mut status,crate::web_search::Event::Started);
         assert_eq!(status.search_state,"searching");
         update_search(&mut status,crate::web_search::Event::Finished(crate::web_search::SearchResult{
-            summary:"not sent to UI".into(), sources:vec![crate::web_search::Source{url:"https://example.com".into(),..Default::default()}],retrieved_at:"2026-09-22".into()
+            provider:"豆包".into(), summary:"not sent to UI".into(), sources:vec![crate::web_search::Source{url:"https://example.com".into(),..Default::default()}],retrieved_at:"2026-09-22".into()
         }));
         assert_eq!(status.search_state,"completed");
         let snapshot=serde_json::to_string(&status).unwrap();
-        assert!(!snapshot.contains("not sent to UI") && !snapshot.contains("https://example.com"));
-        assert!(!snapshot.contains("searchSources") && !snapshot.contains("searchRetrievedAt"));
+        assert!(!snapshot.contains("not sent to UI"));
+        assert!(snapshot.contains("https://example.com") && snapshot.contains("searchRetrievedAt"));
+        assert_eq!(status.search_sources.len(), 1);
+        assert_eq!(status.search_provider, "豆包");
         clear_search(&mut status); assert!(status.search_state.is_empty());
+        assert!(status.search_sources.is_empty() && status.search_retrieved_at.is_empty());
         update_search(&mut status,crate::web_search::Event::Failed("未授权".into()));
         assert_eq!(status.search_state,"failed");
         update_search(&mut status,crate::web_search::Event::Started); assert!(status.search_error.is_empty());
@@ -2793,11 +3055,11 @@ mod tests {
     fn saved_persona_is_targeted_latest_wins_and_survives_audio_drain() {
         tauri::async_runtime::block_on(async {
             let (tx, mut rx) = mpsc::channel(128);
-            let session = Session { id:"rtc-test".into(), board_device_id:"board".into(), transport:None, capture_stream:Mutex::new(None), audio_egress:Mutex::new(()), audio_requests:Arc::new(Mutex::new(Default::default())), cancelled:AtomicBool::new(false), duplex:AtomicBool::new(false),
+            let session = Session { id:"rtc-test".into(), board_device_id:"board".into(), transport:None, wifi:None, capture_stream:Mutex::new(None), audio_egress:Mutex::new(()), audio_requests:Arc::new(Mutex::new(Default::default())), cancelled:AtomicBool::new(false), duplex:AtomicBool::new(false),
                 capture_armed:AtomicBool::new(false), capture_ready:AtomicBool::new(false),
                 stop_notify:tokio::sync::Notify::new(), input:tx,
                 status:Mutex::new(RealtimeChatStatus { active:true, appearance_id:"pet-a".into(), ..Default::default() }),
-                completed_playback:Mutex::new(String::new()), pending_persona:Mutex::new(None), playback_volume:AtomicU32::new(1.0f32.to_bits()) };
+                completed_playback:Mutex::new(String::new()), pending_persona:Mutex::new(None), playback_volume:AtomicU32::new(1.0f32.to_bits()), corrupt_capture_streak: AtomicU32::new(0), };
             let mut current = RealtimeChatStartInput { board_device_id:"board".into(), appearance_id:"pet-a".into(),
                 display_name:"old".into(), system_prompt:"old prompt".into(), greeting:"hello".into(), voice:VoiceSpec::default() };
             let mut next = current.clone(); next.appearance_id = "pet-b".into();
@@ -2845,9 +3107,9 @@ mod tests {
     #[test]
     fn cancellation_survives_microphone_queue_drain() {
         let (tx, mut rx) = mpsc::channel(128);
-        let session = Session { id:"rtc-test".into(), board_device_id:"test".into(), transport:None, capture_stream:Mutex::new(None), audio_egress:Mutex::new(()), audio_requests:Arc::new(Mutex::new(Default::default())), cancelled:AtomicBool::new(false), duplex:AtomicBool::new(false),
+        let session = Session { id:"rtc-test".into(), board_device_id:"test".into(), transport:None, wifi:None, capture_stream:Mutex::new(None), audio_egress:Mutex::new(()), audio_requests:Arc::new(Mutex::new(Default::default())), cancelled:AtomicBool::new(false), duplex:AtomicBool::new(false),
             capture_armed:AtomicBool::new(false), capture_ready:AtomicBool::new(false),
-            stop_notify:tokio::sync::Notify::new(), input:tx, status:Mutex::new(RealtimeChatStatus::default()), completed_playback:Mutex::new(String::new()), pending_persona:Mutex::new(None), playback_volume:AtomicU32::new(1.0f32.to_bits()) };
+            stop_notify:tokio::sync::Notify::new(), input:tx, status:Mutex::new(RealtimeChatStatus::default()), completed_playback:Mutex::new(String::new()), pending_persona:Mutex::new(None), playback_volume:AtomicU32::new(1.0f32.to_bits()), corrupt_capture_streak: AtomicU32::new(0), };
         session.input.try_send(Input::Pcm(vec![0; FRAME_BYTES], None)).unwrap();
         request_stop(&session, "key");
         drain_pending(&mut rx);
@@ -3139,9 +3401,9 @@ mod tests {
         assert_eq!(diag["runtime"]["audioPlaybackReady"], true);
         let id = format!("rtc-hil-{}", now_ms());
         let (input, _) = mpsc::channel(128);
-        let session = Arc::new(Session { id:id.clone(), board_device_id:board.clone(), transport:None, capture_stream:Mutex::new(None), audio_egress:Mutex::new(()), audio_requests:Arc::new(Mutex::new(Default::default())), cancelled:AtomicBool::new(false), duplex:AtomicBool::new(true),
+        let session = Arc::new(Session { id:id.clone(), board_device_id:board.clone(), transport:None, wifi:None, capture_stream:Mutex::new(None), audio_egress:Mutex::new(()), audio_requests:Arc::new(Mutex::new(Default::default())), cancelled:AtomicBool::new(false), duplex:AtomicBool::new(true),
             capture_armed:AtomicBool::new(true), capture_ready:AtomicBool::new(false),
-            stop_notify:tokio::sync::Notify::new(), input, status:Mutex::new(RealtimeChatStatus::default()), completed_playback:Mutex::new(String::new()), pending_persona:Mutex::new(None), playback_volume:AtomicU32::new(1.0f32.to_bits()) });
+            stop_notify:tokio::sync::Notify::new(), input, status:Mutex::new(RealtimeChatStatus::default()), completed_playback:Mutex::new(String::new()), pending_persona:Mutex::new(None), playback_volume:AtomicU32::new(1.0f32.to_bits()), corrupt_capture_streak: AtomicU32::new(0), });
         let player = spawn_player(usb.clone(), board.clone(), session.clone());
         usb.send_to_board(&board,"audio/conversation",&json!({"enabled":true,"halfDuplex":false,"sessionId":id})).unwrap();
         // Match begin_capture: playback must not race DSP handle recreation.
@@ -3297,10 +3559,10 @@ mod tests {
         let board=std::env::var("P4_EXPECTED_BOARD_ID").unwrap();
         let id=format!("rtc-verified-hil-{}",now_ms());
         let (input,mut rx)=mpsc::channel(128);
-        let session=Arc::new(Session{id:id.clone(),board_device_id:board.clone(), transport:None, capture_stream:Mutex::new(None), audio_egress:Mutex::new(()), audio_requests:Arc::new(Mutex::new(Default::default())),cancelled:AtomicBool::new(false),
+        let session=Arc::new(Session{id:id.clone(),board_device_id:board.clone(), transport:None, wifi:None, capture_stream:Mutex::new(None), audio_egress:Mutex::new(()), audio_requests:Arc::new(Mutex::new(Default::default())),cancelled:AtomicBool::new(false),
             duplex:AtomicBool::new(true),capture_armed:AtomicBool::new(false),capture_ready:AtomicBool::new(false),
             stop_notify:tokio::sync::Notify::new(),input,status:Mutex::new(Default::default()),
-            completed_playback:Mutex::new(String::new()),pending_persona:Mutex::new(None), playback_volume:AtomicU32::new(1.0f32.to_bits())});
+            completed_playback:Mutex::new(String::new()),pending_persona:Mutex::new(None), playback_volume:AtomicU32::new(1.0f32.to_bits()), corrupt_capture_streak: AtomicU32::new(0),});
         let frames=Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let faults=Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let usb=UsbSerialManager::new();
@@ -3397,7 +3659,7 @@ mod tests {
         impl Drop for Cleanup {fn drop(&mut self){let _=self.0.send_to_board(&self.1,"audio/play_flush",&json!({})); let _=self.0.send_to_board(&self.1,"audio/conversation",&json!({"enabled":false}));self.0.disconnect();}}
         let _cleanup=Cleanup(usb.clone(),board.clone());
         let id=format!("rtc-echo-{}",now_ms()); let (input,_)=mpsc::channel(128);
-        let session=Arc::new(Session{id:id.clone(),board_device_id:board.clone(), transport:None, capture_stream:Mutex::new(None), audio_egress:Mutex::new(()), audio_requests:Arc::new(Mutex::new(Default::default())),cancelled:AtomicBool::new(false),duplex:AtomicBool::new(true),capture_armed:AtomicBool::new(true),capture_ready:AtomicBool::new(false),stop_notify:tokio::sync::Notify::new(),input,status:Mutex::new(Default::default()),completed_playback:Mutex::new(String::new()),pending_persona:Mutex::new(None), playback_volume:AtomicU32::new(1.0f32.to_bits())});
+        let session=Arc::new(Session{id:id.clone(),board_device_id:board.clone(), transport:None, wifi:None, capture_stream:Mutex::new(None), audio_egress:Mutex::new(()), audio_requests:Arc::new(Mutex::new(Default::default())),cancelled:AtomicBool::new(false),duplex:AtomicBool::new(true),capture_armed:AtomicBool::new(true),capture_ready:AtomicBool::new(false),stop_notify:tokio::sync::Notify::new(),input,status:Mutex::new(Default::default()),completed_playback:Mutex::new(String::new()),pending_persona:Mutex::new(None), playback_volume:AtomicU32::new(1.0f32.to_bits()), corrupt_capture_streak: AtomicU32::new(0),});
         let player=spawn_player(usb.clone(),board.clone(),session.clone());
         let raw_calibration=std::env::var("P4_ECHO_RAW").as_deref()==Ok("1");
         if raw_calibration {

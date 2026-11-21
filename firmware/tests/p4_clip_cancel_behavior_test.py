@@ -40,6 +40,7 @@ static pet_h264_prefetch_job_t g_h264_prefetch_job;
 static pet_h264_packed_view_t g_h264_packed_current;
 static int g_h264_presented_frame=-1;
 static uint64_t g_h264_first_presented_ms;
+static bool g_h264_tail_confirmed;
 static char g_h264_presented_path[80];
 static bool g_h264_reset_requested;
 static void *g_h264_decoder;

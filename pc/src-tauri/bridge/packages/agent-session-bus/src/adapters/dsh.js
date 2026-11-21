@@ -96,17 +96,19 @@ class DshAdapter extends BaseAdapter {
     };
   }
 
-  async listSessions({ limit = 20 } = {}) {
+  async listSessions({ limit = 20, strict = false } = {}) {
     const safeLimit = Math.max(1, Math.min(200, Number.parseInt(limit, 10) || 20));
     let response;
     try {
       const auth = this._auth();
       response = await requestJson(this._baseUrl, "/sessions", { timeoutMs: SESSIONS_TIMEOUT_MS, headers: auth });
     } catch (error) {
+      if (strict) throw new Error("DSH snapshot unavailable");
       this.log("warn", "DSH sessions request failed", { error: describeError(error) });
       return [];
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      if (strict) throw new Error("DSH snapshot unavailable");
       this.log("warn", "DSH sessions request failed", { status: response.statusCode });
       return [];
     }
@@ -114,8 +116,12 @@ class DshAdapter extends BaseAdapter {
     try {
       payload = JSON.parse(response.body);
     } catch {
+      if (strict) throw new Error("DSH snapshot unavailable");
       this.log("warn", "DSH sessions response was not JSON");
       return [];
+    }
+    if (strict && (payload?.version !== 2 || !Array.isArray(payload.sessions))) {
+      throw new Error("DSH snapshot unavailable");
     }
     const rows = payload && Array.isArray(payload.sessions) ? payload.sessions : [];
     return rows
@@ -437,6 +443,8 @@ function normalizeSession(row) {
   session.waitKind = session.state === 'waiting_user' && ['question', 'toolapproval'].includes(row.waitKind)
     ? row.waitKind : null;
   if (typeof row.epoch === 'string' && /^[a-f0-9]{64}$/i.test(row.epoch)) session.epoch = row.epoch;
+
+  if (Number.isSafeInteger(row.sourceSeq) && row.sourceSeq >= 0) session.sourceSeq = row.sourceSeq;
 
   if (Number.isFinite(Number(row.transitionRevision)) && Number(row.transitionRevision) > 0) {
     session.transitionRevision = Number(row.transitionRevision);

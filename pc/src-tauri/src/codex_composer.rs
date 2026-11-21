@@ -1,11 +1,16 @@
 /*
- * [Input] A bound or current-visible ChatGPT（Codex）/Claude session, a current-visible WorkBuddy/DeepSeek Harness composer, or a captured MiMoCode terminal caret, plus staged voice text and an explicit confirm action.
+ * [Input] A bound or current-visible ChatGPT（Codex）/Claude session, a current-visible WorkBuddy/Devin/DeepSeek Harness composer, or a captured MiMoCode terminal caret, plus staged voice text and an explicit confirm action.
  * [Output] Read-only frontmost-Agent detection, exact desktop-session navigation, bounded composer lookup, per-recording appended draft updates, and explicit-confirm submission without automatic send on ASR finalization.
  * [Pos] Cross-platform foreground input bridge with session, draft, clipboard, stale-focus recovery, Windows minimized-Claude restoration, and runtime-compatible UIA pattern lookup.
  * [Sync] If this file changes, update pc/.folder.md.
  */
 
-use serde_json::{json, Value};
+#[cfg(any(windows, target_os = "macos"))]
+use serde_json::json;
+use serde_json::Value;
+
+// Devin Desktop's Windows executable name has not been independently verified.
+pub const DEVIN_DESKTOP_EXE_NAME: &str = "devin.exe";
 
 #[cfg(any(windows, target_os = "macos"))]
 fn task_submission_mode(reply: &Value) -> Result<String, String> {
@@ -40,6 +45,11 @@ pub fn diagnose_current_composer(agent_id: &str) -> Result<Value, String> {
 pub struct FocusedTextTarget(macos::FocusedTextTarget);
 
 #[cfg(target_os = "macos")]
+pub fn prepare_mimo_text_target(still_current: impl Fn() -> bool) -> Result<FocusedTextTarget, String> {
+    macos::prepare_mimo_text_target(still_current).map(FocusedTextTarget)
+}
+
+#[cfg(target_os = "macos")]
 pub fn capture_focused_text_target() -> Result<FocusedTextTarget, String> {
     macos::capture_focused_text_target().map(FocusedTextTarget)
 }
@@ -64,6 +74,7 @@ const WINDOWS_COMPOSER_PROCESS_MEMORY_LIMIT_BYTES: usize = 512 * 1024 * 1024;
 fn composer_startup_timeout_message(agent: &str, stage: &str) -> String {
     let label = match agent {
         "workbuddy" => "WorkBuddy",
+        "devin" => "Devin",
         "deepseek-harness" => "DeepSeek Harness",
         "claude" | "claude-code" => "Claude",
         "codex" => "ChatGPT（Codex）",
@@ -754,6 +765,7 @@ impl CodexComposerBridge {
             "codex" => &["chatgpt.exe", "codex.exe"],
             "claude-code" => &["claude.exe"],
             "workbuddy" => &["workbuddy.exe"],
+            "devin" => &[DEVIN_DESKTOP_EXE_NAME],
             "deepseek-harness" => &["deepseek harness.exe"],
             _ => return false,
         };
@@ -798,10 +810,11 @@ impl CodexComposerBridge {
             "codex" => "codex",
             "claude-code" => "claude",
             "workbuddy" => "workbuddy",
+            "devin" => "devin",
             "deepseek-harness" => "deepseek-harness",
             _ => {
                 return Err(
-                    "Current visible composer requires ChatGPT（Codex）, Claude, WorkBuddy or DeepSeek Harness".to_string(),
+                    "Current visible composer requires ChatGPT（Codex）, Claude, WorkBuddy, Devin or DeepSeek Harness".to_string(),
                 )
             }
         };
@@ -813,7 +826,7 @@ impl CodexComposerBridge {
         callback: impl Fn(CodexComposerEvent) + Send + Sync + 'static,
     ) -> Result<RetainedComposerStartup, ComposerNoWriterError> {
         let agent=match agent_id.trim() {
-            "codex"=>"codex", "claude-code"=>"claude", "workbuddy"=>"workbuddy", "deepseek-harness"=>"deepseek-harness",
+            "codex"=>"codex", "claude-code"=>"claude", "workbuddy"=>"workbuddy", "devin"=>"devin", "deepseek-harness"=>"deepseek-harness",
             _=>return Err("Unsupported current visible composer".to_string().into()),
         };
         Self::start_with_purpose_retained(agent,"","","","","current_voice",callback)
@@ -949,12 +962,17 @@ impl CodexComposerBridge {
         let session_id = session_id.trim();
         let deep_link = deep_link.trim();
         let session_title = session_title.trim();
-        if !matches!(agent, "codex" | "claude" | "workbuddy" | "deepseek-harness") {
+        if !matches!(agent, "codex" | "claude" | "workbuddy" | "devin" | "deepseek-harness") {
             return Err("visible composer agent is invalid".to_string().into());
         }
         let current_visible = matches!(purpose, "current_voice" | "current_task");
-        if matches!(agent, "workbuddy" | "deepseek-harness") && !current_visible {
-            return Err("WorkBuddy 仅向当前可见对话输入，不回退到其他 Agent".into());
+        if matches!(agent, "workbuddy" | "devin" | "deepseek-harness") && !current_visible {
+            let label = match agent {
+                "workbuddy" => "WorkBuddy",
+                "devin" => "Devin",
+                _ => "DeepSeek Harness",
+            };
+            return Err(format!("{label} 仅向当前可见对话输入，不回退到其他 Agent").into());
         }
         if !current_visible
             && agent == "claude"
@@ -3624,12 +3642,12 @@ function Initialize-WorkBuddyAccessibility([IntPtr]$handle, [int]$ownerProcessId
 }
 
 function Test-CurrentElectronAgent([string]$agent) {
-  return @('workbuddy','deepseek-harness') -contains $agent -or ($agent -eq 'codex' -and $script:NativeVoiceAppendOnly)
+  return @('workbuddy','devin','deepseek-harness') -contains $agent -or ($agent -eq 'codex' -and $script:NativeVoiceAppendOnly)
 }
 
 function Get-WorkBuddyTarget([string[]]$allowedValues, [string]$agent = 'workbuddy') {
   Write-ComposerProgress 'resolve_window'
-  $processName = if ($agent -eq 'deepseek-harness') { 'DeepSeek Harness' } elseif ($agent -eq 'codex') { 'ChatGPT' } else { 'WorkBuddy' }
+  $processName = if ($agent -eq 'deepseek-harness') { 'DeepSeek Harness' } elseif ($agent -eq 'codex') { 'ChatGPT' } elseif ($agent -eq 'devin') { 'Devin' } else { 'WorkBuddy' }
   $processNames = if ($agent -eq 'codex') { @('ChatGPT','Codex') } else { @($processName) }
   $windows = @(Get-Process -Name $processNames -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 })
   if ($agent -eq 'codex' -and $windows.Count -gt 1) { $windows = @($windows | Where-Object { [CodexVoiceNative]::IsForeground([IntPtr]$_.MainWindowHandle) }) }
@@ -4129,9 +4147,11 @@ function Assert-ComposerHasText($state) {
   $state.LastValue = $currentValue
 }
 
-function Get-ComposerSubmitLabelScore([string]$value) {
+function Get-ComposerSubmitLabelScore([string]$value, [string]$agent = '') {
   $label = (Normalize-Label $value).ToLowerInvariant()
   if (@('send', 'submit', '发送', '提交') -contains $label) { return 0 }
+  if ($agent -eq 'deepseek-harness' -and
+      @('queue message', 'steer message', '排队发送', '插话发送') -contains $label) { return 1 }
   # A running Codex task relabels the same composer-adjacent button to Queue or
   # Steer. Match only these exact labels; never accept Stop or queue-management
   # controls through a broad substring rule.
@@ -4146,7 +4166,7 @@ function Get-ComposerSubmitLabelScore([string]$value) {
 }
 
 function Get-TaskDraftSnapshot($state) {
-  if ($null -eq $state -or -not $state.CurrentTask -or @('codex','workbuddy','deepseek-harness') -notcontains $state.Agent) {
+  if ($null -eq $state -or -not $state.CurrentTask -or @('codex','workbuddy','devin','deepseek-harness') -notcontains $state.Agent) {
     throw 'DESKTOP_TASK_TARGET_CHANGED'
   }
   # Edits made between voice requests are intentional. Pin the current value
@@ -4292,7 +4312,7 @@ function Invoke-SendButton($state, [bool]$allowQueue = $true, [bool]$strictButto
     $element = $all[$index]
     if ($element.Current.ControlType.Id -ne [System.Windows.Automation.ControlType]::Button.Id -or
         -not $element.Current.IsEnabled -or $element.Current.IsOffscreen) { continue }
-    $labelScore = Get-ComposerSubmitLabelScore ([string]$element.Current.Name)
+    $labelScore = Get-ComposerSubmitLabelScore ([string]$element.Current.Name) $state.Agent
     if ($labelScore -lt 0) { continue }
     $rect = $element.Current.BoundingRectangle
     if (-not (Test-FiniteWindowRectangle $rect)) { continue }
@@ -4312,7 +4332,9 @@ function Invoke-SendButton($state, [bool]$allowQueue = $true, [bool]$strictButto
       Pattern = $invoke
       Score = [int]$labelScore
       Submission = if ($labelScore -eq 1) {
-        if (@('steer', '引导') -contains (Normalize-Label ([string]$element.Current.Name)).ToLowerInvariant()) { 'steer' } else { 'queue' }
+        $label = (Normalize-Label ([string]$element.Current.Name)).ToLowerInvariant()
+        if ((@('steer', '引导') -contains $label) -or
+            ($state.Agent -eq 'deepseek-harness' -and @('steer message', '插话发送') -contains $label)) { 'steer' } else { 'queue' }
       } else { 'send' }
       Left = [double]$rect.Left
     }
@@ -4334,6 +4356,8 @@ function Invoke-SendButton($state, [bool]$allowQueue = $true, [bool]$strictButto
           throw 'DESKTOP_TASK_TARGET_CHANGED'
         }
         $state.NativeVoiceSubmitAttempted = $true
+      } elseif ($state.Agent -eq 'deepseek-harness') {
+        Assert-TargetCurrent $state $true
       }
       $buttons[0].Pattern.Invoke()
     }
@@ -4343,15 +4367,17 @@ function Invoke-SendButton($state, [bool]$allowQueue = $true, [bool]$strictButto
     throw "Expected one enabled send button near the composer; found $($buttons.Count)"
   }
 
-  if ($state.Agent -eq 'deepseek-harness' -or $strictButton -or -not $allowQueue) { throw 'DESKTOP_TASK_SEND_UNAVAILABLE' }
+  if ($strictButton -or -not $allowQueue) { throw 'DESKTOP_TASK_SEND_UNAVAILABLE' }
 
   Focus-Composer $state
   if ($state.NativeVoiceAppendOnly) {
     Assert-NativeVoiceOwnedDraft $state
     $state.NativeVoiceSubmitAttempted = $true
+  } elseif ($state.Agent -eq 'deepseek-harness') {
+    Assert-TargetCurrent $state $true
   }
   [CodexVoiceNative]::PressEnter()
-  if ($state.NativeVoiceAppendOnly) { return 'enter' } # native action ACK, not a UIA value/delivery assertion
+  if ($state.NativeVoiceAppendOnly -or $state.Agent -eq 'deepseek-harness') { return 'enter' } # native action ACK, not a delivery assertion
   Start-Sleep -Milliseconds 180
   $afterSubmit = Get-ComposerText $state.Composer
   if (-not [string]::IsNullOrEmpty([string]$afterSubmit[1])) {
@@ -4465,7 +4491,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         if ($state.NativeVoiceAppendOnly -and $state.NativeVoiceSubmitAttempted) { throw 'COMPOSER_SUBMIT_UNCONFIRMED: Submit was already attempted; no replay' }
         Assert-ComposerHasText $state
         $null = Invoke-SendButton $state
-        if ($state.NativeVoiceAppendOnly -and -not (Wait-NativeVoiceSubmitClear $state)) {
+        if ($state.NativeVoiceAppendOnly -and $state.Agent -ne 'deepseek-harness' -and -not (Wait-NativeVoiceSubmitClear $state)) {
           throw 'COMPOSER_SUBMIT_UNCONFIRMED: Native submit was attempted but application readback was not confirmed; no replay; draft preserved'
         }
         Write-ComposerReply @{ ok = $true; phase = 'submitted'; revision = $command.revision; mode = 'visible' }
@@ -4477,7 +4503,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         break
       }
       'dispatch' {
-        if ($null -eq $state -or @('codex','workbuddy','deepseek-harness') -notcontains $state.Agent) { throw 'Desktop composer is not ready' }
+        if ($null -eq $state -or @('codex','workbuddy','devin','deepseek-harness') -notcontains $state.Agent) { throw 'Desktop composer is not ready' }
         Assert-TargetCurrent $state $true
         if ($null -ne $command.draftSnapshot) {
           Assert-TaskDraftSnapshot $state $command.draftSnapshot
@@ -5570,7 +5596,7 @@ mod tests {
     fn windows_append_contract_preserves_base_and_formatting() {
         let source = include_str!("codex_composer.rs");
         let begin = source.find("function Normalize-ComposerText").unwrap();
-        let end = source[begin..].find("function Add-UniqueComposerElement").unwrap() + begin;
+        let end = source[begin..].find("function Get-ComposerProperty").unwrap() + begin;
         let functions = &source[begin..end];
         assert!(functions.contains("function Join-VoiceDraft"));
         assert!(!functions.contains("Normalize-Label"));
@@ -5585,7 +5611,7 @@ mod tests {
     fn realtime_delegation_submits_one_exact_atomic_command_and_waits_for_ack() {
         use std::sync::{Arc,atomic::AtomicBool,mpsc};
         let (sender,receiver)=mpsc::channel::<ComposerCommand>();
-        let bridge=CodexComposerBridge {sender,failed:Arc::new(AtomicBool::new(false)),closed:Arc::new(AtomicBool::new(false)),release_result:std::sync::Mutex::new(None),termination:None};
+        let mut bridge=CodexComposerBridge {sender,failed:Arc::new(AtomicBool::new(false)),closed:Arc::new(AtomicBool::new(false)),release_result:std::sync::Mutex::new(None),termination:None};
         let text=format!("语音对话数据（JSON）：\n{}",serde_json::json!({"conversation":[{"speaker":"user","text":"然后搜索AI硬件这个关键词"},{"speaker":"pet","text":"在抖音搜索吗？"}],"current_user_request":"是的"}));
         let expected=text.clone();
         let worker=std::thread::spawn(move || {
@@ -5596,8 +5622,14 @@ mod tests {
             let release=receiver.recv().unwrap();assert_eq!(release.payload["kind"],"release");
             release.response.unwrap().send(Ok(json!({"ok":true}))).unwrap();
         });
+        #[cfg(target_os = "macos")]
+        { bridge.termination = Some(crate::device_voice_lifecycle::WriterTermination::new(worker)); }
         assert_eq!(bridge.dispatch_task(&text).unwrap(),"queue");
-        bridge.preserve_draft().unwrap();drop(bridge);worker.join().unwrap();
+        bridge.preserve_draft().unwrap();
+        #[cfg(target_os = "macos")]
+        assert!(bridge.writer_termination_proof().unwrap().is_some());
+        #[cfg(windows)]
+        worker.join().unwrap();
     }
 
     #[cfg(any(windows, target_os="macos"))]
@@ -5605,7 +5637,7 @@ mod tests {
     fn task_draft_snapshot_roundtrip_preserves_exact_text_and_native_mode() {
         use std::sync::{Arc, atomic::AtomicBool, mpsc};
         let (sender, receiver) = mpsc::channel::<ComposerCommand>();
-        let bridge = CodexComposerBridge { sender, failed:Arc::new(AtomicBool::new(false)), closed:Arc::new(AtomicBool::new(false)), release_result:std::sync::Mutex::new(None), termination:None };
+        let mut bridge = CodexComposerBridge { sender, failed:Arc::new(AtomicBool::new(false)), closed:Arc::new(AtomicBool::new(false)), release_result:std::sync::Mutex::new(None), termination:None };
         let snapshot = json!({"target":{"composerId":"pinned"},"text":"  manually edited\n    prefix"});
         let expected = snapshot.clone();
         let text = "  manually edited\n    prefix\n\nnew request";
@@ -5621,9 +5653,14 @@ mod tests {
             assert_eq!(release.payload["kind"], "release");
             release.response.unwrap().send(Ok(json!({"ok":true}))).unwrap();
         });
+        #[cfg(target_os = "macos")]
+        { bridge.termination = Some(crate::device_voice_lifecycle::WriterTermination::new(worker)); }
         assert_eq!(bridge.inspect_task_draft().unwrap(), snapshot);
         assert_eq!(bridge.dispatch_task_from_draft(text, &snapshot).unwrap(), "steer");
         bridge.preserve_draft().unwrap();
+        #[cfg(target_os = "macos")]
+        assert!(bridge.writer_termination_proof().unwrap().is_some());
+        #[cfg(windows)]
         worker.join().unwrap();
     }
 
@@ -5635,7 +5672,7 @@ mod tests {
         assert!(dispatch.contains("DESKTOP_TASK_READBACK_CHANGED"));
         assert!(dispatch.contains("Assert-TargetCurrent $state $true"));
         assert!(dispatch.contains("Invoke-SendButton $state $true $true"));
-        assert!(windows.contains("if ($state.Agent -eq 'deepseek-harness' -or $strictButton -or -not $allowQueue)"));
+        assert!(windows.contains("if ($strictButton -or -not $allowQueue) { throw 'DESKTOP_TASK_SEND_UNAVAILABLE' }"));
         let mac=include_str!("codex_composer_macos.rs");
         assert!(mac.contains("!state.draft.base.is_empty() || !target.value.is_empty()"));
         assert!(mac.contains("confirm_voice_inner(state, Some(text))"));
@@ -5654,12 +5691,13 @@ mod tests {
         assert!(policy.contains("match button()?"));
         assert!(policy.contains("Some(mode) => Ok(mode)"));
         assert!(policy.contains("None => { enter()?; Ok(\"enter\") }"));
-        let unchanged=confirm.split("Ok(SubmitReadback::DraftUnchanged) => {").nth(1).unwrap()
-            .split("\n        }").next().unwrap();
-        // The old ordinary-confirm resend body must stay empty apart from
-        // comments: an unchanged draft never authorizes a second submission.
-        assert!(unchanged.lines().filter(|line| !line.trim().starts_with("//"))
-            .all(|line| line.trim().is_empty()));
+        let readback=confirm.split("let final_readback_reason = match wait_for_submit_readback(")
+            .nth(1).unwrap();
+        assert!(readback.contains("Ok(SubmitReadback::DraftUnchanged) => \"原草稿仍在输入框\""));
+        assert!(readback.contains("COMPOSER_SUBMIT_UNCONFIRMED"));
+        for submission in ["submit_once(", "press_unique_submission(", "press_enter("] {
+            assert!(!readback.contains(submission), "readback must never resend");
+        }
     }
 
     #[cfg(windows)]
@@ -5909,6 +5947,8 @@ mod tests {
             .unwrap();
         let labels = &source[labels_start..labels_end];
         assert!(labels.contains("'queue', 'steer'"));
+        assert!(labels.contains("'queue message', 'steer message', '排队发送', '插话发送'"));
+        assert!(source.contains("Get-ComposerSubmitLabelScore ([string]$element.Current.Name) $state.Agent"));
         assert!(!labels.contains("'stop'"));
         assert!(!labels.contains("'停止'"));
         assert!(!labels.contains("clear queue"));

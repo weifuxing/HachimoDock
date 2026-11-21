@@ -149,6 +149,13 @@ class SessionMetricsTracker {
       nowMs,
       scope === "source" ? null : sourceFallbackKey
     );
+    if (source === "deepseek-harness") {
+      record.dshLifecycle = {
+        epoch: payload.epoch,
+        transitionRevision: payload.transitionRevision,
+        sourceSeq: payload.sourceSeq,
+      };
+    }
     const previousState = record.lastState;
     const preserveTerminalState = shouldPreserveTerminalState(
       payload,
@@ -242,7 +249,8 @@ class SessionMetricsTracker {
     const contextUsagePct = calculateContextUsagePct(tokenUsage);
     let metrics = this._buildMetrics(record, contextUsagePct, nowMs);
 
-    if (record.turn && TERMINAL_TURN_STATES.has(state)) {
+    if (record.turn && (TERMINAL_TURN_STATES.has(state)
+      || (source === "deepseek-harness" && state === "stopped"))) {
       const finalTurn = record.turn;
       if (finalTurn.waitingUserSinceMs !== undefined) {
         finalTurn.waitingUserMs += Math.max(0, nowMs - finalTurn.waitingUserSinceMs);
@@ -296,6 +304,7 @@ class SessionMetricsTracker {
       if (!key.startsWith(prefix)) continue;
       statuses.push({
         id: key.slice(prefix.length),
+        ...(record.dshLifecycle || {}),
         state: record.lastState || "idle",
         updatedAt: record.lastSeenAt || 0,
         ...(record.displayTitle ? { displayTitle: record.displayTitle } : {}),
@@ -363,6 +372,7 @@ class SessionMetricsTracker {
   _statusToEventSession(status) {
     return {
       id: status.id,
+      ...(status.epoch ? { epoch: status.epoch, transitionRevision: status.transitionRevision, sourceSeq: status.sourceSeq } : {}),
       state: status.state || "idle",
       statusUpdatedAt: status.updatedAt || 0,
       ...(status.title ? { name: status.title, summary: status.title } : {}),
@@ -380,6 +390,7 @@ class SessionMetricsTracker {
     const state = normalizeLower(payload?.state) || "idle";
     const status = {
       id,
+      ...(record.dshLifecycle || {}),
       state,
       updatedAt: record.lastSeenAt || nowMs,
       ...(record.displayTitle ? { displayTitle: record.displayTitle } : {}),
@@ -390,6 +401,7 @@ class SessionMetricsTracker {
     };
     const signatureKey = `${source}|${id}`;
     const signature = JSON.stringify([
+      ...(record.dshLifecycle ? [record.dshLifecycle.epoch, record.dshLifecycle.transitionRevision] : []),
       state,
       status.displayTitle || "",
       status.displayContent || "",

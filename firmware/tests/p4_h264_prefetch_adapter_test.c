@@ -1,3 +1,4 @@
+#include "pet_p4_render_cache_memory.h"
 /* Deterministic interleavings around ACTUAL native adapter. Native decoder and
  * RTOS are seams; resource broker, lifetime and production admission are real.
  * Synthetic HWM is not hardware/stack/acoustic acceptance. */
@@ -30,7 +31,7 @@ typedef void *esp_h264_dec_handle_t;typedef int esp_h264_err_t;
 typedef struct {int pic_type;}esp_h264_dec_cfg_sw_t;
 typedef struct {struct{uint8_t *buffer;uint32_t len;}raw_data;uint32_t consume;}esp_h264_dec_in_frame_t;
 typedef struct {uint8_t *outbuf;uint32_t out_size;}esp_h264_dec_out_frame_t;
-typedef struct {int frames,width,height;}pet_p4_asset_selection_t;
+typedef struct {int frames,width,height;bool play_once;uint64_t selection_ms;}pet_p4_asset_selection_t;
 static unsigned critical,notifications,codec_calls,codec_frees,freed_buffers;
 static unsigned hook;static bool fail_new,fail_decode,fail_pack,playback_busy;
 static uint64_t now_us=100000;static pet_resource_broker_t broker;
@@ -116,10 +117,10 @@ static void fresh_source(void){
  asset_cache_release(&g_asset_cache[0]);pet_p4_asset_cache_entry_t *s=&g_asset_cache[0];
  assert(pet_resources_device_owner_open(PET_RESOURCE_MASK(PET_RESOURCE_ASSET_BUFFER),&s->owner)==PET_RESOURCE_OK);
  assert(pet_resources_device_acquire(s->owner,PET_RESOURCE_ASSET_BUFFER,32,&s->buffer_lease)==PET_RESOURCE_OK);
- s->bytes=malloc(32);assert(s->bytes);memset(s->bytes,0x19,32);s->size=32;s->finished=true;s->h264=true;s->single_slice_valid=true;
+ cache_memory_begin();s->bytes=malloc(32);assert(s->bytes);cache_memory_end(32,1,UINT32_MAX);memset(s->bytes,0x19,32);s->size=32;s->finished=true;s->h264=true;s->single_slice_valid=true;
 }
 int main(void){
- g_asset_prepare_task=1;pet_p4_asset_selection_t asset={3,16,16};fresh_source();
+ g_asset_prepare_task=1;pet_p4_asset_selection_t asset={.frames=3,.width=16,.height=16};fresh_source();
  assert(!render_h264_asset_frame_async(&asset,"a",&g_asset_cache[0],300)&&g_asset_cache_pending);
  assert(g_h264_prefetch_lifetime.phase==PET_PREFETCH_QUEUED&&g_asset_cache[0].decoder_readers==1);
  assert(pet_p4_renderer_program_window_begin());assert(!pet_p4_renderer_program_window_begin());
@@ -131,7 +132,13 @@ int main(void){
  now_us=(g_h264_first_presented_ms+100)*1000;assert(render_h264_asset_frame_async(&asset,"a",&g_asset_cache[0],300));assert(g_h264_presented_frame==1);
  now_us=(g_h264_first_presented_ms+300)*1000;assert(render_h264_asset_frame_async(&asset,"a",&g_asset_cache[0],300));assert(g_h264_presented_frame==2);
  assert(g_metrics.prefetch.presented_frames==3&&g_metrics.prefetch.decoded_frames==3);
- now_us=(g_h264_first_presented_ms+301)*1000;assert(!render_h264_asset_frame_async(&asset,"a",&g_asset_cache[0],300)); /* tail first, loop cleanup next */
+ now_us=(g_h264_first_presented_ms+301)*1000;
+ assert(render_h264_asset_frame_async(&asset,"a",&g_asset_cache[0],300)); /* LCD has not accepted the tail yet */
+ g_h264_tail_confirmed=true;
+ asset.play_once=true;
+ assert(render_h264_asset_frame_async(&asset,"a",&g_asset_cache[0],300)&&g_h264_presented_frame==2);
+ asset.play_once=false;
+ assert(!render_h264_asset_frame_async(&asset,"a",&g_asset_cache[0],300)); /* confirmed tail permits a loop */
  (void)h264_prefetch_worker();fresh_source();
  for(unsigned scenario=0;scenario<5;scenario++){
    unsigned frees=codec_frees,calls=codec_calls;assert(h264_prefetch_offer(&g_asset_cache[0],"cancel",16,16,true,0));
@@ -171,7 +178,7 @@ int main(void){
  assert(!h264_prefetch_offer(&g_asset_cache[0],"occupied",16,16,true,0));
  assert(pet_resources_device_finish(io_lease)==PET_RESOURCE_FINISH_CURRENT);pet_resources_device_revoke(io);
  /* Full physical retirement and balanced broker occupancy after every branch. */
- fresh_source();asset_cache_release(&g_asset_cache[0]);pet_resource_usage_t usage;pet_resources_usage(&broker,&usage);
+ fresh_source();asset_cache_release(&g_asset_cache[0]);assert(!g_cache_memory.stream_bytes&&!g_cache_memory.stream_slots&&!g_cache_memory.mutations);pet_resource_usage_t usage;pet_resources_usage(&broker,&usage);
  assert(!usage.live_owners&&!usage.revoked_owners&&!usage.leases[PET_RESOURCE_ASSET_BUFFER]&&!usage.leases[PET_RESOURCE_ASSET_PREPARE]);
  assert(g_metrics.prefetch.min_worker_free_bytes==1234&&notifications);
  free(g_h264_work_stream);return 0;

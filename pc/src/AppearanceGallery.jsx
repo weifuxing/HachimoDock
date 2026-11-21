@@ -1605,7 +1605,7 @@ function AppearanceDeleteModal({
             type="button"
             onClick={() => onConfirm?.("device-only")}
             disabled={deviceActionDisabled}
-            title={!activeOnDevice ? "当前设备未使用该形象" : !deviceConnected ? "请先连接设备" : undefined}
+            title={!activeOnDevice ? "当前设备未使用该形象" : !deviceConnected ? "请先通过 USB 连接当前设备" : undefined}
           >
             <Unplug size={15} />
             {pending ? "处理中…" : "仅删除设备端"}

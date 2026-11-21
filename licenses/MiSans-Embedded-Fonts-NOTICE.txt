@@ -19,6 +19,12 @@ MiSans-Font-License-Agreement.pdf
 Official Agreement source:
 https://hyperos.mi.com/font-download/MiSans%E5%AD%97%E4%BD%93%E7%9F%A5%E8%AF%86%E4%BA%A7%E6%9D%83%E8%AE%B8%E5%8F%AF%E5%8D%8F%E8%AE%AE.pdf
 
+The desktop application additionally bundles the unmodified official
+MiSans/woff2/MiSans-Medium.woff2 from https://hyperos.mi.com/font-download/MiSans.zip
+(4,942,368 bytes) for computer-rendered device text bitmaps. It is installed
+with the desktop application, not uploaded as a device font pack. The same
+accompanying official Agreement applies to this font file.
+
 Original OTF/TTF font files are not included. Embedded glyph data is supplied
 as part of the firmware, not as a standalone font product. Retain the MiSans
 attribution, accompanying Agreement and existing third-party notices when

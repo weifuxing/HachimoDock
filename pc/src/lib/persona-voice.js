@@ -40,7 +40,7 @@ export function speakerOptionsFor(currentSpeaker = "", query = "") {
 }
 
 export const VOICE_SPEED_RANGE = Object.freeze({ min: 0.5, max: 2.0, step: 0.05, fallback: 1.0 });
-export const VOICE_VOLUME_RANGE = Object.freeze({ min: 0.2, max: 1.5, step: 0.05, fallback: 1.0 });
+export const VOICE_VOLUME_RANGE = Object.freeze({ min: 0.2, max: 1.5, step: 0.05, fallback: 0.8 });
 
 export const PERSONA_TEMPLATES = Object.freeze([
   {
@@ -84,7 +84,7 @@ export const BUILTIN_TERRIER_PERSONA_VOICE = Object.freeze({
     speaker: "zh_female_peiqi_uranus_bigtts",
     clone_speaker_id: "",
     speed: 1.05,
-    volume: 1.0,
+    volume: VOICE_VOLUME_RANGE.fallback,
   }),
 });
 

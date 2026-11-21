@@ -1,19 +1,36 @@
 {
   "schema_version": 1,
   "engine": "p4-bounded-runtime-v4",
+  "quota": "p4-quota-v2",
   "vars": {},
   "states": [
-    "idle"
+    "view"
   ],
-  "initial_state": "idle",
+  "initial_state": "view",
   "transitions": [
     {
       "from": "*",
-      "on": "host.primary"
+      "on": "host.record"
     },
     {
       "from": "*",
-      "on": "host.secondary"
+      "on": "host.save"
+    },
+    {
+      "from": "*",
+      "on": "host.todo"
+    },
+    {
+      "from": "*",
+      "on": "host.tasks"
+    },
+    {
+      "from": "*",
+      "on": "host.toggle"
+    },
+    {
+      "from": "*",
+      "on": "host.filter"
     },
     {
       "from": "*",
@@ -25,42 +42,537 @@
     },
     {
       "from": "*",
-      "on": "host.todo"
+      "on": "host.up"
     },
     {
       "from": "*",
-      "on": "host.delete"
+      "on": "host.down"
+    },
+    {
+      "from": "*",
+      "on": "host.row_a"
+    },
+    {
+      "from": "*",
+      "on": "host.row_b"
+    },
+    {
+      "from": "*",
+      "on": "host.row_c"
     }
   ],
   "tick": [],
   "dashboard": {
-    "title": "灵感胶囊",
+    "title": "想法与待办",
+    "eyebrow": "笔记与待办保存在本机",
+    "headline": "先记下来，慢慢完成",
+    "metricValue": "等待电脑连接",
+    "note": "连接 Pet Manager 后，记录想法、整理待办。",
     "visualStyle": "clean",
-    "visualPalette": "candy",
+    "visualPalette": "mint",
     "visualLayout": "tool",
-    "visualSprite": "star",
-    "eyebrow": "PC 通用服务 · 连接后即可使用",
-    "headline": "接住一个想法",
-    "metricValue": "",
-    "note": "录音转写后，由你确认保存或转为待办。",
-    "footer": "默认：主键操作  副键管理  全局键退出",
-    "metricLabel": "开始录制",
-    "metricUnit": "保存笔记"
+    "visualSprite": "target",
+    "footer": "连接电脑后，录下想法或整理待办"
   },
   "surface": {
     "engine": "p4-app-surface-v1",
     "graphics": "p4-app-graphics-v1",
-    "background": 65437,
-    "images": [
+    "background": 63389,
+    "elements": [
       {
-        "id": "background",
-        "asset": "assets/background.png",
-        "frame_width": 640,
-        "frame_height": 480,
-        "frames": 1,
-        "fps": 1,
-        "encoding": "jpeg"
+        "type": "panel",
+        "x": 0,
+        "y": 0,
+        "w": 640,
+        "h": 86,
+        "color": 8680
       },
+      {
+        "type": "icon",
+        "x": 24,
+        "y": 23,
+        "w": 28,
+        "h": 28,
+        "color": 50445,
+        "icon": "spark"
+      },
+      {
+        "type": "text",
+        "x": 64,
+        "y": 15,
+        "w": 280,
+        "h": 38,
+        "color": 65535,
+        "font_size": 28,
+        "weight": 600,
+        "text": "想法与待办"
+      },
+      {
+        "type": "text",
+        "x": 65,
+        "y": 53,
+        "w": 280,
+        "h": 24,
+        "color": 46648,
+        "font_size": 14,
+        "text": "从灵感，到做到"
+      },
+      {
+        "type": "panel",
+        "x": 380,
+        "y": 20,
+        "w": 228,
+        "h": 48,
+        "color": 12939,
+        "radius": 14
+      },
+      {
+        "type": "button",
+        "x": 384,
+        "y": 20,
+        "w": 108,
+        "h": 48,
+        "color": 12939,
+        "foreground": 55035,
+        "radius": 10,
+        "font_size": 20,
+        "padding": 12,
+        "action": "host.tasks",
+        "text": "想法",
+        "host_mask": 12
+      },
+      {
+        "type": "panel",
+        "x": 384,
+        "y": 20,
+        "w": 108,
+        "h": 48,
+        "color": 65535,
+        "radius": 10,
+        "host_mask": 243
+      },
+      {
+        "type": "text",
+        "x": 384,
+        "y": 31,
+        "w": 108,
+        "h": 28,
+        "color": 8680,
+        "font_size": 20,
+        "align": "center",
+        "weight": 600,
+        "text": "想法",
+        "host_mask": 243
+      },
+      {
+        "type": "button",
+        "x": 496,
+        "y": 20,
+        "w": 108,
+        "h": 48,
+        "color": 12939,
+        "foreground": 55035,
+        "radius": 10,
+        "font_size": 20,
+        "padding": 12,
+        "action": "host.tasks",
+        "text": "待办",
+        "host_mask": 243
+      },
+      {
+        "type": "panel",
+        "x": 496,
+        "y": 20,
+        "w": 108,
+        "h": 48,
+        "color": 65535,
+        "radius": 10,
+        "host_mask": 12
+      },
+      {
+        "type": "text",
+        "x": 496,
+        "y": 31,
+        "w": 108,
+        "h": 28,
+        "color": 8680,
+        "font_size": 20,
+        "align": "center",
+        "weight": 600,
+        "text": "待办",
+        "host_mask": 12
+      },
+      {
+        "type": "text",
+        "x": 24,
+        "y": 104,
+        "w": 330,
+        "h": 30,
+        "color": 8681,
+        "font_size": 20,
+        "weight": 600,
+        "bind": "metricValue"
+      },
+      {
+        "type": "text",
+        "x": 354,
+        "y": 107,
+        "w": 74,
+        "h": 24,
+        "color": 31759,
+        "font_size": 16,
+        "align": "right",
+        "bind": "badge"
+      },
+      {
+        "type": "button",
+        "x": 452,
+        "y": 96,
+        "w": 156,
+        "h": 48,
+        "color": 61243,
+        "foreground": 8681,
+        "radius": 12,
+        "font_size": 17,
+        "padding": 12,
+        "action": "host.filter",
+        "text": "切换筛选",
+        "host_mask": 12,
+        "icon": "list",
+        "icon_size": 20,
+        "gap": 10
+      },
+      {
+        "type": "panel",
+        "x": 24,
+        "y": 150,
+        "w": 584,
+        "h": 222,
+        "color": 57049,
+        "radius": 18,
+        "host_mask": 251
+      },
+      {
+        "type": "panel",
+        "x": 24,
+        "y": 147,
+        "w": 584,
+        "h": 222,
+        "color": 65535,
+        "radius": 18,
+        "host_mask": 251
+      },
+      {
+        "type": "panel",
+        "x": 42,
+        "y": 168,
+        "w": 4,
+        "h": 18,
+        "color": 50445,
+        "radius": 2,
+        "host_mask": 251
+      },
+      {
+        "type": "text",
+        "x": 58,
+        "y": 164,
+        "w": 526,
+        "h": 26,
+        "color": 31759,
+        "font_size": 16,
+        "bind": "eyebrow",
+        "host_mask": 251
+      },
+      {
+        "type": "text",
+        "x": 44,
+        "y": 210,
+        "w": 544,
+        "h": 70,
+        "color": 8681,
+        "font_size": 24,
+        "line_height": 32,
+        "bind": "headline",
+        "host_mask": 251
+      },
+      {
+        "type": "text",
+        "x": 44,
+        "y": 284,
+        "w": 544,
+        "h": 68,
+        "color": 31759,
+        "font_size": 22,
+        "line_height": 30,
+        "bind": "note",
+        "host_mask": 251
+      },
+      {
+        "type": "panel",
+        "x": 24,
+        "y": 151,
+        "w": 584,
+        "h": 64,
+        "color": 57049,
+        "radius": 14,
+        "host_mask": 4
+      },
+      {
+        "type": "button",
+        "x": 24,
+        "y": 148,
+        "w": 584,
+        "h": 64,
+        "color": 65535,
+        "foreground": 8681,
+        "radius": 12,
+        "font_size": 22,
+        "padding": 24,
+        "action": "host.row_a",
+        "bind": "eyebrow",
+        "host_mask": 4,
+        "align": "left"
+      },
+      {
+        "type": "icon",
+        "x": 566,
+        "y": 171,
+        "w": 18,
+        "h": 18,
+        "color": 50445,
+        "icon": "arrow",
+        "host_mask": 4
+      },
+      {
+        "type": "panel",
+        "x": 24,
+        "y": 227,
+        "w": 584,
+        "h": 64,
+        "color": 57049,
+        "radius": 14,
+        "host_mask": 4
+      },
+      {
+        "type": "button",
+        "x": 24,
+        "y": 224,
+        "w": 584,
+        "h": 64,
+        "color": 65535,
+        "foreground": 8681,
+        "radius": 12,
+        "font_size": 22,
+        "padding": 24,
+        "action": "host.row_b",
+        "bind": "headline",
+        "host_mask": 4,
+        "align": "left"
+      },
+      {
+        "type": "icon",
+        "x": 566,
+        "y": 247,
+        "w": 18,
+        "h": 18,
+        "color": 50445,
+        "icon": "arrow",
+        "host_mask": 4
+      },
+      {
+        "type": "panel",
+        "x": 24,
+        "y": 303,
+        "w": 584,
+        "h": 64,
+        "color": 57049,
+        "radius": 14,
+        "host_mask": 4
+      },
+      {
+        "type": "button",
+        "x": 24,
+        "y": 300,
+        "w": 584,
+        "h": 64,
+        "color": 65535,
+        "foreground": 8681,
+        "radius": 12,
+        "font_size": 22,
+        "padding": 24,
+        "action": "host.row_c",
+        "bind": "metricLabel",
+        "host_mask": 4,
+        "align": "left"
+      },
+      {
+        "type": "icon",
+        "x": 566,
+        "y": 323,
+        "w": 18,
+        "h": 18,
+        "color": 50445,
+        "icon": "arrow",
+        "host_mask": 4
+      },
+      {
+        "type": "button",
+        "x": 24,
+        "y": 392,
+        "w": 174,
+        "h": 48,
+        "color": 13228,
+        "foreground": 65535,
+        "radius": 12,
+        "font_size": 20,
+        "padding": 12,
+        "action": "host.record",
+        "text": "录制想法",
+        "host_mask": 173,
+        "icon": "mic",
+        "icon_size": 20,
+        "gap": 10
+      },
+      {
+        "type": "button",
+        "x": 24,
+        "y": 392,
+        "w": 174,
+        "h": 48,
+        "color": 13228,
+        "foreground": 65535,
+        "radius": 12,
+        "font_size": 20,
+        "padding": 12,
+        "action": "host.record",
+        "text": "结束录音",
+        "host_mask": 2,
+        "icon": "pause",
+        "icon_size": 20,
+        "gap": 10
+      },
+      {
+        "type": "button",
+        "x": 24,
+        "y": 392,
+        "w": 282,
+        "h": 48,
+        "color": 13228,
+        "foreground": 65535,
+        "radius": 12,
+        "font_size": 20,
+        "padding": 12,
+        "action": "host.save",
+        "text": "保存为想法",
+        "host_mask": 16,
+        "icon": "check",
+        "icon_size": 20,
+        "gap": 10
+      },
+      {
+        "type": "button",
+        "x": 322,
+        "y": 392,
+        "w": 286,
+        "h": 48,
+        "color": 65535,
+        "foreground": 8681,
+        "radius": 12,
+        "font_size": 20,
+        "padding": 12,
+        "action": "host.todo",
+        "text": "转为待办",
+        "host_mask": 16,
+        "icon": "arrow",
+        "icon_size": 20,
+        "gap": 10
+      },
+      {
+        "type": "button",
+        "x": 388,
+        "y": 392,
+        "w": 220,
+        "h": 48,
+        "color": 65535,
+        "foreground": 8681,
+        "radius": 12,
+        "font_size": 20,
+        "padding": 12,
+        "action": "host.todo",
+        "text": "转为待办",
+        "host_mask": 32,
+        "icon": "arrow",
+        "icon_size": 20,
+        "gap": 10
+      },
+      {
+        "type": "button",
+        "x": 388,
+        "y": 392,
+        "w": 220,
+        "h": 48,
+        "color": 65535,
+        "foreground": 8681,
+        "radius": 12,
+        "font_size": 20,
+        "padding": 12,
+        "action": "host.save",
+        "text": "查看事项",
+        "host_mask": 4,
+        "icon": "book",
+        "icon_size": 20,
+        "gap": 10
+      },
+      {
+        "type": "button",
+        "x": 212,
+        "y": 392,
+        "w": 174,
+        "h": 48,
+        "color": 65535,
+        "foreground": 8681,
+        "radius": 12,
+        "font_size": 20,
+        "padding": 12,
+        "action": "host.save",
+        "text": "返回清单",
+        "host_mask": 8,
+        "icon": "list",
+        "icon_size": 20,
+        "gap": 10
+      },
+      {
+        "type": "button",
+        "x": 400,
+        "y": 392,
+        "w": 208,
+        "h": 48,
+        "color": 13228,
+        "foreground": 65535,
+        "radius": 12,
+        "font_size": 20,
+        "padding": 12,
+        "action": "host.toggle",
+        "bind": "metricUnit",
+        "host_mask": 8,
+        "icon": "check",
+        "icon_size": 20,
+        "gap": 10
+      },
+      {
+        "type": "text",
+        "x": 24,
+        "y": 452,
+        "w": 592,
+        "h": 22,
+        "color": 31759,
+        "font_size": 14,
+        "align": "center",
+        "bind": "footer"
+      }
+    ],
+    "typography": "p4-app-type-v1",
+    "images": [
       {
         "id": "type0",
         "asset": "assets/type0.png",
@@ -78,413 +590,11 @@
         "fps": 1
       }
     ],
-    "elements": [
-      {
-        "type": "image",
-        "x": 0,
-        "y": 0,
-        "w": 640,
-        "h": 480,
-        "color": 65437,
-        "image": "background"
-      },
-      {
-        "type": "panel",
-        "x": 0,
-        "y": 0,
-        "w": 290,
-        "h": 436,
-        "color": 65436,
-        "opacity": 245,
-        "opacity_end": 200
-      },
-      {
-        "type": "panel",
-        "x": 290,
-        "y": 0,
-        "w": 350,
-        "h": 436,
-        "color": 65436,
-        "opacity": 200,
-        "opacity_end": 0
-      },
-      {
-        "type": "icon",
-        "x": 26,
-        "y": 21,
-        "w": 21,
-        "h": 21,
-        "color": 29191,
-        "icon": "mic"
-      },
-      {
-        "type": "text",
-        "x": 56,
-        "y": 18,
-        "w": 300,
-        "h": 28,
-        "color": 29191,
-        "font_size": 18,
-        "bind": "title",
-        "weight": 600
-      },
-      {
-        "type": "text",
-        "x": 345,
-        "y": 20,
-        "w": 269,
-        "h": 24,
-        "color": 29191,
-        "font_size": 13,
-        "bind": "eyebrow",
-        "align": "right"
-      },
-      {
-        "type": "text",
-        "x": 28,
-        "y": 87,
-        "w": 420,
-        "h": 88,
-        "color": 29191,
-        "font_size": 34,
-        "bind": "headline",
-        "weight": 600
-      },
-      {
-        "type": "text",
-        "x": 28,
-        "y": 182,
-        "w": 380,
-        "h": 28,
-        "color": 29191,
-        "font_size": 17,
-        "text": "一句话，也值得留下来。"
-      },
-      {
-        "type": "panel",
-        "x": 26,
-        "y": 242,
-        "w": 588,
-        "h": 108,
-        "color": 65502,
-        "opacity": 226,
-        "radius": 16,
-        "stroke": 65535,
-        "stroke_width": 1
-      },
-      {
-        "type": "icon",
-        "x": 44,
-        "y": 258,
-        "w": 18,
-        "h": 18,
-        "color": 41933,
-        "icon": "mic"
-      },
-      {
-        "type": "text",
-        "x": 71,
-        "y": 252,
-        "w": 400,
-        "h": 24,
-        "color": 41933,
-        "font_size": 13,
-        "text": "语音转写 · 确认后才保存"
-      },
-      {
-        "type": "text",
-        "x": 44,
-        "y": 286,
-        "w": 550,
-        "h": 56,
-        "color": 29191,
-        "font_size": 18,
-        "bind": "note"
-      },
-      {
-        "type": "button",
-        "x": 26,
-        "y": 366,
-        "w": 148,
-        "h": 48,
-        "color": 47946,
-        "font_size": 17,
-        "radius": 16,
-        "foreground": 65502,
-        "padding": 18,
-        "weight": 600,
-        "bind": "metricLabel",
-        "icon": "mic",
-        "action": "host.primary",
-        "host_mask": 163
-      },
-      {
-        "type": "button",
-        "x": 184,
-        "y": 366,
-        "w": 148,
-        "h": 48,
-        "color": 65502,
-        "font_size": 17,
-        "radius": 16,
-        "foreground": 29191,
-        "padding": 18,
-        "weight": 600,
-        "bind": "metricUnit",
-        "icon": "check",
-        "action": "host.secondary",
-        "opacity": 230,
-        "stroke": 65535,
-        "stroke_width": 1,
-        "host_mask": 16
-      },
-      {
-        "type": "panel",
-        "x": 0,
-        "y": 436,
-        "w": 640,
-        "h": 44,
-        "color": 65437,
-        "opacity": 240
-      },
-      {
-        "type": "panel",
-        "x": 0,
-        "y": 436,
-        "w": 640,
-        "h": 1,
-        "color": 29191,
-        "opacity": 24
-      },
-      {
-        "type": "button",
-        "x": 26,
-        "y": 449,
-        "w": 32,
-        "h": 18,
-        "color": 65437,
-        "text": "—",
-        "font_size": 11,
-        "line_height": 14,
-        "radius": 4,
-        "padding": 2,
-        "opacity": 0,
-        "foreground": 29191,
-        "stroke": 46484,
-        "stroke_width": 1,
-        "key_for": "host.primary"
-      },
-      {
-        "type": "text",
-        "x": 64,
-        "y": 446,
-        "w": 79,
-        "h": 24,
-        "color": 29191,
-        "font_size": 15,
-        "text": "录音/停止"
-      },
-      {
-        "type": "button",
-        "x": 164,
-        "y": 449,
-        "w": 32,
-        "h": 18,
-        "color": 65437,
-        "text": "—",
-        "font_size": 11,
-        "line_height": 14,
-        "radius": 4,
-        "padding": 2,
-        "opacity": 0,
-        "foreground": 29191,
-        "stroke": 46484,
-        "stroke_width": 1,
-        "key_for": "host.secondary"
-      },
-      {
-        "type": "text",
-        "x": 202,
-        "y": 446,
-        "w": 34,
-        "h": 24,
-        "color": 29191,
-        "font_size": 15,
-        "text": "保存"
-      },
-      {
-        "type": "text",
-        "x": 257,
-        "y": 446,
-        "w": 253,
-        "h": 24,
-        "color": 29191,
-        "font_size": 14,
-        "text": "上下待办/删除"
-      },
-      {
-        "type": "text",
-        "x": 510,
-        "y": 446,
-        "w": 104,
-        "h": 24,
-        "color": 29191,
-        "font_size": 14,
-        "text": "全局键退出",
-        "align": "right"
-      },
-      {
-        "type": "button",
-        "x": 348,
-        "y": 366,
-        "w": 124,
-        "h": 48,
-        "color": 63454,
-        "foreground": 16970,
-        "font_size": 16,
-        "radius": 14,
-        "padding": 10,
-        "text": "转为待办",
-        "action": "host.todo",
-        "host_mask": 48
-      },
-      {
-        "type": "button",
-        "x": 488,
-        "y": 366,
-        "w": 124,
-        "h": 48,
-        "color": 63454,
-        "foreground": 16970,
-        "font_size": 16,
-        "radius": 14,
-        "padding": 10,
-        "text": "删除",
-        "action": "host.delete",
-        "host_mask": 32
-      }
-    ],
-    "typography": "p4-app-type-v1",
     "fonts": [
       {
         "image": "type0",
-        "chars": "0123456789:%.-/°C— 接住一个想法开始录制保存笔记灵感胶囊P通用服务·连后即可使音",
+        "chars": "想法与待办从灵感，到做切换筛选录制结束音保存为转查看事项返回清单1 ·2/中按上下条左右翻页笔记在",
         "metrics": [
-          [
-            18,
-            4,
-            28
-          ],
-          [
-            18,
-            4,
-            28
-          ],
-          [
-            18,
-            4,
-            28
-          ],
-          [
-            18,
-            4,
-            28
-          ],
-          [
-            18,
-            4,
-            28
-          ],
-          [
-            18,
-            4,
-            28
-          ],
-          [
-            18,
-            4,
-            28
-          ],
-          [
-            18,
-            4,
-            28
-          ],
-          [
-            18,
-            4,
-            28
-          ],
-          [
-            18,
-            4,
-            28
-          ],
-          [
-            9,
-            10,
-            28
-          ],
-          [
-            29,
-            4,
-            28
-          ],
-          [
-            9,
-            23,
-            28
-          ],
-          [
-            11,
-            18,
-            21
-          ],
-          [
-            13,
-            2,
-            32
-          ],
-          [
-            12,
-            3,
-            13
-          ],
-          [
-            20,
-            4,
-            28
-          ],
-          [
-            29,
-            18,
-            20
-          ],
-          [
-            7,
-            0,
-            0
-          ],
-          [
-            32,
-            0,
-            32
-          ],
-          [
-            32,
-            0,
-            31
-          ],
-          [
-            32,
-            14,
-            17
-          ],
-          [
-            32,
-            1,
-            31
-          ],
           [
             32,
             0,
@@ -497,21 +607,6 @@
           ],
           [
             32,
-            3,
-            32
-          ],
-          [
-            32,
-            0,
-            32
-          ],
-          [
-            32,
-            2,
-            31
-          ],
-          [
-            32,
             1,
             32
           ],
@@ -523,16 +618,11 @@
           [
             32,
             0,
-            32
-          ],
-          [
-            32,
-            0,
             31
           ],
           [
             32,
-            1,
+            2,
             31
           ],
           [
@@ -543,92 +633,6 @@
           [
             32,
             0,
-            31
-          ],
-          [
-            32,
-            0,
-            32
-          ],
-          [
-            32,
-            0,
-            32
-          ],
-          [
-            20,
-            4,
-            28
-          ],
-          [
-            32,
-            1,
-            31
-          ],
-          [
-            32,
-            3,
-            32
-          ],
-          [
-            32,
-            2,
-            32
-          ],
-          [
-            32,
-            0,
-            32
-          ],
-          [
-            32,
-            12,
-            19
-          ],
-          [
-            32,
-            0,
-            32
-          ],
-          [
-            32,
-            1,
-            31
-          ],
-          [
-            32,
-            2,
-            32
-          ],
-          [
-            32,
-            3,
-            31
-          ],
-          [
-            32,
-            0,
-            32
-          ],
-          [
-            32,
-            0,
-            32
-          ]
-        ]
-      },
-      {
-        "image": "type1",
-        "chars": "转写，由你确认或为待办。句话也值得留下来语才停止上删除全局键退出",
-        "metrics": [
-          [
-            32,
-            0,
-            32
-          ],
-          [
-            32,
-            3,
             31
           ],
           [
@@ -638,23 +642,8 @@
           ],
           [
             32,
-            0,
-            32
-          ],
-          [
-            32,
-            0,
-            32
-          ],
-          [
-            32,
-            0,
-            32
-          ],
-          [
-            32,
-            0,
-            32
+            1,
+            31
           ],
           [
             32,
@@ -663,23 +652,13 @@
           ],
           [
             32,
-            0,
+            2,
             32
           ],
           [
             32,
             0,
             32
-          ],
-          [
-            32,
-            0,
-            31
-          ],
-          [
-            32,
-            20,
-            31
           ],
           [
             32,
@@ -689,86 +668,6 @@
           [
             32,
             1,
-            32
-          ],
-          [
-            32,
-            0,
-            30
-          ],
-          [
-            32,
-            0,
-            32
-          ],
-          [
-            32,
-            1,
-            31
-          ],
-          [
-            32,
-            1,
-            32
-          ],
-          [
-            32,
-            3,
-            32
-          ],
-          [
-            32,
-            1,
-            32
-          ],
-          [
-            32,
-            1,
-            32
-          ],
-          [
-            32,
-            0,
-            31
-          ],
-          [
-            32,
-            0,
-            32
-          ],
-          [
-            32,
-            0,
-            30
-          ],
-          [
-            32,
-            1,
-            30
-          ],
-          [
-            32,
-            1,
-            32
-          ],
-          [
-            32,
-            0,
-            31
-          ],
-          [
-            32,
-            0,
-            30
-          ],
-          [
-            32,
-            3,
-            32
-          ],
-          [
-            32,
-            0,
             32
           ],
           [
@@ -778,23 +677,335 @@
           ],
           [
             32,
+            1,
+            32
+          ],
+          [
+            32,
             0,
             32
+          ],
+          [
+            32,
+            1,
+            32
+          ],
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            32,
+            0,
+            30
+          ],
+          [
+            32,
+            1,
+            32
+          ],
+          [
+            32,
+            1,
+            31
+          ],
+          [
+            32,
+            2,
+            32
+          ],
+          [
+            32,
+            1,
+            31
+          ],
+          [
+            32,
+            2,
+            31
+          ],
+          [
+            32,
+            0,
+            31
+          ],
+          [
+            32,
+            1,
+            32
+          ],
+          [
+            18,
+            4,
+            28
+          ],
+          [
+            7,
+            0,
+            0
+          ],
+          [
+            32,
+            12,
+            19
+          ],
+          [
+            18,
+            4,
+            28
+          ],
+          [
+            13,
+            2,
+            32
+          ],
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            32,
+            1,
+            30
+          ],
+          [
+            32,
+            3,
+            32
+          ],
+          [
+            32,
+            0,
+            31
+          ],
+          [
+            32,
+            0,
+            31
+          ],
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            32,
+            1,
+            32
+          ],
+          [
+            32,
+            2,
+            32
+          ],
+          [
+            32,
+            0,
+            31
+          ],
+          [
+            32,
+            1,
+            31
+          ],
+          [
+            32,
+            0,
+            31
+          ]
+        ]
+      },
+      {
+        "image": "type1",
+        "chars": "本机先来慢完成等电脑连接PetMangr后、整理。clmio",
+        "metrics": [
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            32,
+            1,
+            32
+          ],
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            32,
+            0,
+            31
+          ],
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            32,
+            0,
+            32
+          ],
+          [
+            20,
+            4,
+            28
+          ],
+          [
+            18,
+            11,
+            28
+          ],
+          [
+            12,
+            6,
+            28
+          ],
+          [
+            26,
+            4,
+            28
+          ],
+          [
+            18,
+            11,
+            28
+          ],
+          [
+            19,
+            11,
+            28
+          ],
+          [
+            18,
+            11,
+            32
+          ],
+          [
+            12,
+            11,
+            28
+          ],
+          [
+            32,
+            1,
+            31
+          ],
+          [
+            32,
+            21,
+            30
+          ],
+          [
+            32,
+            0,
+            30
+          ],
+          [
+            32,
+            2,
+            30
+          ],
+          [
+            32,
+            20,
+            31
+          ],
+          [
+            16,
+            11,
+            28
+          ],
+          [
+            9,
+            2,
+            28
+          ],
+          [
+            29,
+            11,
+            28
+          ],
+          [
+            9,
+            3,
+            28
+          ],
+          [
+            19,
+            11,
+            28
           ]
         ]
       }
     ]
   },
-  "host": true,
   "input": {
     "engine": "p4-input-v1",
     "confirm": {
-      "host.delete": "删除当前笔记？此操作不能撤销。",
-      "host.todo": "将当前笔记添加到近期待办？"
-    },
-    "swipe": {
-      "left": "host.next",
-      "right": "host.previous"
+      "host.todo": "将当前想法加入待办？重复操作不会重复创建。",
+      "host.toggle": "确认切换这条事项的完成状态？可以撤销。"
     }
-  }
+  },
+  "host": true
 }

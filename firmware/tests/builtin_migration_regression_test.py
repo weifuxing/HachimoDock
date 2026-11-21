@@ -27,13 +27,13 @@ def test_install_is_independent_of_touch_but_live_slice_input_still_requires_rea
     assert guard in live
     assert live.index(guard)<live.index('pet_fruit_start_or_resume(')
     sync=code.split('esp_err_t pet_p4_miniapp_sync_builtins(void)',1)[1].split('static bool remove_file_if_present',1)[0]
-    assert sync.count('failed += 1;\n')==2
+    assert sync.count('failed += 1;\n')==3
     assert sync.index('if (failed)')<sync.index('MINIAPP_BUILTIN_MARKER_TMP_PATH')
     assert 'continue;' in sync.split('failed to sync built-in id=%s: %s',1)[1].split('catalog_changed = true;',1)[0]
 
 def test_actual_ordering_preserves_slots_custom_order_and_active_selection(tmp_path):
     code=(ROOT/'main/pet_p4_miniapp.c').read_text()
-    fn=code[code.index('static bool reorder_catalog_for_builtin_bundle('):code.index('esp_err_t pet_p4_miniapp_sync_builtins(void)')]
+    fn=code[code.index('static bool reorder_catalog_for_builtin_bundle('):code.index('static void builtin_raw_free(')]
     harness=tmp_path/'order.c';exe=tmp_path/'order'
     harness.write_text(r'''
 #include <assert.h>

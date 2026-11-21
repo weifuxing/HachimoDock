@@ -9,7 +9,7 @@ def fn(name):
   if S[i]=='}':
    depth-=1
    if depth==0:return S[at:i+1]
-parts=[fn('void pet_p4_audio_status_cues_defer('),fn('static bool status_cue_deferred('),fn('static pet_resource_result_t status_cue_realtime_begin('),fn('static void completion_cue_cancel_pending('),fn('static bool status_cue_enqueue('),fn('static bool completion_active('),fn('static const char *completion_agent('),fn('static void completion_cue_observe('),fn('void pet_p4_audio_process(')]
+parts=[fn('void pet_p4_audio_status_cues_defer('),fn('static bool status_cue_deferred('),fn('static pet_resource_result_t status_cue_realtime_begin('),fn('static void completion_cue_cancel_pending('),fn('static bool status_cue_enqueue('),fn('static bool completion_active('),fn('static pet_task_cue_t completion_outcome('),fn('static const char *completion_agent('),fn('static void completion_cue_observe('),fn('void pet_p4_audio_process(')]
 prefix=r'''#include <assert.h>
 #include <stdbool.h>
 #include <stdatomic.h>
@@ -34,6 +34,7 @@ typedef struct{uint16_t count;pet_p4_asset_entry_t entries[1];}catalog_t;
 typedef struct{bool asset_transfer_active;unsigned session_queue_count,current_session_index,asset_revision;char current_session_id[96],current_session_agent[48],active_agent[48];pet_p4_session_queue_item_t session_queue[8];catalog_t asset_catalog;}pet_p4_runtime_state_t;
 typedef struct{char family[32],logical_path[80];bool audio_custom,completion_guarded;unsigned generation;}pet_p4_audio_playback_request_t;
 static atomic_bool g_status_cue_deferred,g_status_cue_recheck,g_instrument_enabled,g_stream_active;
+static atomic_uint g_status_cue_generation,g_status_cue_started_generation;
 static atomic_uint g_playback_generation,g_completion_cue_queued,g_completion_cue_started,g_completion_cue_suppressed;
 static pet_completion_cue_guard_t g_completion_cues;
 static int g_status_cue_mux,g_playback_behavior;static void *g_playback_queue=(void*)1;
@@ -46,7 +47,7 @@ static bool pet_p4_audio_playback_active(void){return false;}
 static const char *pet_p4_state_effective_lifecycle(const pet_p4_runtime_state_t*s,unsigned long long n){(void)s;(void)n;return lifecycle;}
 static const char *pet_p4_canonical_lifecycle(const char*s){return s;}
 static int pet_p4_behavior_select(int*b,const catalog_t*c,const char*l,unsigned rev,unsigned long long n){(void)b;(void)c;(void)rev;(void)n;return !strcmp(l,"done")?0:-1;}
-static bool pet_p4_system_cue_family(const char*s){return !strcmp(s,"done");}
+static bool pet_p4_system_cue_family(const char*s){return !strcmp(s,"done") || !strcmp(s,"error") || !strcmp(s,"waiting_user");}
 static bool global_working_cue;
 static bool pet_audio_patch_global_enabled(const char*s){return global_working_cue&&!strcmp(s,"working");}
 static int xQueueOverwrite(void*q,const void*r){(void)q;attempts++;if(!queue_ok)return 0;pending=*(const pet_p4_audio_playback_request_t*)r;enqueued++;return pdPASS;}
@@ -57,6 +58,7 @@ static unsigned race_unlocks;
 static void test_after_unlock(void){if(race_unlocks&&!--race_unlocks)completion_cue_cancel_pending(&pending,true);}
 static void reset(void){
  global_working_cue=false;race_unlocks=0;
+ atomic_store(&g_status_cue_generation,0);atomic_store(&g_status_cue_started_generation,0);
  memset(&g_completion_cues,0,sizeof(g_completion_cues));memset(&pending,0,sizeof(pending));atomic_store(&g_status_cue_deferred,false);atomic_store(&g_status_cue_recheck,false);atomic_store(&g_playback_generation,0);atomic_store(&g_completion_cue_queued,0);atomic_store(&g_completion_cue_started,0);atomic_store(&g_completion_cue_suppressed,0);g_playback_family[0]=g_playback_session_key[0]=0;g_playback_asset_revision=0;g_playback_session_revision=0;enqueued=started=attempts=0;queue_ok=broker_ok=true;
 }
 static pet_p4_runtime_state_t fixture(void){
@@ -66,6 +68,39 @@ static pet_p4_runtime_state_t fixture(void){
  for(unsigned i=0;i<2;i++){strcpy(s.session_queue[i].state,"done");s.session_queue[i].transition_revision=i?200:100;}lifecycle="done";return s;
 }
 static void start_pending(bool expected){pet_resource_realtime_t t={0};bool ok=status_cue_realtime_begin(&t,&pending)==PET_RESOURCE_OK;assert(ok==expected);if(ok)started++;assert(started==atomic_load(&g_completion_cue_started));}
+static void test_failed_task_cue(void) {
+ pet_p4_runtime_state_t s = fixture();
+ strcpy(s.session_queue[0].state, "error");
+ lifecycle = "error";
+
+ pet_p4_audio_process(&s, 1000);
+ assert(enqueued == 1);
+ pet_p4_audio_status_cues_defer(true);
+ start_pending(false);
+ pet_p4_audio_status_cues_defer(false);
+ pet_p4_audio_process(&s, 1100);
+ start_pending(true);
+ assert(enqueued == 2 && started == 1);
+
+ for (unsigned i = 0; i < 3; ++i) {
+  pet_p4_audio_status_cues_defer(true);
+  pet_p4_audio_process(&s, 1200 + i * 20);
+  pet_p4_audio_status_cues_defer(false);
+  pet_p4_audio_process(&s, 1210 + i * 20);
+ }
+ assert(enqueued == 2 && started == 1);
+
+ strcpy(s.session_queue[0].state, "working");
+ s.session_queue[0].transition_revision = 300;
+ lifecycle = "working";
+ pet_p4_audio_process(&s, 1300);
+ strcpy(s.session_queue[0].state, "error");
+ s.session_queue[0].transition_revision = 301;
+ lifecycle = "error";
+ pet_p4_audio_process(&s, 1310);
+ start_pending(true);
+ assert(enqueued == 3 && started == 2);
+}
 int main(void){
  pet_p4_runtime_state_t s=fixture();pet_p4_audio_process(&s,1000);start_pending(true);for(unsigned i=0;i<100;i++)pet_p4_audio_process(&s,1001+i);assert(enqueued==1&&started==1);puts("same_transition_refresh_once");
  s=fixture();pet_p4_audio_process(&s,1000);start_pending(true);pet_p4_audio_status_cues_defer(true);pet_p4_audio_status_cues_defer(false);pet_p4_audio_process(&s,1100);assert(enqueued==1&&started==1);puts("defer_does_not_replay_started_cue");
@@ -90,7 +125,42 @@ int main(void){
  assert(enqueued==1&&!pending.completion_guarded);lifecycle="done";pet_p4_audio_process(&s,1100);start_pending(true);
  pet_p4_audio_process(&s,1200);assert(enqueued==2&&started==1&&atomic_load(&g_completion_cue_queued)==1);
  puts("configured_global_working_cue_preserves_once_per_task_done");
- printf("guard_bytes=%zu\n",sizeof(g_completion_cues));puts("PASS_16_PRODUCTION_PROCESS_CASES");return 0;
+ s = fixture();
+ strcpy(s.session_queue[0].state, "working");
+ pet_p4_audio_process(&s, 1000);
+ assert(enqueued == 0); /* A presentation-only done state has no task result. */
+ strcpy(s.session_queue[0].state, "done");
+ s.session_queue[0].transition_revision++;
+ pet_p4_audio_process(&s, 1100);
+ start_pending(true);
+ assert(enqueued == 1 && started == 1);
+ strcpy(s.session_queue[0].state, "error");
+ s.session_queue[0].transition_revision++;
+ lifecycle = "error";
+ pet_p4_audio_status_cues_defer(true);
+ pet_p4_audio_status_cues_defer(false);
+ pet_p4_audio_process(&s, 1200);
+ assert(enqueued == 1 && started == 1); /* A changed terminal snapshot is not a new task. */
+ test_failed_task_cue();
+ s = fixture();
+ strcpy(s.session_queue[0].state, "waiting_user");
+ lifecycle = "waiting_user";
+ pet_p4_audio_process(&s, 1000);
+ pet_resource_realtime_t wait_ticket = {0};
+ pet_p4_audio_status_cues_defer(true);
+ assert(status_cue_realtime_begin(&wait_ticket, &pending) == PET_RESOURCE_PROTECTED);
+ pet_p4_audio_status_cues_defer(false);
+ pet_p4_audio_process(&s, 1100);
+ assert(enqueued == 2);
+ assert(status_cue_realtime_begin(&wait_ticket, &pending) == PET_RESOURCE_OK);
+ pet_p4_audio_status_cues_defer(true);
+ pet_p4_audio_status_cues_defer(false);
+ pet_p4_audio_process(&s, 1200);
+ assert(enqueued == 2);
+ s.session_queue[0].transition_revision++;
+ pet_p4_audio_process(&s, 1300);
+ assert(enqueued == 3); /* A new waiting transition can still play. */
+ printf("guard_bytes=%zu\n",sizeof(g_completion_cues));puts("PASS_19_PRODUCTION_PROCESS_CASES");return 0;
 }
 '''
 def test_actual_status_emission_per_task_and_prestart_admission(tmp_path):
@@ -98,4 +168,4 @@ def test_actual_status_emission_per_task_and_prestart_admission(tmp_path):
  exe=tmp_path/'process'
  subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-I',str(ROOT/'main'),str(source),'-o',str(exe)],check=True)
  result=subprocess.run([str(exe)],capture_output=True,text=True,check=True)
- assert 'PASS_16_PRODUCTION_PROCESS_CASES' in result.stdout
+ assert 'PASS_19_PRODUCTION_PROCESS_CASES' in result.stdout

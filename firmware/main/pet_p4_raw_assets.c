@@ -256,6 +256,7 @@ unsigned long long pet_p4_raw_assets_slot_capacity_bytes(int slot) {
 bool pet_p4_raw_assets_component_media_path(const char *logical_path) {
   static const char *const prefixes[] = {"runtime/samples/", "runtime/clips/", "runtime/big/"};
   if (!logical_path) return false;
+  if (!strcmp(logical_path, "runtime/speech.hab")) return true;
   for (unsigned i = 0; i < 3U; i += 1U) if (strncmp(logical_path, prefixes[i], strlen(prefixes[i])) == 0) return true;
   return false;
 }

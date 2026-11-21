@@ -9,6 +9,13 @@
 #include "esp_system.h"
 #include "esp_private/panic_internal.h"
 #include "riscv/rvruntime-frames.h"
+#if PET_P4_H264_PANIC_TRACE
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#if CONFIG_ESP_H264_DUAL_TASK && !PET_P4_H264_SERIAL_DECODE
+#error "H.264 panic decode attribution requires a single codec task"
+#endif
+#endif
 #if !defined(PET_NATIVE_PANIC_HOST_TEST) && (!defined(CONFIG_IDF_TARGET_ESP32P4) || (ESP_IDF_VERSION != ESP_IDF_VERSION_VAL(5,5,1) && \
     !(ESP_IDF_VERSION == ESP_IDF_VERSION_VAL(5,5,4) && \
       CONFIG_ESP_REV_MIN_FULL == 300 && CONFIG_ESP_REV_MAX_FULL == 399 && !CONFIG_SECURE_ENABLE_TEE)))
@@ -22,6 +29,11 @@ _Static_assert(sizeof(panic_info_t) == 36 && offsetof(panic_info_t, core) == 0
 _Static_assert(sizeof(RvExcFrame) == 148 && offsetof(RvExcFrame, mepc) == 0
     && offsetof(RvExcFrame, ra) == 4 && offsetof(RvExcFrame, mcause) == 136, "review native exception frame layout");
 #endif
+#if PET_P4_H264_PANIC_TRACE && !defined(PET_NATIVE_PANIC_HOST_TEST)
+_Static_assert(portSTACK_GROWTH < 0 && offsetof(RvExcFrame, sp) == 8
+    && offsetof(RvExcFrame, a0) == 40 && offsetof(RvExcFrame, mtval) == 140,
+    "review H.264 exception frame layout");
+#endif
 /* Each already-stalled native core has its own first-entry record. No heap,
  * locks, logging, task API, stack words, reason strings or faulting data are
  * read here. Every SDK invocation still runs exactly once with its original
@@ -31,13 +43,40 @@ typedef struct {
   pet_native_panic_site_t site;
   uint32_t checksum,commit;
 } panic_record_t;
-_Static_assert(sizeof(panic_record_t)==72,"fixed RTC evidence ABI");
 static RTC_NOINIT_ATTR panic_record_t panic_records[2];
+_Static_assert(sizeof(panic_records)==PET_NATIVE_PANIC_STORAGE_BYTES,"fixed RTC evidence ABI");
 static DRAM_ATTR pet_native_panic_snapshot_t previous_panic;
 static DRAM_ATTR uint32_t panic_build[8],panic_nonce;
 static DRAM_ATTR volatile bool panic_ready,panic_entered[2];
-#define PANIC_MAGIC UINT32_C(0x504e4331)
+#define PANIC_MAGIC (UINT32_C(0x504e4331)+PET_P4_H264_PANIC_TRACE)
 #define PANIC_COMMIT UINT32_C(0x729bc5a6)
+#if PET_P4_H264_PANIC_TRACE
+static DRAM_ATTR pet_native_panic_h264_t active_decode;
+static DRAM_ATTR uintptr_t decode_stack_bottom, decode_stack_ceiling;
+static DRAM_ATTR uint32_t decode_active;
+
+void pet_native_panic_h264_begin(const pet_native_panic_h264_t *decode) {
+  decode_stack_bottom = (uintptr_t)pxTaskGetStackStart(NULL);
+  decode_stack_ceiling = (uintptr_t)decode;
+  active_decode = *decode;
+  __atomic_store_n(&decode_active, 1, __ATOMIC_RELEASE);
+}
+
+void pet_native_panic_h264_end(void) {
+  __atomic_store_n(&decode_active, 0, __ATOMIC_RELEASE);
+}
+
+static void IRAM_ATTR capture_h264_load_fault(const RvExcFrame *frame, pet_native_panic_h264_t *out) {
+  /* The same task can migrate before its first PIE instruction. Match the
+   * interrupted stack range so a concurrent task cannot claim this decode. */
+  uintptr_t sp = (uintptr_t)frame->sp;
+  if (!__atomic_load_n(&decode_active, __ATOMIC_ACQUIRE)
+      || sp < decode_stack_bottom || sp >= decode_stack_ceiling) return;
+  *out = active_decode;
+  out->trap_value = (uint32_t)frame->mtval;
+  out->register_a0 = (uint32_t)frame->a0;
+}
+#endif
 static uint32_t IRAM_ATTR panic_sum(const panic_record_t *record){
   uint32_t value=UINT32_C(2166136261);
   /* Numeric fields only, excludes checksum/commit; no structure padding. */
@@ -84,6 +123,11 @@ void IRAM_ATTR __wrap_esp_panic_handler(panic_info_t *info){
         .site={.pc=(uint32_t)frame->mepc,.return_pc=(uint32_t)frame->ra,
           .cause=(uint32_t)frame->mcause,.core=core,.exception=(uint32_t)info->exception,
           .flags=(g_panic_abort?1U:0U)|(info->pseudo_excause?2U:0U)}};
+#if PET_P4_H264_PANIC_TRACE
+      if (record.site.cause == 5 && record.site.flags == 0) {
+        capture_h264_load_fault(frame, &record.site.h264);
+      }
+#endif
       for(unsigned i=0;i<8;i++)record.build[i]=panic_build[i];
       record.checksum=panic_sum(&record);record.commit=record.nonce^PANIC_COMMIT;
       volatile uint32_t *dest=(volatile uint32_t*)&panic_records[core];

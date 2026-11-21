@@ -18,6 +18,7 @@ const {
   OpenClawAdapter,
   MiMoCodeAdapter,
   WorkBuddyAdapter,
+  DevinAdapter,
   DshAdapter,
 } = require("./index");
 const { defaultLog, withScope } = require("./log");
@@ -40,13 +41,16 @@ async function main() {
   adapters.push(new OpenClawAdapter({ log: withScope(defaultLog, "openclaw") }));
   adapters.push(new MiMoCodeAdapter({ log: withScope(defaultLog, "mimocode") }));
   adapters.push(new WorkBuddyAdapter({ log: withScope(defaultLog, "workbuddy") }));
+  adapters.push(new DevinAdapter({ log: withScope(defaultLog, "devin") }));
   adapters.push(new DshAdapter({ log: withScope(defaultLog, "dsh") }));
 
   const bus = createAgentSessionBus({ adapters, log: withScope(defaultLog, "bus") });
   const port = await bus.start();
+  bus.capability.publish({ busPort: port });
   log("info", "ready", { port, adapters: adapters.map((a) => a.agentId) });
 
   const shutdown = async (signal) => {
+    bus.capability.clear();
     log("info", "shutdown requested", { signal });
     try { await bus.stop(); } catch (error) {
       log("warn", "stop threw", { error: String(error?.message || error) });

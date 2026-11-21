@@ -17,12 +17,19 @@ function syncWorkBuddyHooks(options = {}) {
   if (!fs.existsSync(root)) return { skipped: true, reason: "请先启动 WorkBuddy，再重新启用状态跟随" };
   let original = null;
   try { original = fs.readFileSync(settings, "utf8"); } catch (e) { if (e.code !== "ENOENT") throw e; }
-  const config = original === null ? {} : JSON.parse(original);
+  // Windows editors/PowerShell can write a UTF-8 BOM. Strip only that encoding
+  // marker for parsing; retain the original bytes in the first-install backup.
+  const config = original === null ? {} : JSON.parse(original.replace(/^\uFEFF/, ""));
   if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("WorkBuddy settings must be an object");
   if (config.disableAllHooks === true) return { skipped: true, reason: "WorkBuddy 已禁用 Hooks；保持用户设置不变" };
   if (config.hooks != null && (typeof config.hooks !== "object" || Array.isArray(config.hooks))) throw new Error("Invalid WorkBuddy hooks; settings unchanged");
   config.hooks ||= {};
   const platform = options.platform || process.platform;
+  // Windows headersFor() verifies the private capability before and after
+  // opening it: two PowerShell ACL checks, each bounded at 5 seconds. A 2s
+  // hook timeout can kill a valid event before its authenticated HTTP POST.
+  // Keep room for Node startup/stdin and local HTTP; do not bypass ACL checks.
+  const timeout = platform === "win32" ? 15 : 2;
   const command = `${quote(options.nodeBin || process.execPath, platform)} ${quote(path.join(__dirname, MARKER), platform)}`;
   let changed = false;
   for (const event of EVENTS) {
@@ -31,8 +38,11 @@ function syncWorkBuddyHooks(options = {}) {
     const own = entries.flatMap(e => Array.isArray(e?.hooks) ? e.hooks : []).find(h => h?.type === "command" && typeof h.command === "string" && h.command.includes(MARKER));
     if (own) {
       if (own.command !== command) { own.command = command; changed = true; }
+      if (platform === "win32" && (!Number.isFinite(own.timeout) || own.timeout < timeout)) {
+        own.timeout = timeout; changed = true;
+      }
     } else {
-      entries.push({ matcher: "", hooks: [{ type: "command", command, timeout: 2 }] });
+      entries.push({ matcher: "", hooks: [{ type: "command", command, timeout }] });
       changed = true;
     }
   }

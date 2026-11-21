@@ -267,6 +267,9 @@ static void send_asset_ack(const char *transfer_id, const char *phase, const cha
   send_topic_payload("asset/ack", payload);
 }
 
+#if PET_P4_SYSTEM_WIFI && defined(__GNUC__) && !defined(__clang__)
+__attribute__((noinline, optimize("Oz")))
+#endif
 static bool clear_slot_files(int slot) {
   pet_p4_renderer_set_asset_preparation_suspended(true);
   if (slot < 0 || slot > 1) return false;
@@ -334,6 +337,9 @@ static void native_retire(void){
   g_native_raw_limit=g_native_raw_bytes=0;g_native_transfer_connection=0;
   if(g_state)g_state->asset_transfer_active=false;
 }
+#if PET_P4_SYSTEM_WIFI && defined(__GNUC__) && !defined(__clang__)
+__attribute__((noinline, optimize("Oz")))
+#endif
 static void handle_file_begin(const uint8_t *payload,uint32_t len){
   cJSON *root=parse_payload_json(payload,len);
   const char *id=json_string(root,"transferId"),*path=json_string(root,"path"),*checksum=json_string(root,"checksum");
@@ -395,6 +401,9 @@ static void handle_file_data(const uint8_t *payload,uint32_t len){
   g_native_chunk_index++;g_received_size+=len;g_transfer_last_activity_ms=native_now_ms();
 }
 
+#if PET_P4_SYSTEM_WIFI && defined(__GNUC__) && !defined(__clang__)
+__attribute__((noinline, optimize("Oz")))
+#endif
 static void handle_file_end(const uint8_t *payload,uint32_t len){
   cJSON *root=parse_payload_json(payload,len);
   const char *id=json_string(root,"transferId"),*path=json_string(root,"path");
@@ -450,6 +459,9 @@ static void native_commit_ack(native_commit_context_t *context,const char *id,
   if(native_commit_current(context))send_asset_ack(id,"commit",NULL,ok,error);
   native_commit_io_end(context);
 }
+#if PET_P4_SYSTEM_WIFI && defined(__GNUC__) && !defined(__clang__)
+__attribute__((noinline, optimize("Oz")))
+#endif
 static void handle_commit(const uint8_t *payload,uint32_t len){
   cJSON *root=parse_payload_json(payload,len);const char *id=json_string(root,"transferId");
   native_commit_context_t context={atomic_load_explicit(&g_connection_generation,memory_order_acquire)};
@@ -471,6 +483,9 @@ static void handle_commit(const uint8_t *payload,uint32_t len){
 done:cJSON_Delete(root);
 }
 
+#if PET_P4_SYSTEM_WIFI && defined(__GNUC__) && !defined(__clang__)
+__attribute__((noinline, optimize("Oz")))
+#endif
 static bool handle_asset_abort_json(const uint8_t *payload,uint32_t len){
   cJSON *root=parse_payload_json(payload,len);
   if(!cJSON_IsObject(root)||strcmp(json_string(root,"topic"),"asset/abort")){cJSON_Delete(root);return false;}
@@ -527,6 +542,9 @@ static void handle_json_frame(const uint8_t *payload, uint32_t len) {
   free(line);
 }
 
+#if PET_P4_SYSTEM_WIFI && defined(__GNUC__) && !defined(__clang__)
+__attribute__((noinline, optimize("Oz")))
+#endif
 static void handle_identity_ping(const uint8_t *payload, uint32_t len) {
   cJSON *request = parse_payload_json(payload, len);
   const char *nonce;
@@ -765,10 +783,71 @@ void tud_vendor_rx_cb(uint8_t itf, uint8_t const *buffer, uint16_t bufsize) {
   observation_changed();
 }
 
+enum { VOICE_KEY_NONE, VOICE_KEY_WIN_CTRL, VOICE_KEY_WIN_H, VOICE_KEY_MAC_CTRL_ALT_D };
+static _Atomic int g_voice_key_pending;
+static _Atomic bool g_keyboard_online;
+static uint64_t g_keyboard_release_at;
+
+static int voice_key_preset(const char *profile) {
+  if (!profile) return VOICE_KEY_NONE;
+  if (strcmp(profile, "win-ctrl") == 0) return VOICE_KEY_WIN_CTRL;
+  if (strcmp(profile, "win-h") == 0) return VOICE_KEY_WIN_H;
+  if (strcmp(profile, "mac-ctrl-alt-d") == 0) return VOICE_KEY_MAC_CTRL_ALT_D;
+  return VOICE_KEY_NONE;
+}
+
+bool pet_p4_native_voice_key_profile_valid(const char *profile) {
+  return voice_key_preset(profile) != VOICE_KEY_NONE;
+}
+
+bool pet_p4_native_voice_key_tap(const char *profile) {
+  int preset = voice_key_preset(profile);
+  int empty = VOICE_KEY_NONE;
+  return preset != VOICE_KEY_NONE
+    && atomic_load_explicit(&g_keyboard_online, memory_order_acquire)
+    && atomic_compare_exchange_strong(&g_voice_key_pending, &empty, preset);
+}
+
+static void native_keyboard_poll(void) {
+  if (!atomic_load_explicit(&g_keyboard_online, memory_order_acquire) || !tud_hid_ready()) return;
+  uint64_t now = native_now_ms();
+  if (g_keyboard_release_at) {
+    if (now >= g_keyboard_release_at && tud_hid_keyboard_report(0, 0, NULL)) g_keyboard_release_at = 0;
+    return;
+  }
+  int preset = atomic_exchange(&g_voice_key_pending, VOICE_KEY_NONE);
+  if (preset == VOICE_KEY_NONE) return;
+  uint8_t keys[6] = {0};
+  uint8_t modifiers = KEYBOARD_MODIFIER_LEFTGUI;
+  if (preset == VOICE_KEY_WIN_CTRL) modifiers |= KEYBOARD_MODIFIER_LEFTCTRL;
+  if (preset == VOICE_KEY_WIN_H) keys[0] = HID_KEY_H;
+  if (preset == VOICE_KEY_MAC_CTRL_ALT_D) {
+    modifiers = KEYBOARD_MODIFIER_LEFTCTRL | KEYBOARD_MODIFIER_LEFTALT;
+    keys[0] = HID_KEY_D;
+  }
+  if (tud_hid_keyboard_report(0, modifiers, keys)) g_keyboard_release_at = now + 45;
+}
+
+uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
+    hid_report_type_t type, uint8_t *buffer, uint16_t length) {
+  if (instance != 0 || report_id != 0 || type != HID_REPORT_TYPE_INPUT ||
+      length < sizeof(hid_keyboard_report_t)) return 0;
+  memset(buffer, 0, sizeof(hid_keyboard_report_t));
+  return sizeof(hid_keyboard_report_t);
+}
+
+void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t type,
+    uint8_t const *buffer, uint16_t length) {
+  (void)instance; (void)report_id; (void)type; (void)buffer; (void)length;
+}
+
 static void tusb_device_task(void *arg) {
   (void) arg;
   while (true) {
-    tud_task();
+    bool keyboard_waiting = g_keyboard_release_at ||
+      atomic_load_explicit(&g_keyboard_online, memory_order_acquire);
+    tud_task_ext(keyboard_waiting ? 12 : UINT32_MAX, false);
+    native_keyboard_poll();
   }
 }
 
@@ -804,6 +883,9 @@ static void native_protocol_worker_task(void *arg) {
   }
 }
 
+#if PET_P4_COLD_INIT_SIZE && defined(__GNUC__) && !defined(__clang__)
+__attribute__((noinline, optimize("Oz")))
+#endif
 esp_err_t pet_p4_native_usb_init(
   pet_p4_runtime_state_t *state,
   SemaphoreHandle_t state_mutex,
@@ -863,12 +945,26 @@ static void native_mount_changed(int state){
   pet_p4_native_rx_frame_t wake={0};
   if(g_rx_queue)(void)xQueueSend(g_rx_queue,&wake,0);
 }
-void tud_mount_cb(void){native_mount_changed(1);}
-void tud_umount_cb(void){native_mount_changed(-1);}
+void tud_mount_cb(void) {
+  g_keyboard_release_at = 0;
+  atomic_store(&g_voice_key_pending, VOICE_KEY_NONE);
+  atomic_store(&g_keyboard_online, true);
+  native_mount_changed(1);
+}
+void tud_umount_cb(void) {
+  atomic_store(&g_keyboard_online, false);
+  atomic_store(&g_voice_key_pending, VOICE_KEY_NONE);
+  g_keyboard_release_at = 0;
+  native_mount_changed(-1);
+}
 
 void tud_suspend_cb(bool remote_wakeup_en) {
   (void) remote_wakeup_en;
+  atomic_store(&g_keyboard_online, false);
+  atomic_store(&g_voice_key_pending, VOICE_KEY_NONE);
 }
 
 void tud_resume_cb(void) {
+  atomic_store(&g_voice_key_pending, VOICE_KEY_NONE);
+  atomic_store(&g_keyboard_online, tud_mounted());
 }

@@ -28,9 +28,12 @@ static inline void vSemaphoreDelete(SemaphoreHandle_t p){pthread_mutex_destroy(p
 #include <string.h>
 #include <stdlib.h>
 #include <pthread.h>
-#include "pet_p4_component_ext.h"
-#define PET_P4_CAPABILITY_EXT 1
 #define PET_P4_EVENTS 1
+#include "pet_p4_component_ext.h"
+#ifdef __clang__
+/* GCC's per-function optimization attribute does not affect host semantics. */
+#pragma clang diagnostic ignored "-Wunknown-attributes"
+#endif
 #define EXT_RAM_BSS_ATTR
 #define PET_P4_MINIAPP_ACTION_MAX 48
 #define MINIAPP_VAR_INT 1
@@ -121,3 +124,50 @@ int main(void){char unused[256];(void)miniapp_ext_save_text(unused,sizeof unused
 
 def test_utc_deadline_reboot_unknown_clock_and_hidden_cancel_checkpoint(tmp_path):
     _run_utc_test(tmp_path)
+
+
+def test_wifi_clock_calibrates_without_desktop_and_yields_to_fresh_heartbeat(tmp_path):
+    _run_utc_test(tmp_path, extra_prefix=r'''
+#define PET_P4_SYSTEM_WIFI 1
+enum { PET_WIFI_TZ_AUTO = 841 };
+static int32_t pet_wifi_clock_timezone(void) { return PET_WIFI_TZ_AUTO; }
+static uint64_t network_sync_at;
+static uint64_t retained_age;
+static int32_t saved_offset;
+static void pet_wifi_clock_note_offset(int32_t offset) { saved_offset = offset; }
+static bool pet_wifi_clock_read(uint64_t now, uint64_t *utc, int32_t *offset, uint64_t *age) {
+    if (!network_sync_at || now < network_sync_at) return false;
+    *age = now - network_sync_at + retained_age;
+    *utc = 1700000050000ULL + now - network_sync_at;
+    *offset = saved_offset;
+    return true;
+}
+''', extra_body=r'''
+static void sync_clock(uint64_t utc, int offset, uint64_t now);
+
+static void check_wifi_clock(void) {
+    uint64_t utc;
+    uint32_t age;
+    int32_t offset;
+    assert(!pet_p4_miniapp_clock_snapshot(500, &utc, &offset, &age));
+    network_sync_at = 500;
+    assert(pet_p4_miniapp_clock_snapshot(900, &utc, &offset, &age));
+    assert(utc == 1700000050400ULL && age == 400 && offset == 0);
+    assert(miniapp_utc_snapshot(900).utc_ms == utc);
+    retained_age = 60000;
+    assert(miniapp_utc_snapshot(900).monotonic_at_sync == 0);
+    retained_age = 0;
+
+    sync_clock(1700000000, 480, 1000);
+    assert(pet_p4_miniapp_clock_snapshot(11000, &utc, &offset, &age));
+    assert(utc == 1700000010000ULL && age == 10000 && offset == 480);
+    assert(pet_p4_miniapp_clock_snapshot(11001, &utc, &offset, &age));
+    assert(utc == 1700000060501ULL && age == 10501 && offset == 480);
+    assert(miniapp_utc_snapshot(11001).utc_ms == utc);
+
+    /* The shared alarm lifecycle exercise starts with a fresh boot. */
+    network_sync_at = 0;
+    g_wall_valid = false;
+    g_clock_generation = 0;
+}
+''', extra_main='check_wifi_clock();')

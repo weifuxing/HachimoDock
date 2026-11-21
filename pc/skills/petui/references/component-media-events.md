@@ -33,6 +33,11 @@ PC 在安装事务中将实际源文件预编译为 16 kHz 单声道 PCM；每�
 超限时拒绝，不截断成假成功。采样与音序一样保留所有者互斥，语音优先。
 这组受控 WAV 是普通 PNG-only 包规则的显式例外；其他未引用音频仍拒绝。
 
+余音条若只是视觉反馈，可在触发短采样时把整数进度设为 100，用 `tick`
+每 100 ms 通过负数 `inc` 逐级减小，在应用表面用 `limits: {"ring":[0,100]}`
+限制范围。单次定时清零只会跳变，且同一状态内反复扫弦不会重置普通 tick 的时钟。
+这种余音条是估算的视觉衰减，不能当成 PCM 的实时音量或采样播放进度。
+
 ## 组件视频与大图
 
 两项都要求 app surface、`graphics:"p4-app-graphics-v1"` 和
@@ -69,6 +74,4 @@ action，并且恰好使用 `every_ms` 或 `at_ms_var`；可选 background 和�
 对应闹钟；存档入队或 RAM ACK 不等于断电耐久证明，需重启读回验收。
 
 源码与共享向量分别见 `scripts/capability_ext.py`、`contracts/events-v1.json`；
-设备生命周期与锁规则见 `capability-ext-audit.md`，验收方案见
-`capability-ext-hil.md`。联网数据、页面、文本表单和通知 UI 另见
-`d-host-and-surfaces.md`；PC 托管本地媒体播放器见 `service-bridge.md`。
+设备生命周期与锁规则见[媒体资源与事件实现](capability-ext-audit.md)，实机步骤见[设备验收](capability-ext-hil.md)。联网数据、页面、文本表单和通知参见 [PC Fetch、页面、表单与通知](d-host-and-surfaces.md)。PC 托管本地媒体播放器参见[服务桥](service-bridge.md)。

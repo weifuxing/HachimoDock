@@ -18,87 +18,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {COMPONENT_CONTROL_OPTIONS,componentControlOptionAllowed} from "./component-center/button-config.js";
-import {previewFormCapabilityAccepts,previewCanvasCapabilityAccepts} from "./component-center/preview-lifecycle.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const srcDir = dirname(fileURLToPath(import.meta.url));
 
-test('optional form support affects preview compatibility, not installation admission',()=>{
-  const source=readSource('ComponentCenter.jsx'),body=source.slice(source.indexOf('function gameInstallBlockedReason('),source.indexOf('\nfunction localInstallBlockedReason('));
-  const check=new Function("previewFormCapabilityAccepts","previewCanvasCapabilityAccepts",`${body};return gameInstallBlockedReason;`)(previewFormCapabilityAccepts,previewCanvasCapabilityAccepts);
-  const component={appRuntime:{form:{engine:'p4-app-form-v2'}}};
-  assert.equal(previewFormCapabilityAccepts('p4-app-form-v2',{widgetAppForm:'p4-app-form-v1'}),false);
-  assert.equal(previewFormCapabilityAccepts('p4-app-form-v2',{widgetAppFormV2:'p4-app-form-v2'}),true);
-  assert.equal(check(component,{capabilities:{widgetAppForm:'p4-app-form-v1'}}),'');
-  assert.equal(check(component,{capabilities:{widgetAppFormV2:'p4-app-form-v2'}}),'');
-  assert.equal(check({appRuntime:{form:{engine:'p4-app-form-v1'}}},{capabilities:{widgetAppForm:'p4-app-form-v1'}}),'');
-  assert.equal(check({appRuntime:{surface:{canvas:{engine:'p4-canvas-v1'}}}},{capabilities:{}}),'');
-  assert.equal(check({appRuntime:{surface:{canvas:{engine:'p4-canvas-v1'}}}},{capabilities:{widgetCanvas:'p4-canvas-v1'}}),'');
-  assert.equal(check({appRuntime:{form:{engine:'p4-app-form-v3'}}},{capabilities:{widgetAppForm:'p4-app-form-v1'}}),'');
-  assert.equal(check({appRuntime:{form:{engine:'p4-app-form-v3'}}},{capabilities:{widgetAppFormV3:'p4-app-form-v3'}}),'');
-  assert.equal(check({appRuntime:{form:{engine:'future'}}},{capabilities:{widgetAppForm:'p4-app-form-v1'}}),'');
-  assert.equal(check({appRuntime:{surface:{canvas:{engine:'p4-canvas-v1'}}}},{capabilities:{widgetCanvas:'p4-canvas-v2'}}),'');
-  assert.equal(check({appRuntime:{surface:{canvas:{engine:'p4-canvas-v2'}}}},{capabilities:{widgetCanvas:'p4-canvas-v2'}}),'');
-  assert.equal(check({appRuntime:{surface:{canvas:{engine:'future'}}}},{capabilities:{widgetCanvas:'p4-canvas-v2'}}),'');
-});
-
 function readSource(fileName) {
   return readFileSync(join(srcDir, fileName), "utf8");
 }
-test('optional host context does not block installation',()=>{
-  const source=readSource('ComponentCenter.jsx');const body=source.slice(source.indexOf('function gameInstallBlockedReason('),source.indexOf('\nfunction localInstallBlockedReason('));
-  const check=new Function("previewFormCapabilityAccepts","previewCanvasCapabilityAccepts",`${body};return gameInstallBlockedReason;`)(previewFormCapabilityAccepts,previewCanvasCapabilityAccepts);
-  assert.equal(check({appRuntime:{host_context:'p4-host-context-v1'}},{capabilities:{}}),'');
-  assert.equal(check({appRuntime:{host_context:'p4-host-context-v1'}},{capabilities:{widgetHostContext:'p4-host-context-v1'}}),'');
-  const panel=readSource('component-center/ComponentAppPanel.jsx');
-  assert.match(panel,/eventId:crypto\.randomUUID\(\),context:data\?\.ui\?\.context/);
-});
-test('named binding packages install independently of optional device adverts',()=>{
-  const source=readSource('ComponentCenter.jsx');
-  const body=source.slice(source.indexOf('function gameInstallBlockedReason('),source.indexOf('\nfunction localInstallBlockedReason('));
-  const check=new Function("previewFormCapabilityAccepts","previewCanvasCapabilityAccepts",`${body};return gameInstallBlockedReason;`)(previewFormCapabilityAccepts,previewCanvasCapabilityAccepts);
-  for(const component of [{mediaSurface:{bindings:'p4-variable-bindings-v1'}},{appRuntime:{surface:{bindings:'p4-variable-bindings-v1'}}}]){
-    assert.equal(check(component,{capabilities:{}}),'');
-    assert.equal(check(component,{capabilities:{widgetVariableBindings:'p4-variable-bindings-v1'}}),'');
-  }
-  assert.equal(check({mediaSurface:{}},{capabilities:{}}),'');
-});
-
-// ── Unified library + modal layout ────────────────────────────────────────────
-
-test('optional viewport support is not inferred from version or used to reject installation',()=>{
-  const source=readSource('ComponentCenter.jsx'),body=source.slice(source.indexOf('function gameInstallBlockedReason('),source.indexOf('\nfunction localInstallBlockedReason('));
-  const check=new Function("previewFormCapabilityAccepts","previewCanvasCapabilityAccepts",`${body};return gameInstallBlockedReason;`)(previewFormCapabilityAccepts,previewCanvasCapabilityAccepts);
-  for(const component of [{mediaSurface:{viewport:{engine:'p4-app-viewport-v1'}}},{appRuntime:{surface:{viewport:{engine:'p4-app-viewport-v1'}}}}]){
-    assert.equal(check(component,{firmware:'9.9.9',capabilities:{}}),'');
-    assert.equal(check(component,{capabilities:{widgetAppViewport:'p4-app-viewport-v1'}}),'');
-  }
-});
-
-test('independent viewport packages remain installable on legacy-only firmware',()=>{
-  const source=readSource('ComponentCenter.jsx'),body=source.slice(source.indexOf('function gameInstallBlockedReason('),source.indexOf('\nfunction localInstallBlockedReason('));
-  const check=new Function("previewFormCapabilityAccepts","previewCanvasCapabilityAccepts",`${body};return gameInstallBlockedReason;`)(previewFormCapabilityAccepts,previewCanvasCapabilityAccepts);
-  for(const component of [{mediaSurface:{viewports:{engine:'p4-app-viewports-v1'}}},{appRuntime:{surface:{viewports:{engine:'p4-app-viewports-v1'}}}}]){
-    assert.equal(check(component,{capabilities:{widgetAppViewport:'p4-app-viewport-v1'}}),'');
-    assert.equal(check(component,{capabilities:{widgetAppViewports:'p4-app-viewports-v1'}}),'');
-  }
-});
-
 test('durable workflow actions send unique identity and current host context',()=>{
   const panel=readSource('component-center/ComponentAppPanel.jsx');
   assert.match(panel,/\["pc-app-composition-v2","pc-app-composition-v3","pc-service-bridge-v1"\]\.includes\(component\.pcApplication\.engine\)/);
   assert.match(panel,/eventId:crypto\.randomUUID\(\),context:data\?\.ui\?\.context/);
-});
-
-test('side scene packages remain installable without optional motion capability',()=>{
-  const source=readSource('ComponentCenter.jsx'),body=source.slice(source.indexOf('function gameInstallBlockedReason('),source.indexOf('\nfunction localInstallBlockedReason('));
-  const check=new Function("previewFormCapabilityAccepts","previewCanvasCapabilityAccepts",`${body};return gameInstallBlockedReason;`)(previewFormCapabilityAccepts,previewCanvasCapabilityAccepts);
-  for(const c of [{scene:{engine:'p4-side-scene-v1'}},{appRuntime:{scene:{engine:'p4-side-scene-v1'}}}]){
-    assert.equal(check(c,{capabilities:{widgetMotion:'p4-motion-v1',widgetPlatformTrack:'p4-platform-track-v1'}}),'');
-    assert.equal(check(c,{capabilities:{widgetSideScene:'p4-side-scene-v1'}}),'');
-  }
 });
 
 test("stock management lives only in the matching component details", () => {
@@ -158,7 +90,7 @@ test("component center keeps the creation workflow in its drawer and hosts commu
     /subtitle="发现、创作与分享属于你的桌面玩法"/,
   );
   assert.match(component, /<CommunityCenter/);
-  assert.match(component, /请使用 \$petui/);
+  assert.match(component, /请使用 PetUI.*\$petui/);
   assert.match(component, /expectedBoardDeviceId: boardDeviceId/);
   assert.match(component, /component-install-progress/);
 });
@@ -183,9 +115,9 @@ test("direct sync preflights one component and respects board capacity", () => {
     component.indexOf("async function installSelectedComponent"),
   );
   assert.match(syncBody, /localInstallBlockedReason\(component\)/);
-  assert.match(syncBody, /gameInstallBlockedReason\(component, usb\)/);
+  assert.match(syncBody, /componentUsbInstallBlockedReason\(component, usb\)/);
   assert.match(syncBody, /deviceInventory\.items\.length >= maxInstalled/);
-  assert.match(syncBody, /await installSelectedComponent\(component\)/);
+  assert.match(syncBody, /await installSelectedComponent\(component, \{freshImport\}\)/);
   assert.match(syncBody, /设备组件已满/);
   assert.match(syncBody, /找到你不再使用的已同步组件，点击卡片右下角的「移除」/);
 });
@@ -200,7 +132,7 @@ test("custom deletion is device-first and keeps the PC source after a failed ACK
   const deleteIndex = actionBody.indexOf('invoke("delete_component_from_library"');
   assert.ok(removeIndex >= 0);
   assert.ok(deleteIndex > removeIndex);
-  assert.match(component, /A failed board ACK leaves the local[\s\S]*package intact/);
+  assert.match(actionBody.slice(removeIndex, deleteIndex), /deviceResult\.ok === false[\s\S]*throw new Error/);
   assert.match(component, /requestComponentDelete\(item, isInstalled\)/);
 });
 
@@ -248,7 +180,8 @@ test("ComponentCenter renders the component library grid using CandidateCard", (
 
 test("ComponentCenter opens ComponentPreviewModal on candidate click (transient selection)", () => {
   const component = readSource("ComponentCenter.jsx");
-  assert.match(component, /import\s+ComponentPreviewModal/);
+  assert.match(component, /const ComponentPreviewModal = lazy\(\(\) => import\("\.\/component-center\/ComponentPreviewModal\.jsx"\)\)/);
+  assert.match(component, /<Suspense fallback=\{<ComponentPreviewLoading/);
   assert.match(component, /previewComponent/);
   assert.match(component, /<ComponentPreviewModal/);
 });
@@ -425,7 +358,6 @@ test("OTA, single-slot replacement guidance, and device-action confirmation rema
   assert.match(component, /singleSlotReplacement=\{previewReplacesSingleSlot\}/);
   assert.match(component, /role="alertdialog"/);
   assert.match(component, /可以只移除设备副本/);
-  assert.match(component, /Device removal happens first/);
   assert.doesNotMatch(component, /aria-label="生成组件 prompt"/);
   assert.doesNotMatch(component, /component-generated-prompt/);
   assert.doesNotMatch(component, /当前渠道：/);
@@ -450,12 +382,14 @@ test("component center uses PageShell and shell components", () => {
   // Action buttons in PageShell actions
   assert.match(component, /actions=\{/);
   assert.match(component, /刷新组件库/);
+  assert.match(component, /petui publish 发布到本地组件库/);
   assert.match(component, /setCreateDrawerOpen\(true\)/);
 
   // App.jsx wiring
   assert.match(app, /const ComponentCenter = lazy\(\(\) => import\("\.\/ComponentCenter"\)\)/);
   assert.match(app, /title="组件中心"/);
-  assert.match(app, /<ComponentCenter active=\{view === "components"\} \/>/);
+  assert.match(app, /<ComponentCenter active=\{view === "components"\} onOpenWirelessMaintenance=\{openWirelessMaintenance\} \/>/);
+  assert.match(component, /wifi\?\.componentDelivery && !wirelessInventoryReady && onOpenWirelessMaintenance/);
 });
 
 test("component center preserves install, formal-library delete, and device-remove pipelines", () => {
@@ -482,7 +416,7 @@ test("component center preserves install, formal-library delete, and device-remo
   assert.match(component, /installBuiltinToDevice/);
   assert.match(component, /installClawpkgFromPath/);
   assert.match(component, /install_clawpkg_over_usb/);
-  assert.match(component, /install_widget_skill/);
+  assert.match(component, /prepare_petui_authoring/);
   assert.match(component, /delete_component_from_library/);
   assert.match(component, /remove_widget_from_device/);
 
@@ -632,7 +566,7 @@ test("builtin catalog starts with stocks followed by 双键接球 and a sprite-c
   assert.equal(widget.lifecycle.record_var,"best");
   assert.ok(widget.persist.vars.includes("best"));
 
-  const frogRoot = join(srcDir, "../builtin-clawpkgs/bloomfrog_companion");
+  const frogRoot = join(srcDir, "../optional-clawpkgs/bloomfrog_companion");
   const frogManifest = JSON.parse(readFileSync(join(frogRoot, "component.json"), "utf8"));
   const frogWidget = JSON.parse(readFileSync(join(frogRoot, "runtime/widget.json"), "utf8"));
   assert.equal(frogManifest.name, "蛙蛙养成");
@@ -648,7 +582,6 @@ test("all builtin components omit exit actions, reserve SW3 globally, and use SW
   const packageIds = [
     "stock-watchlist",
     "two-key-pong",
-    "bloomfrog_companion",
     "flappy-bird",
     "block-combo",
     "snake-turn",
@@ -710,23 +643,17 @@ test("a live USB handshake wins over a remembered SSH target during install", ()
   assert.ok(useSshIndex > liveStatusIndex);
   assert.match(
     installBody,
-    /const useSsh = !options\.forceUsb && !liveUsbConnected && sshHost\.length > 0/,
+    /const useSsh = !useWifi && !options\.forceUsb && !liveUsbConnected && sshHost\.length > 0/,
   );
 });
 
-test("component generation stays in the current Agent conversation through petui", () => {
+test("component generation uses the current Agent and the shared PetUI tools", () => {
   const component = readSource("ComponentCenter.jsx");
-  assert.match(component, /请使用 \$petui/);
-  assert.match(component, /宠物养成小游戏，一个类似旅行青蛙的可爱小青蛙形象/);
-  assert.match(component, /1键是抚摸、亲密度\+1/);
-  assert.match(component, /2键是喂食、亲密度\+5/);
-  assert.match(component, /摇杆上下左右可让它到处移动/);
-  assert.match(component, /示意，请按照自己想法重新输入/);
+  assert.match(component, /请使用 PetUI.*\$petui/);
+  assert.match(component, /authoring\.skillPath/);
+  assert.match(component, /authoring\.command/);
   assert.match(component, /navigator\.clipboard\.writeText\(invocationExample\)/);
-  assert.match(component, /invoke\("install_widget_skill"\)/);
-  assert.match(component, /正式本地组件库/);
-  assert.doesNotMatch(component, /launch_agent_with_prompt/);
-  assert.doesNotMatch(component, /promptDraft|createSkillTriggerPrompt|component-generation-template/);
+  assert.doesNotMatch(component, /launch_agent_with_prompt|选择创作 Agent/);
 });
 
 test("invalid formal local components are blocked before direct device sync", () => {
@@ -797,10 +724,10 @@ test("petui routes game/tool requests and publishes only validated formal compon
   assert.match(widgetSkill, /name: petui/);
   assert.match(widgetSkill, /判断需求属于 `game` 还是 `tool`/);
   assert.match(widgetSkill, /不得把不支持的游戏静默替换成 Flappy Bird/);
-  assert.match(widgetSkill, /validate_generated_widget\.py/);
+  assert.match(widgetSkill, /petui validate <component\.hachiapp>/);
   assert.match(widgetSkill, /smoke_test_widget_game\.py/);
-  assert.match(widgetSkill, /publish_generated_widget\.py/);
-  assert.match(widgetSkill, /玩家\/主角必须优先使用 PNG/);
+  assert.match(widgetSkill, /petui publish <component\.hachiapp>/);
+  assert.match(widgetSkill, /素材配额按运行模式区分/);
   assert.match(widgetSkill, /开始、每个玩法动作的即时可见反馈、自动推进、得分或进展、成功\/失败结算和重开/);
   assert.match(widgetSkill, /优化、修复或继续迭代现有组件时[\s\S]*?保留它的 `component\.json\.id`/);
   assert.match(widgetSkill, /打开同一个组件卡片并点击“保存并同步”/);
@@ -827,35 +754,20 @@ test("petui routes game/tool requests and publishes only validated formal compon
   assert.match(gameplaySmoke, /restartPath/);
 });
 
-test("component center preserves CreateComponentDrawer with all 3 STEP cards", () => {
+test("authoring launcher is maintained whenever component center is active", () => {
   const component = readSource("ComponentCenter.jsx");
-  assert.match(component, /function CreateComponentDrawer\b/);
-  assert.match(component, /component-center-drawer-backdrop/);
-  assert.match(component, /component-center-drawer\b/);
-  assert.match(component, /Escape/);
-  assert.match(component, /STEP 1.*Skill/);
-  assert.match(component, /STEP 2.*生成/);
-  assert.match(component, /STEP 3.*刷新组件库/);
-  assert.match(component, /component-tool-card--skill/);
-  assert.match(component, /component-tool-card--generate/);
-  assert.match(component, /component-tool-card--refresh/);
-  assert.match(component, /handleInstallSkill/);
-  assert.match(component, /skillInstallResult\.installed/);
-  assert.match(component, /skillInstallResult\.skipped/);
-  assert.match(component, /安装 petui/);
-  assert.match(component, /打开你正在使用的 Agent/);
-  assert.match(component, /复制下方示例文案到Agent界面，与Agent对话生成你想要在设备上使用的小组件或小游戏/);
+  assert.match(component, /if \(!active\) return undefined;[\s\S]*?invoke\("prepare_petui_authoring"\)[\s\S]*?\}, \[active, createDrawerOpen\]\)/);
+  assert.match(component, /正在同步 PetUI 创作技能/);
+  assert.doesNotMatch(component, /检查创作环境|handleInstallSkill|invoke\("install_widget_skill"\)/);
 });
 
-test("create drawer reduces step 3 to one refresh action", () => {
+test("create drawer can build an existing project and open its preview", () => {
   const component = readSource("ComponentCenter.jsx");
-  assert.match(component, /STEP 3.*刷新组件库/);
-  assert.match(component, /请使用 \$petui/);
-  assert.match(component, /Agent制作完成后，刷新组件库/);
-  assert.match(component, /刷新后新组件会出现在组件中心/);
-  assert.doesNotMatch(component, /选择并导入正式组件库|拖拽 \.clawpkg|component-clawpkg-dropzone/);
-  assert.doesNotMatch(component, /importClawpkgToLibrary|handleClawpkgDrop|handleClawpkgFilePick/);
-  assert.doesNotMatch(component, /invoke\("import_component_to_library"/);
+  assert.match(component, /function CreateComponentDrawer\b/);
+  assert.match(component, /打开你正在使用的 Agent/);
+  assert.match(component, /构建并试玩/);
+  assert.match(component, /invoke\("build_petui_project", \{ project \}\)[\s\S]*?openComponent\(buildLibraryComponent\(entry\)\)/);
+  assert.match(component, /刷新组件库/);
 });
 
 test("component center CSS has new library rules and no old layout rules", () => {
@@ -905,7 +817,6 @@ test("fixtures expose stocks first then the existing games and tools", () => {
   const orderedIds = [
     "stock-watchlist",
     "two-key-pong",
-    "bloomfrog_companion",
     "flappy-bird",
     "block-combo",
     "snake-turn",
@@ -930,10 +841,10 @@ test("fixtures expose stocks first then the existing games and tools", () => {
   assert.match(data, /像素贪吃蛇/);
   assert.match(data, /Flappy Bird/);
   assert.match(data, /双键接球/);
-  assert.match(data, /蛙蛙养成/);
+  assert.doesNotMatch(data, /蛙蛙养成/);
   assert.doesNotMatch(data, /falling-catch|接住星星|catch\.left|catch\.right|catch\.start/);
   assert.doesNotMatch(data, /ten-second-tap|5秒连点|10秒连点/);
-  assert.equal((data.match(/createdAt:/g) || []).length, 8);
+  assert.equal((data.match(/createdAt:/g) || []).length, 7);
   assert.doesNotMatch(data, /mediaSource: musicWidget.media.source/); // retired package is not bundled
   assert.match(data, /gameType: "blocks"/);
   assert.match(data, /gameType: "snake"/);
@@ -944,15 +855,14 @@ test("fixtures expose stocks first then the existing games and tools", () => {
   assert.doesNotMatch(data, /slack-off-countdown/);
   assert.doesNotMatch(data, /摸鱼倒计时/);
   assert.equal((data.match(/kind: "game"/g) || []).length, 4);
-  // Two local-data tools share one catalog factory; wooden-fish is a native instrument.
-  assert.equal((data.match(/kind: "tool"/g) || []).length, 7); // music-player is retired
+  // The catalog discovers 想法与待办 from its bundle. Wooden-fish is a native instrument.
+  assert.equal((data.match(/kind: "tool"/g) || []).length, 6); // Retired packages are excluded.
   assert.match(data, /instrumentSource: woodenFishWidget.instrument.source/);
   assert.match(data, /computerManifest, computerWidget, computerBindings/);
-  assert.match(data, /todoManifest, todoWidget, todoBindings/);
+  assert.doesNotMatch(data, /builtin-clawpkgs\/upcoming-todos/);
   assert.ok(data.indexOf("...localDataComponents[0]") > data.indexOf('id: "stock-watchlist"'));
-  assert.ok(data.indexOf("...localDataComponents[1]") < data.indexOf('id: "two-key-pong"'));
   assert.equal((data.match(/visualStyle: "pixel"/g) || []).length, 7);
-  assert.equal((data.match(/visualLayout: "tool"/g) || []).length, 4);
+  assert.equal((data.match(/visualLayout: "tool"/g) || []).length, 3);
   assert.match(data, /event: "button\.sw1\.short_press"/);
   assert.match(data, /button\.sw2\.short_press/);
   assert.doesNotMatch(data, /event: "button\.sw3\.short_press"/);

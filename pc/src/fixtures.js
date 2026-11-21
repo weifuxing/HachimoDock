@@ -6,11 +6,11 @@
  *          of truth for builtin widgets + Agent discovery scenarios):
  *            • `AGENT_DISCOVERY_FIXTURES` — scenarios for the agent-detection
  *              flow, consumed by `agent-discovery-contract.js`.
- *            • `BUILTIN_COMPONENT_CENTER` — the actual builtin negative-screen
- *              widget catalog (自选股行情 first in the default sequence, then 双键接球
- *              and 蛙蛙养成; new user components can precede them) with global SW3 exit / SW1 primary action / joystick directions,
- *              including native Flappy Bird plus tomato-clock /
- *              drink-reminder / current-followed-Agent daily token-usage tools) and the
+ *            • `BUILTIN_COMPONENT_CENTER` — seed metadata for the bundled
+ *              component catalog; the factory configuration supplies its order.
+ *              The catalog loads 想法与待办 from its bundled package metadata.
+ *              Includes global SW3 exit, SW1 primary action and joystick directions.
+ *              Also provides the
  *              component-generator prompt + replacement preview metadata,
  *              consumed by `ComponentCenter.jsx`.
  * [Pos] shared-data node in pc/src
@@ -21,7 +21,6 @@
  *        VIEW_IDS, LOGIN_SCENARIOS) were dropped in the same pass.
  */
 
-import bloomfrogSpriteUrl from "../builtin-clawpkgs/bloomfrog_companion/assets/bloomfrog.png";
 import woodenFishManifest from "../builtin-clawpkgs/wooden-fish/component.json";
 import woodenFishWidget from "../builtin-clawpkgs/wooden-fish/runtime/widget.json";
 import woodenFishBindings from "../builtin-clawpkgs/wooden-fish/buttons.json";
@@ -31,14 +30,10 @@ import stockBindings from "../builtin-clawpkgs/stock-watchlist/buttons.json";
 import computerManifest from "../builtin-clawpkgs/computer-status/component.json";
 import computerWidget from "../builtin-clawpkgs/computer-status/runtime/widget.json";
 import computerBindings from "../builtin-clawpkgs/computer-status/buttons.json";
-import todoManifest from "../builtin-clawpkgs/upcoming-todos/component.json";
-import todoWidget from "../builtin-clawpkgs/upcoming-todos/runtime/widget.json";
-import todoBindings from "../builtin-clawpkgs/upcoming-todos/buttons.json";
 import {completeBuiltinCatalog} from "./component-center/builtin-preview.js";
 
 const localDataComponents = [
   [computerManifest, computerWidget, computerBindings],
-  [todoManifest, todoWidget, todoBindings],
 ].map(([manifest, widget, bindings]) => ({
   id: manifest.id, name: manifest.name, version: manifest.version, kind: "tool",
   category: "内置工具", source: "PC 本地实时数据", status: "available", accent: "blue",
@@ -163,7 +158,6 @@ export const BUILTIN_COMPONENT_CENTER = {
       packageIncludes: ["组件说明", "本地音效界面", "按钮绑定", "运行文件"],
       screens: [{ name: "静心木鱼", purpose: "单键敲击，清脆木响与轻柔伴奏。", regions: [] }],
     },
-    { ...localDataComponents[1] },
     { ...localDataComponents[0] },
     {
       id: "two-key-pong",
@@ -219,77 +213,6 @@ export const BUILTIN_COMPONENT_CENTER = {
             { name: "挡板左移", action: "shift_left" },
             { name: "挡板右移", action: "shift_right" },
             { name: "开始或重开", action: "start" },
-          ],
-        },
-      ],
-    },
-    {
-      id: "bloomfrog_companion",
-      name: "蛙蛙养成",
-      version: "1.3.1",
-      createdAt: "2026-08-11T13:35:26+08:00",
-      kind: "tool",
-      category: "内置工具",
-      source: "P4 通用场景运行时",
-      status: "available",
-      accent: "green",
-      runtimeEngine: "p4-bounded-runtime-v4",
-      sceneEngine: "p4-grid-scene-v2",
-      goal: "陪植物蛙四向散步，通过抚摸和喂食提升亲密度；每次互动都会得到即时表情和文字回应。",
-      sharePayload: "分享的是蛙蛙养成桌宠，包含四向散步、抚摸、喂食、亲密度成长和即时回应。",
-      capabilities: ["scene.grid", "scene.sprite", "input.device_global_exit", "display.clean"],
-      packageIncludes: ["组件说明", "负一屏页面", "按钮绑定", "运行文件", "PNG 精灵", "分享信息"],
-      dashboard: {
-        title: "蛙蛙养成",
-        eyebrow: "植物系桌宠",
-        headline: "来陪我玩吧！",
-        metricLabel: "亲密度",
-        metricValue: "30",
-        metricUnit: "芽",
-        note: "抚摸 +1，喂食 +10",
-        footer: "摇杆移动 · 互动养成 · 全局键退出",
-        progress: { value: 30, label: "相伴成长" },
-        visualStyle: "clean",
-        visualPalette: "forest",
-        visualLayout: "tool",
-        visualSprite: "star",
-      },
-      scene: {
-        tick_ms: 900,
-        active_state: "together",
-        grid: { width: 16, height: 12 },
-        entities: [
-          { id: "pet", x: 5, y: 3, width: 6, height: 6, sprite: "bloomfrog", tone: 2, bounds: "clamp", collidable: false },
-          { id: "snack", x: 8, y: 7, width: 1, height: 1, shape: "coin", tone: 3, active: false, collidable: false },
-          { id: "joy", x: 9, y: 3, width: 1, height: 1, shape: "heart", tone: 4, active: false, collidable: false },
-        ],
-      },
-      sceneSprites: [
-        {
-          id: "bloomfrog",
-          dataUrl: bloomfrogSpriteUrl,
-          frameWidth: 32,
-          frameHeight: 32,
-          frames: 4,
-          fps: 2,
-        },
-      ],
-      defaultBindings: [
-        { control: "前方摇杆", event: "joystick.up", action: "move_up", label: "向上走" },
-        { control: "前方摇杆", event: "joystick.down", action: "move_down", label: "向下走" },
-        { control: "前方摇杆", event: "knob.rotate_ccw", action: "move_left", label: "向左走" },
-        { control: "前方摇杆", event: "knob.rotate_cw", action: "move_right", label: "向右走" },
-        { control: "SW1", event: "button.sw1.short_press", action: "pet_pet", label: "抚摸" },
-        { control: "SW2", event: "button.sw2.short_press", action: "feed_pet", label: "喂食" },
-      ],
-      screens: [
-        {
-          name: "蛙蛙养成",
-          purpose: "显示植物蛙的四向移动、互动表情和亲密度成长。",
-          regions: [
-            { name: "四向散步", action: "move_up / move_down / move_left / move_right" },
-            { name: "抚摸", action: "pet_pet" },
-            { name: "喂食", action: "feed_pet" },
           ],
         },
       ],

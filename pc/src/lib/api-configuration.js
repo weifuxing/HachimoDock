@@ -16,6 +16,19 @@ export const LLM_PRESETS = [
   { id: "mimo", label: "MiMo", baseUrl: "https://api.xiaomimimo.com/v1", model: "mimo-v2.6-flash" },
 ];
 
+export const MIMO_CONNECTIONS = [
+  { ...LLM_PRESETS.find(preset => preset.id === "mimo"), label: "按量 API" },
+  { id: "mimo-token-plan-cn", label: "Token Plan", baseUrl: "https://token-plan-cn.xiaomimimo.com/v1", model: "mimo-v2.6-flash" },
+];
+
+export function mimoConnection(providerId) {
+  return MIMO_CONNECTIONS.find(connection => connection.id === providerId);
+}
+
+function llmPreset(providerId) {
+  return LLM_PRESETS.find(preset => preset.id === providerId) || mimoConnection(providerId);
+}
+
 export const DEFAULT_TTS_RESOURCE_ID = "seed-tts-2.0";
 
 function restoreLlmCredential(current) {
@@ -29,7 +42,7 @@ function restoreLlmCredential(current) {
 
 export function selectLlmProvider(current, providerId) {
   if (current.llmProvider === providerId) return current;
-  const preset = LLM_PRESETS.find((item) => item.id === providerId);
+  const preset = llmPreset(providerId);
   return restoreLlmCredential({ ...current, llmProvider: providerId,
     llmBaseUrl: preset?.baseUrl || current.llmCustomBaseUrl || "", llmModel: preset?.model || "" });
 }
@@ -42,7 +55,7 @@ export function changeLlmEndpoint(current, baseUrl) {
 }
 
 export function describeLlmPreset(providerId, model) {
-  const preset = LLM_PRESETS.find((item) => item.id === providerId);
+  const preset = llmPreset(providerId);
   if (!preset) return "自定义 OpenAI 兼容端点";
   return `${preset.label} · ${model?.trim() || preset.model} · ${preset.baseUrl}`;
 }
@@ -51,10 +64,7 @@ export const ASR_RESOURCE_OPTIONS = [
   { id: "volc.seedasr.sauc.duration", label: "豆包 ASR 2.0" },
 ];
 
-export function providerCredentialsConfigured(providerId, config = {}) {
-  if (providerId === "kling") {
-    return Boolean(config.accessKey?.trim() && config.secretKey?.trim());
-  }
+export function providerCredentialsConfigured(_providerId, config = {}) {
   return Boolean(config.apiKey?.trim());
 }
 export function emitApiConfigurationUpdated(detail = {}) {

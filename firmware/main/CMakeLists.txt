@@ -3,9 +3,32 @@
 # [Pos] ESP32-P4 main firmware component build definition.
 # [Sync] If this file changes, update `firmware/.folder.md` and `protocol.md`.
 
+if("$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1")
+  set(settings_requires esp_wifi esp_event esp_netif esp-tls protocomm efuse esp_hw_support bootloader_support)
+  set(settings_sources
+    "pet_p4_system_settings.c"
+    "pet_p4_device_wifi.c"
+    "pet_p4_wifi_clock.c"
+    "pet_p4_lan.c"
+    "pet_p4_wifi_data.c"
+    "pet_p4_live_tls.c"
+    "pet_p4_private_feed.c"
+    "pet_p4_mqtt_feed.c"
+    "pet_p4_wifi_data_cache.c"
+    "pet_p4_wifi_data_sources.c"
+    "pet_p4_radio.c"
+  )
+  if(CONFIG_BT_NIMBLE_ENABLED)
+    list(APPEND settings_requires bt)
+    list(APPEND settings_sources "ble_budget_probe.c")
+  endif()
+endif()
+
 idf_component_register(
   SRCS
     "pet_p4_main.c"
+    ${settings_sources}
+    "pet_p4_wasm_trial.c"
     "pet_p4_lcd.c"
     "pet_p4_assets.c"
     "pet_p4_audio.c"
@@ -28,6 +51,7 @@ idf_component_register(
     "pet_p4_boot_dma.c"
     "pet_p4_flash_phase.c"
     "pet_p4_native_panic.c"
+    "pet_p4_wdt_deadlock.c"
     # MiSans16/32 share the original license; see licenses/MiSans-Font-License-Agreement.pdf
     # and licenses/MiSans-Embedded-Fonts-NOTICE.txt at the repository root.
     "pet_p4_font_cn.c"
@@ -96,6 +120,7 @@ idf_component_register(
     "pet_p4_builtin_components_data.c"
     "pet_p4_ota.c"
     "pet_p4_protocol.c"
+    "pet_p4_board_probe.c"
     "pet_p4_raw_assets.c"
     "pet_p4_stats.c"
     "pet_p4_touch.c"
@@ -111,6 +136,9 @@ idf_component_register(
   PRIV_INCLUDE_DIRS
     "${IDF_PATH}/components/spiffs/spiffs/src"
   REQUIRES
+    ${settings_requires}
+    hachi_wamr
+    pthread
     esp_adc
     esp_timer
     esp_driver_gpio
@@ -134,13 +162,30 @@ idf_component_register(
     tinyusb
 )
 
+if("$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1")
+  idf_component_get_property(pet_h264_dir espressif__esp_h264 COMPONENT_DIR)
+  target_include_directories(${COMPONENT_LIB} PRIVATE "${pet_h264_dir}/sw/libs/tinyh264_inc")
+endif()
+
 # Shared, OTA-updatable status cues live in the application, not appearance slots.
+# Form declarations and OTA asset metadata are separate from the render and audio loops.
+set_source_files_properties("pet_p4_form_v2.c" "pet_p4_form_v3.c" "pet_p4_assets.c"
+  "pet_p4_wdt_deadlock.c" PROPERTIES COMPILE_OPTIONS "-Os")
 # Retain compiler stack reports for the nested component/media render path.
 # Large snapshots belong to renderer-owned storage, not the 10 KiB main stack.
 set_source_files_properties("pet_p4_renderer.c" PROPERTIES COMPILE_OPTIONS "-fstack-usage;-Wframe-larger-than=4096")
 # Bound declaration parsing/interpreter code growth as the PetUI contract grows.
 # Keep audio DSP, video and per-pixel rendering at the configured performance
 # optimization; the factory partition layout is validated separately.
+if("$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1")
+  # Wi-Fi control/transport and metadata paths share the existing OTA slot.
+  # Leave the renderer, PCM mixer and game/VM execution flags alone.
+  set_source_files_properties("pet_p4_protocol.c" "pet_p4_media.c"
+    "pet_p4_widget_data.c" "pet_p4_wifi_data.c" "pet_p4_wifi_data_cache.c" "pet_p4_wifi_data_sources.c"
+    "pet_p4_device_wifi.c" "pet_p4_lan.c" "pet_p4_main.c"
+    "pet_p4_raw_assets.c" "pet_p4_storage_io_trace_rpc.c" "pet_p4_component_ext.c"
+    "pet_p4_local_tools.c" PROPERTIES COMPILE_OPTIONS "-Oz")
+endif()
 set_source_files_properties("pet_p4_surface.c" "pet_p4_miniapp.c" PROPERTIES COMPILE_OPTIONS "-Os")
 # New declaration/controller logic is not a pixel/DSP hot loop. Keep its OTA
 # cost bounded without changing the VM, audio, renderer or partition budgets.
@@ -148,7 +193,12 @@ set_source_files_properties("pet_p4_component_program.c" "pet_p4_component_progr
 # Bounded lifecycle routing, never instructions, DSP or pixel processing.
 set_source_files_properties("pet_p4_program_group.c" "pet_p4_program_scheduler.c" PROPERTIES COMPILE_OPTIONS "-Os")
 # Cold install-time declaration validation and diagnostic serialization only.
-set_source_files_properties("pet_p4_side_scene_json.c" "pet_p4_diagnostics.c" PROPERTIES COMPILE_OPTIONS "-Os")
+set_source_files_properties("pet_p4_side_scene_json.c" PROPERTIES COMPILE_OPTIONS "-Os")
+set_source_files_properties("pet_p4_diagnostics.c" "pet_p4_file_cleanup.c" PROPERTIES COMPILE_OPTIONS "-Oz")
+# Component media storage and admission manage bounded buffers. The PCM
+# decoder, speaker task and renderer are compiled separately.
+set_source_files_properties("pet_p4_component_ext.c" "pet_p4_component_media.c"
+  PROPERTIES COMPILE_OPTIONS "-Oz")
 # Admission/queue/lifecycle/serialization controllers are separate from the
 # unchanged integer instruction/runtime implementation and audio/render loops.
 set_source_files_properties("pet_p4_program_host.c" "pet_p4_program_timers.c" "pet_p4_event_bus.c" "pet_p4_program_store.c" "pet_p4_app_store.c" PROPERTIES COMPILE_OPTIONS "-Os")
@@ -159,6 +209,25 @@ set_source_files_properties("pet_p4_program_probe.c" PROPERTIES COMPILE_OPTIONS 
 set_source_files_properties("pet_p4_program_session_probe.c" PROPERTIES COMPILE_OPTIONS "-Os")
 set_source_files_properties("pet_p4_program_main_probe.c" PROPERTIES COMPILE_OPTIONS "-Os")
 set_source_files_properties("pet_p4_sched_trace_rpc.c" PROPERTIES COMPILE_OPTIONS "-Os")
+if("$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1")
+  # These paths run at setup, on admitted control requests, or at package load.
+  set_property(SOURCE "pet_p4_system_settings.c" "pet_p4_wifi_clock.c"
+    "pet_p4_form_v2.c" "pet_p4_form_v3.c" "pet_p4_side_scene_json.c"
+    "pet_p4_ota.c" "pet_p4_app_host.c" "pet_p4_host_collection.c"
+    "pet_p4_program_image.c" "pet_p4_program_persistence.c"
+    "pet_p4_program_publication_probe.c" "pet_p4_program_session_probe.c"
+    "pet_p4_program_main_probe.c" "pet_p4_resources.c"
+    "pet_p4_app_store.c" "pet_p4_program_registry.c" "pet_p4_trusted_services.c"
+    "pet_p4_input.c" "pet_p4_assets.c" "pet_p4_program_activation.c"
+    "pet_p4_transport_audit.c" "pet_p4_collection_host.c" "pet_p4_component_events.c"
+    "pet_p4_view.c" "pet_p4_conversation.c" "pet_p4_stats.c" "pet_p4_spiffs_hint.c" "pet_p4_board_probe.c"
+    APPEND PROPERTY COMPILE_OPTIONS "-Oz")
+endif()
+# Keep fault reporting and credential setup compact on the small pre-v3 OTA slot.
+if("$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1" AND "$ENV{PET_P4_CHIP_FAMILY}" STREQUAL "v1")
+  set_property(SOURCE "pet_p4_diagnostics.c" "pet_p4_private_feed.c"
+    APPEND PROPERTY COMPILE_OPTIONS "-Oz")
+endif()
 # The reviewed v4 report consumes six actual module reports. Append this after
 # the per-source optimization properties so their existing flags remain intact.
 set_property(SOURCE "pet_p4_miniapp.c" "pet_p4_app_host.c" "pet_p4_form_v2.c"
@@ -172,6 +241,14 @@ foreach(art center_background.jpg center_thumbs.deflate)
   target_add_binary_data(${COMPONENT_LIB} "${CMAKE_CURRENT_LIST_DIR}/../assets/component-center/${art}" BINARY)
 endforeach()
 target_add_binary_data(${COMPONENT_LIB} "${CMAKE_CURRENT_LIST_DIR}/../assets/fonts/pet_cn_16.deflate" BINARY)
+target_add_binary_data(${COMPONENT_LIB} "${CMAKE_CURRENT_LIST_DIR}/../assets/fonts/pet_cn_16_glyph_columns.deflate" BINARY)
+execute_process(
+  COMMAND "${PYTHON}" "${CMAKE_CURRENT_LIST_DIR}/../tools/compress_font_glyph_columns.py" "--check"
+  RESULT_VARIABLE PET_FONT_GLYPH_COLUMNS_STATUS
+)
+if(NOT PET_FONT_GLYPH_COLUMNS_STATUS EQUAL 0)
+  message(FATAL_ERROR "Lossless column-packed font asset is stale")
+endif()
 target_add_binary_data(${COMPONENT_LIB} "${CMAKE_CURRENT_LIST_DIR}/../assets/fonts/pet_cn_metrics.deflate" BINARY)
 # Both inputs exist; only the gate-selected metrics symbols may survive GC.
 # Parent must confirm this again in BOTH final linked images/maps.
@@ -264,6 +341,10 @@ target_include_directories(${tusb_lib} PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
 cmake_policy(SET CMP0079 NEW)
 target_link_libraries(${tusb_lib} PRIVATE ${COMPONENT_LIB})
 
+# ESP-SR emits a direct libc debug line during NS setup on some P4 builds.
+# Keep that line off the shared UART without changing the DSP library.
+target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=printf")
+
 # Paste at the end of firmware/main/CMakeLists.txt (after component registration).
 # Generated sources only; managed components, SDK packages and lockfiles are unchanged.
 set(pet_volume_main "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -344,3 +425,119 @@ if(NOT pet_restart_count EQUAL 1)
   message(FATAL_ERROR "P4 restart target must contain exactly one pinned source")
 endif()
 set_property(TARGET ${pet_restart_lib} PROPERTY SOURCES "${pet_restart_replaced}")
+
+
+# Preserve a hardware underrun timestamp without relying on the console reader.
+if("$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1")
+  idf_component_get_property(pet_lcd_driver esp_lcd COMPONENT_LIB)
+  idf_component_get_property(pet_lcd_dir esp_lcd COMPONENT_DIR)
+  set(pet_lcd_source "${pet_lcd_dir}/dsi/esp_lcd_panel_dpi.c")
+  set(pet_lcd_generated "${CMAKE_CURRENT_BINARY_DIR}/pet_p4_pinned_panel_dpi.c")
+  set(pet_lcd_patch "${CMAKE_CURRENT_LIST_DIR}/../tools/patch_p4_lcd_underrun.py")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${pet_lcd_patch}" "${pet_lcd_source}")
+  execute_process(COMMAND "${PYTHON}" "${pet_lcd_patch}" "${pet_lcd_source}" "${pet_lcd_generated}"
+    COMMAND_ERROR_IS_FATAL ANY)
+  get_target_property(pet_lcd_sources ${pet_lcd_driver} SOURCES)
+  set(pet_lcd_replaced)
+  set(pet_lcd_count 0)
+  foreach(pet_lcd_entry IN LISTS pet_lcd_sources)
+    get_filename_component(pet_lcd_abs "${pet_lcd_entry}" REALPATH BASE_DIR "${pet_lcd_dir}")
+    if(pet_lcd_abs STREQUAL pet_lcd_source)
+      list(APPEND pet_lcd_replaced "${pet_lcd_generated}")
+      math(EXPR pet_lcd_count "${pet_lcd_count}+1")
+    else()
+      list(APPEND pet_lcd_replaced "${pet_lcd_entry}")
+    endif()
+  endforeach()
+  if(NOT pet_lcd_count EQUAL 1)
+    message(FATAL_ERROR "ESP32-P4 LCD target must contain exactly one pinned DPI driver")
+  endif()
+  # The SDK file includes mipi_dsi_priv.h from its own directory.
+  target_include_directories(${pet_lcd_driver} PRIVATE "${pet_lcd_dir}/dsi")
+  set_property(TARGET ${pet_lcd_driver} PROPERTY SOURCES "${pet_lcd_replaced}")
+endif()
+
+# Keep time-sensitive media and drawing paths on the validated performance profile.
+set_property(SOURCE "pet_p4_audio.c" "pet_p4_audio_frontend.c" "pet_p4_component_media.c"
+  "pet_p4_audio_patch.c" "pet_p4_lcd.c" "pet_p4_font_bitmap.c"
+  "pet_p4_wasm_trial.c" APPEND PROPERTY COMPILE_OPTIONS "-O2")
+idf_component_get_property(wamr_lib hachi_wamr COMPONENT_LIB)
+target_compile_options(${wamr_lib} PRIVATE "-O2")
+
+if(CONFIG_BT_NIMBLE_ENABLED AND "$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1")
+foreach(ble_size_component bt espressif__esp_hosted)
+  idf_component_get_property(ble_size_lib ${ble_size_component} COMPONENT_LIB)
+  target_compile_options(${ble_size_lib} PRIVATE "-Oz")
+endforeach()
+# The generated protobuf message layouts are unchanged. Only their identical
+# constant field metadata may share storage; leave application objects alone.
+idf_component_get_property(hosted_rpc_lib espressif__esp_hosted COMPONENT_LIB)
+idf_component_get_property(hosted_rpc_dir espressif__esp_hosted COMPONENT_DIR)
+set_property(SOURCE "${hosted_rpc_dir}/common/proto/esp_hosted_rpc.pb-c.c"
+  TARGET_DIRECTORY ${hosted_rpc_lib} APPEND PROPERTY COMPILE_OPTIONS "-fmerge-all-constants")
+endif()
+
+set_property(SOURCE "ble_budget_probe.c" "pet_p4_protocol.c" "pet_p4_component_ext.c"
+  "pet_p4_side_scene.c" "pet_p4_wifi_data_sources.c" "pet_p4_renderer.c"
+  APPEND PROPERTY COMPILE_OPTIONS "-Oz")
+
+if("$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1")
+  # Package validation, metadata and lifecycle controllers share the BLE OTA budget.
+  # Keep VM execution, media decoding, audio and per-pixel drawing flags intact.
+  set_property(SOURCE "pet_p4_program_probe.c" "pet_p4_component_program.c"
+    "pet_p4_component_program_session.c" "pet_p4_program_host.c"
+    "pet_p4_program_store.c" "pet_p4_program_group.c"
+    "pet_p4_resources_device.c" "pet_p4_storage_io_trace.c"
+    "pet_p4_program_timers.c" "pet_p4_event_bus.c" "pet_p4_variable_owners.c"
+    "pet_p4_surface.c" "pet_p4_private_feed.c" "pet_p4_mqtt_feed.c" "pet_p4_live_tls.c"
+    APPEND PROPERTY COMPILE_OPTIONS "-Oz")
+endif()
+
+if("$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1" AND "$ENV{PET_P4_CHIP_FAMILY}" STREQUAL "v1")
+  # V1 previously used O2 globally; preserve its application/DSP profile while
+  # using the SDK size default. V3 already used the size default and retains
+  # its existing per-file flags (including the explicit hot-path O2 above).
+  # These compiler differences never gate Wi-Fi, HID or gesture features.
+  set_property(SOURCE "pet_p4_system_settings.c" "pet_p4_reset_record.c"
+    "pet_p4_boot_trace.c" "pet_p4_flash_phase.c" "pet_p4_native_panic.c"
+    "pet_p4_app_host.c" "pet_p4_selection.c" "pet_p4_control_session.c"
+    "pet_p4_widget_trace.c" "pet_p4_transport_audit.c" "pet_p4_sched_trace_rpc.c"
+    "pet_p4_collection_host.c" "pet_p4_host_collection.c" "pet_p4_program_image.c"
+    "pet_p4_program_registry.c" "pet_p4_program_activation.c"
+    "pet_p4_trusted_services_device.c" "pet_p4_ota.c" "pet_p4_miniapp.c"
+    "pet_p4_trusted_services.c" "pet_p4_collection.c"
+    "pet_p4_conversation.c" "pet_p4_observation.c"
+    "pet_p4_program_persistence.c" "pet_p4_program_session_probe.c"
+    "pet_p4_input.c"
+    APPEND PROPERTY COMPILE_OPTIONS "-Oz")
+  get_target_property(application_sources ${COMPONENT_LIB} SOURCES)
+  foreach(application_source IN LISTS application_sources)
+    get_source_file_property(application_options "${application_source}" COMPILE_OPTIONS)
+    if(application_source MATCHES "\\.(c|cpp)$" AND NOT application_options MATCHES "-O[0-3sz]")
+      set_property(SOURCE "${application_source}" APPEND PROPERTY COMPILE_OPTIONS "-O2")
+    endif()
+  endforeach()
+  foreach(hot_component esp_audio_processor hachi_wamr tinyh264 espressif__esp_codec_dev
+      espressif__esp_h264 espressif__esp_new_jpeg espressif__esp_audio_codec
+      espressif__esp_audio_effects espressif__dl_fft espressif__esp-dsp)
+    if(TARGET __idf_${hot_component})
+      get_target_property(hot_type __idf_${hot_component} TYPE)
+      if(NOT hot_type STREQUAL "INTERFACE_LIBRARY")
+        target_compile_options(__idf_${hot_component} PRIVATE -O2)
+      endif()
+    endif()
+  endforeach()
+endif()
+
+# Measured v1 control-plane size profile; PCM/DSP/render/USB data paths retain flags.
+if("$ENV{PET_P4_SYSTEM_WIFI}" STREQUAL "1" AND "$ENV{PET_P4_CHIP_FAMILY}" STREQUAL "v1")
+  set_property(SOURCE "pet_p4_boot_dma.c" "pet_p4_fs_activity.c"
+    "pet_p4_storage_lane.c" "pet_p4_system_cues.c" "pet_p4_reset_cost.c"
+    APPEND PROPERTY COMPILE_OPTIONS "-Oz")
+  set_property(SOURCE "${pet_volume_generated}/device/es8311/es8311.c"
+    "${pet_volume_generated}/platform/audio_codec_ctrl_i2c.c"
+    "${pet_volume_codec_dir}/device/es7210/es7210.c"
+    TARGET_DIRECTORY ${pet_volume_codec_lib} APPEND PROPERTY COMPILE_OPTIONS "-Oz")
+  set_property(SOURCE "pet_p4_touch.c" "pet_p4_usb_native.c"
+    APPEND PROPERTY COMPILE_DEFINITIONS PET_P4_COLD_INIT_SIZE=1)
+endif()

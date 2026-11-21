@@ -126,6 +126,17 @@ export function buildDryRunResponse({ families, sourceImageName = "uploaded imag
   };
 }
 
+// Kling's image-to-video endpoint uses the image directly as its visual reference.
+export function buildReferencePromptResponse({ families, personality = "" }) {
+  const response = buildDryRunResponse({ families });
+  response.persona.identity_summary = "Preserve the character in the supplied reference image.";
+  const direction = personality.trim();
+  if (direction) {
+    for (const entry of response.prompts) entry.prompt += ` Personality direction: ${direction}.`;
+  }
+  return response;
+}
+
 function buildDryRunPrompt(family, sourceImageName) {
   const stateLabel = family.label || family.family;
   const shared = [

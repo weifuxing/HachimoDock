@@ -14,7 +14,7 @@ def compile_run(tmp_path, source, *extra):
     path = tmp_path / "test.c"
     path.write_text(source)
     binary = tmp_path / "test"
-    subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror",
+    subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
         "-I", str(ROOT / "main"), "-I", str(ROOT / "tests/vendor/cjson"),
         str(path), *map(str, extra), "-o", str(binary)], check=True)
     subprocess.run([str(binary)], check=True)
@@ -23,13 +23,32 @@ PRELUDE = '\n#include <assert.h>\n#include <stdbool.h>\n#include <stdint.h>\n#in
 
 CASES = '\nstatic void seed(unsigned salt){\n for(unsigned i=0;i<640*480;i++)frame[i]=background[i]=(uint16_t)((i*17+salt)%60000+100);\n pet_compact_underlay_forget(&g_main_compact_underlay);font_calls=pixel_calls=released=0;\n}\nstatic void task_overlay(void){\n for(unsigned i=0;i<640*480;i++)overlay[i]=PET_P4_SESSION_CACHE_SENTINEL;\n for(int y=340;y<460;y++)for(int x=42;x<598;x++)overlay[y*640+x]=9;\n scan_session_overlay_cache_runs();copy_session_overlay_cache();\n}\nstatic pet_p4_view_model_t compact(void){return (pet_p4_view_model_t){.show_bubble=true,.compact_bubble=true,.body="idle",.status=PET_P4_VIEW_STATUS_IDLE};}\nint main(void){\n pet_p4_view_model_t view=compact();\n for(unsigned path=0;path<2;path++){\n  seed(5+path);pixel_text=path;measured_text_width=80;\n  main_compact_underlay_prepare(true,true);draw_bubble(NULL,&view,0);\n  assert(frame[430*640+25]!=background[430*640+25]);\n  assert(path?pixel_calls==1:font_calls==1);\n  main_compact_underlay_prepare(false,false);\n  // Old compact must be gone BEFORE task pixels are copied into this frame.\n  assert(memcmp(frame,background,sizeof(frame))==0);\n  task_overlay();assert(frame[430*640+25]==background[430*640+25]);assert(frame[430*640+50]==9);\n  // A pending post-card frame must not snapshot card pixels as clean appearance.\n  main_compact_underlay_prepare(false,true);int old_font=font_calls,old_pixel=pixel_calls;\n  draw_bubble(NULL,&view,1);assert(font_calls==old_font&&pixel_calls==old_pixel);\n }\n seed(10);pixel_text=false;measured_text_width=500;\n main_compact_underlay_prepare(true,true);draw_bubble(NULL,&view,0);\n assert(g_main_compact_underlay.width==422);assert(frame[463*640+441]!=background[463*640+441]);\n main_compact_underlay_prepare(false,true);assert(memcmp(frame,background,sizeof(frame))==0);\n measured_text_width=20;draw_bubble(NULL,&view,1);\n assert(g_main_compact_underlay.width==162);assert(frame[430*640+300]==background[430*640+300]);\n main_compact_underlay_prepare(false,false);assert(memcmp(frame,background,sizeof(frame))==0);\n // Fresh appearance wins over any old underlay: never copy stale pixels over it.\n main_compact_underlay_prepare(true,true);draw_bubble(NULL,&view,2);\n for(unsigned i=0;i<640*480;i++)frame[i]=background[i]=1234;\n main_compact_underlay_prepare(true,false);assert(memcmp(frame,background,sizeof(frame))==0);\n // Explicit page/full-clear invalidation cannot restore previous page pixels.\n main_compact_underlay_prepare(true,true);draw_bubble(NULL,&view,3);\n pet_compact_underlay_forget(&g_main_compact_underlay);memset(frame,0,sizeof(frame));\n main_compact_underlay_prepare(false,false);for(unsigned i=0;i<640*480;i++)assert(frame[i]==0);\n // Reject invalid extents and no-clean-base capture. Normal capture is ROI only.\n assert(!pet_compact_underlay_begin(&g_main_compact_underlay,frame,423,true));\n assert(!pet_compact_underlay_begin(&g_main_compact_underlay,frame,162,false));\n printf("PASS real compact draw(font+host-pixels), transparent overlay copy, pending transition, shadow, shrink, fresh frame and invalidation; pixel storage=%zu bytes\\n",sizeof(g_main_compact_underlay.pixels));\n return 0;\n}\n'
 
+CASES = CASES.replace(' printf("PASS', r"""
+ seed(31);pixel_text=false;measured_text_width=180;
+ main_compact_underlay_prepare(true,true);draw_bubble(NULL,&view,10);
+ assert(font_calls==1&&pixel_calls==0&&released==1);
+ main_compact_underlay_prepare(false,true);pixel_text=true;
+ draw_bubble(NULL,&view,11);assert(font_calls==1&&pixel_calls==1&&released==2);
+ memcpy(overlay,frame,sizeof(frame));
+ main_compact_underlay_prepare(false,true);draw_bubble(NULL,&view,12);
+ assert(!memcmp(overlay,frame,sizeof(frame))&&pixel_calls==2&&released==3);
+ main_compact_underlay_prepare(false,true);pixel_text=false;draw_bubble(NULL,&view,13);
+ assert(font_calls==2&&pixel_calls==2&&released==4);
+ view.show_bubble=false;draw_bubble(NULL,&view,14);assert(released==4);
+ printf("PASS""")
+
 VIEW_CASES = '\n#include <assert.h>\n#include <stdio.h>\n#include <string.h>\n#include "pet_p4_view.h"\nstatic pet_p4_runtime_state_t state;\nint main(void){\n pet_p4_view_model_t view;\n strcpy(state.screen_page,"main");strcpy(state.active_agent,"codex");strcpy(state.current_state,"done");\n pet_p4_build_view_model(&state,&view);assert(!view.show_bubble);assert(view.compact_bubble);assert(view.body[0]==0);\n // Both text and host-pixel renderers consume show_bubble before selecting pixels.\n strcpy(state.current_speech,"real reply");pet_p4_build_view_model(&state,&view);assert(view.show_bubble);assert(!strcmp(view.body,"real reply"));\n state.session_queue_count=1;state.current_speech[0]=0;pet_p4_build_view_model(&state,&view);assert(!view.show_bubble);\n state.session_queue_count=0;strcpy(state.current_state,"working");pet_p4_build_view_model(&state,&view);assert(view.show_bubble);assert(!strcmp(view.body,"工作中"));\n strcpy(state.current_state,"waiting_user");pet_p4_build_view_model(&state,&view);assert(view.show_bubble);\n strcpy(state.current_state,"error");pet_p4_build_view_model(&state,&view);assert(view.show_bubble);\n strcpy(state.current_state,"idle");pet_p4_build_view_model(&state,&view);assert(view.show_bubble);assert(!strcmp(view.body,"休息中"));\n strcpy(state.current_state,"done");strcpy(state.conversation_state,"speaking");strcpy(state.conversation_text,"real spoken reply");\n pet_p4_build_view_model(&state,&view);assert(view.show_bubble);assert(view.realtime_conversation);assert(!strcmp(view.body,"real spoken reply"));\n puts("PASS real view: empty DONE metadata suppressed; real short replies, working/waiting/error/idle and realtime preserved");return 0;\n}\n'
 
 def test_main_compact_roi_handoff_uses_real_renderer_functions(tmp_path):
     source = (ROOT / "main/pet_p4_renderer.c").read_text()
-    names = ["draw_home_white_panel", "main_compact_underlay_prepare", "draw_bubble",
-             "scan_session_overlay_cache_runs", "copy_session_overlay_cache"]
-    compile_run(tmp_path, PRELUDE + "\n" + "\n\n".join(function(source, n) for n in names) + "\n" + CASES)
+    names = ["draw_bubble_large_line", "draw_bubble_card_title", "draw_home_white_panel",
+             "main_compact_underlay_prepare", "draw_bubble", "scan_session_overlay_cache_runs",
+             "copy_session_overlay_cache"]
+    prelude = PRELUDE.replace(
+        'static int text_y_in_box(const char *s,int scale,int y,int h){(void)s;(void)scale;(void)h;return y+4;}',
+        'static const pet_bubble_text_view_t *g_bubble_glyph_view;static unsigned g_bubble_glyph_style;',
+    )
+    compile_run(tmp_path, prelude + "\n" + "\n\n".join(function(source, n) for n in names) + "\n" + CASES)
     main = source.split("esp_err_t pet_p4_renderer_render(", 1)[1]
     assert main.index("main_compact_underlay_prepare(drew_asset, compact_requested)") < main.index("if(g_main_appearance_ready)") < main.index("draw_session_queue(state, now_ms)")
     # The ROI copy/reset stays inside both content trace and the inclusive
@@ -45,3 +64,33 @@ def test_main_compact_roi_handoff_uses_real_renderer_functions(tmp_path):
 
 def test_done_metadata_does_not_hide_real_reply_or_realtime(tmp_path):
     compile_run(tmp_path, VIEW_CASES, ROOT / "main/pet_p4_view.c", ROOT / "main/pet_p4_conversation.c")
+
+
+def test_reply_layout_stays_full_size_across_incremental_text_and_state(tmp_path):
+    code = r'''
+#include <assert.h>
+#include <string.h>
+#include "pet_p4_view.h"
+static pet_p4_runtime_state_t state;
+int main(void) {
+  pet_p4_view_model_t view;
+  strcpy(state.active_agent, "codex");
+  strcpy(state.current_state, "idle");
+  strcpy(state.current_speech, "休息中");
+  pet_p4_build_view_model(&state, &view);
+  assert(view.show_bubble && view.compact_bubble);
+  strcpy(state.current_state, "working");
+  strcpy(state.current_speech, "字重一致 A1");
+  pet_p4_build_view_model(&state, &view);
+  assert(view.show_bubble && !view.compact_bubble);
+  strcat(state.current_speech, "，追加内容超过原先的字节阈值 B2");
+  assert(strlen(state.current_speech) > 36);
+  pet_p4_build_view_model(&state, &view);
+  assert(view.show_bubble && !view.compact_bubble);
+  strcpy(state.current_state, "done");
+  pet_p4_build_view_model(&state, &view);
+  assert(view.show_bubble && !view.compact_bubble);
+  return 0;
+}
+'''
+    compile_run(tmp_path, code, ROOT / "main/pet_p4_view.c", ROOT / "main/pet_p4_conversation.c")

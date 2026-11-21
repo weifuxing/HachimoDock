@@ -20,7 +20,8 @@ def test_instrument_assets_lossless_and_space_saved():
         packed += len(compressed)
     assert original - packed > 250000
     renderer = (ROOT / "main/pet_p4_renderer.c").read_text()
-    assert "tinfl_decompressor *inflater=calloc" in renderer
+    assert "tinfl_decompressor *inflater=heap_caps_calloc" in renderer
     assert "consumed!=size||decoded!=expected" in renderer
     assert 'if(strcmp(page,"app"))instrument_release();' in renderer
-    assert 'if(!app||!app->active||!app->instrument)instrument_release();' in renderer
+    assert 'if (!app || !app->active) {\n    instrument_release();' in renderer
+    assert 'if (!app->instrument) instrument_release();' in renderer

@@ -38,19 +38,21 @@ test("persona close paths share dirty protection and accessible dialog focus", (
 });
 
 test("firmware progress survives expected USB disappearance", () => {
-  assert.match(read("./shell/FirmwareUpdateNavItem.jsx"), /pending \|\| disposition === "update"/);
-  assert.match(read("./shell/FirmwareUpdateNavItem.jsx"), /completed\?\.boardDeviceId === usb.boardDeviceId/);
+  assert.match(read("./shell/FirmwareUpdateNavItem.jsx"), /pending \|\| \(!showRollback && \(disposition === "update" \|\| wifiUpdate \|\| requiresBoardChoice\)\)/);
+  assert.match(read("./shell/FirmwareUpdateNavItem.jsx"), /currentFirmwareCompletion\(usb, completed\)/);
+  assert.match(read("./lib/firmware-version.js"), /completed\?\.boardDeviceId === usb.boardDeviceId && completed.connectionId === usb.connectionId/);
   assert.match(read("./shell/FirmwareUpdateNavItem.jsx"), /validate:"确认版本"/);
 });
 
 test("cancelled native exit never stops background runtimes", () => {
   const native=read("../src-tauri/src/lib.rs");
-  const exit=native.slice(native.indexOf("app.run(|app_handle, event|"),native.indexOf("#[cfg(all(target_os",native.indexOf("app.run(|app_handle, event|")));
+  const start=native.indexOf("app.run(move |app_handle, event|");
+  const exit=native.slice(start,native.indexOf("#[cfg(all(target_os",start));
   assert.match(exit,/RunEvent::ExitRequested[\s\S]*?request_exit\(app_handle\)\{api.prevent_exit\(\);\}/);
   const cancelled=exit.split("match event {")[1].split("RunEvent::Exit =>")[0];
   assert.doesNotMatch(cancelled,/stop_background_runtimes_on_exit|Supervisor>\(\).close\(\)/);
   const committed=exit.split("RunEvent::Exit =>")[1].split("_ =>")[0];
-  assert.match(committed,/^\s*\{\s*app_handle.state::<startup_supervision::Supervisor>\(\).close\(\);\s*stop_background_runtimes_on_exit\(\);\s*\},/);
+  assert.match(committed,/^\s*\{\s*app_handle.state::<startup_supervision::Supervisor>\(\).close\(\);\s*if owns_runtime.load\(Ordering::Acquire\) \{\s*stop_background_runtimes_on_exit\(\);\s*\}\s*\},/);
   assert.match(exit,/if cfg!\(feature = "composer-diagnostic"\) \{ return; \}/);
   assert.equal(exit.match(/stop_background_runtimes_on_exit/g).length,1);
 });

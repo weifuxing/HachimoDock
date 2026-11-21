@@ -1,0 +1,1 @@
+{"id":"wasm-piano","name":"模拟琴键","version":"1.1.0","kind":"tool","description":"点按或滑过琴键，弹奏 C 大调音阶。也可以用摇杆选音并切换高低八度。","author":"PetUI"}

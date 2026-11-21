@@ -18,10 +18,10 @@ def test_common_plan_and_successful_owner_lifecycle(tmp_path):
 #include "pet_p4_logical_retention.h"
 #include <assert.h>
 int main(void){
- for(unsigned bits=0;bits<256;bits++){
-  bool state=bits&1,touch=bits&2,connected=bits&4,assets=bits&8,id=bits&16,mounted=bits&32,seen=bits&64,boot=bits&128;
-  pet_logical_common_plan_t p=pet_logical_common_plan(state,touch,-123,901,connected,assets,id,mounted,seen,boot);
-  unsigned banner=0;if(state){if(connected){if(!assets)banner=1;}else if(id)banner=2;else if(mounted||seen)banner=3;else banner=4;}
+ for(unsigned bits=0;bits<32;bits++){
+  bool state=bits&1,touch=bits&2,usb=bits&4,wifi=bits&8,boot=bits&16;
+  pet_logical_common_plan_t p=pet_logical_common_plan(state,touch,-123,901,pet_connection_banner(usb,wifi),boot);
+  unsigned banner=state?(usb?PET_CONNECTION_USB:wifi?PET_CONNECTION_WIFI:PET_CONNECTION_OFFLINE):PET_CONNECTION_NONE;
   assert(p.banner==banner&&p.touch==(state&&touch)&&p.boot==boot);
   assert(p.touch?(p.touch_x==-123&&p.touch_y==901):(!p.touch_x&&!p.touch_y));
   assert(pet_logical_common_empty(p)==(!p.banner&&!p.touch&&!p.boot));
@@ -33,7 +33,7 @@ int main(void){
    assert(!pet_logical_retention_begin(&s,p,bad!=0,bad!=1,bad!=2));
   }
   pet_logical_retention_finish(&s,p,false);assert(!pet_logical_retention_begin(&s,p,true,true,true));
-  pet_logical_common_plan_t q=p;q.banner=(p.banner+1)%5;
+  pet_logical_common_plan_t q=p;q.banner=(p.banner+1)%4;
   pet_logical_retention_finish(&s,p,true);assert(!pet_logical_retention_begin(&s,q,true,true,true));
   q=p;q.boot=!q.boot;assert(!pet_logical_common_equal(p,q));
   q=p;q.touch=!q.touch;assert(!pet_logical_common_equal(p,q));
@@ -90,7 +90,7 @@ static void common(pet_logical_common_plan_t p){
 static void compare(pet_p4_miniapp_view_t *app,unsigned frame){
  unsigned group=frame/8;
  g_app_common_plan=pet_logical_common_plan(true,group%3==0,40+group%500,60+group%350,
-  group%5==0,group%2==0,group%5==1,group%5==2,group%5==3,group%7==0);
+  pet_connection_banner(group%5==0,group%2==0),group%7==0);
  for(unsigned p=0;p<640*480;p++)pixels[p]=(uint16_t)(p*977U+frame*131U);
  labels=0;assert(reference_render(frame*37,app));common(g_app_common_plan);memcpy(expected,pixels,sizeof(pixels));
  if(frame%41==40){ /* same actual resource invalidation for BOTH budgets */
@@ -144,6 +144,7 @@ def test_actual_common_overlay_commands_match_old_path_and_use_captured_state(tm
 #define PET_P4_UI_WIDTH 640
 #define PET_P4_UI_HEIGHT 480
 #define P4_BOOT_DIAGNOSTIC_MS 10000
+static bool g_rendering_boot;
 typedef struct {int local_touch_x,local_touch_y;unsigned asset_family_count;char desktop_device_id[8];bool native_usb_mounted,touch,connected;unsigned long long host_last_seen_ms;}pet_p4_runtime_state_t;
 static bool pet_p4_state_touch_feedback_active(const pet_p4_runtime_state_t*s,unsigned long long t){(void)t;return s&&s->touch;}
 static bool pet_p4_state_host_connected(const pet_p4_runtime_state_t*s,unsigned long long t){(void)t;return s&&s->connected;}
@@ -160,7 +161,7 @@ static void draw_text_line_vcenter(const char*t,int x,int y,int h,int w,uint16_t
  add(4,x,y,w,h,(int)((hash&0xffff)^scale^(last<<20)),c);
 }
 '''
-    for name in ('draw_touch_feedback_pixels','draw_touch_feedback','draw_connection_banner_pixels','draw_connection_banner','draw_common_connection','draw_boot_diagnostic'):
+    for name in ('draw_touch_feedback_pixels','draw_touch_feedback','draw_connection_banner_pixels','draw_common_connection','draw_boot_diagnostic'):
         code+=function(text,name)+'\n'
     code+=r'''
 int main(void){
@@ -170,10 +171,12 @@ int main(void){
   pet_p4_runtime_state_t *state=present?&s:NULL;
   pet_logical_common_plan_t p=pet_logical_common_plan(state!=NULL,
    pet_p4_state_touch_feedback_active(state,now),state?state->local_touch_x:0,state?state->local_touch_y:0,
-   state&&pet_p4_state_host_connected(state,now),state&&state->asset_family_count>0,state&&state->desktop_device_id[0],
-   state&&state->native_usb_mounted,state&&state->host_last_seen_ms>0,now<=P4_BOOT_DIAGNOSTIC_MS);
+   pet_connection_banner(pet_p4_state_host_connected(state,now),state&&state->host_last_seen_ms>0),
+   now<=P4_BOOT_DIAGNOSTIC_MS);
   memset(commands,0,sizeof(commands));count=0;
-  draw_touch_feedback(state,now);draw_connection_banner(state,now);draw_boot_diagnostic(now);
+  draw_touch_feedback(state,now);
+  if(state)draw_common_connection(pet_connection_banner(state->connected,state->host_last_seen_ms>0));
+  draw_boot_diagnostic(now);
   unsigned wanted=count;memcpy(expected,commands,sizeof(commands));
   /* Mutating the ambient state cannot change the already captured plan. */
   memset(&s,0,sizeof(s));s.connected=true;s.asset_family_count=77;

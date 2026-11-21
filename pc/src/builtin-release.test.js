@@ -18,11 +18,14 @@ function fixture(run) {
   write(script,fs.readFileSync(new URL('../scripts/verify-builtin-release.mjs',import.meta.url),'utf8'));
   write(path.join(source,'pc/package.json'),{version:'0.0.0'});
   write(path.join(source,'firmware/factory-config.json'),{components:{ids}});
-  for(const id of ids)for(const prefix of [path.join(source,'pc'),resources])
+  for(const id of ids)for(const prefix of [path.join(source,'pc'),resources]){
     write(path.join(prefix,'builtin-clawpkgs',id,'component.json'),{id,version:'1.0.0'});
+    write(path.join(prefix,'builtin-clawpkgs',id,'runtime/widget.json'),{});
+    write(path.join(prefix,'builtin-clawpkgs',id,'assets/.keep'),'');
+  }
   for(const prefix of [path.join(source,'pc'),resources])
     write(path.join(prefix,'skills/petui/SKILL.md'),'Synthetic fixture only.');
-  for(const name of ['firmware.bin','firmware-v3.bin'])for(const prefix of [path.join(source,'pc/src-tauri'),resources])
+  for(const name of ['firmware.bin','firmware-v3.bin','firmware-pico-v1.bin','firmware-pico-v3.bin'])for(const prefix of [path.join(source,'pc/src-tauri'),resources])
     write(path.join(prefix,'firmware/esp32-p4',name),'0.7.103-p4-test');
   const verify=()=>spawnSync(process.execPath,[script,'--resources',resources,'--output',path.join(root,'report.json')],{encoding:'utf8'});
   try {run({root,resources,write,verify});} finally {fs.rmSync(root,{recursive:true,force:true});}
@@ -43,4 +46,18 @@ test('release verifier rejects loose files in the component root',()=>fixture(({
 test('release verifier rejects a missing packaged component',()=>fixture(({resources,verify})=>{
   fs.rmSync(path.join(resources,'builtin-clawpkgs','answer-book'),{recursive:true});
   const result=verify();assert.notEqual(result.status,0);assert.match(result.stderr,/bundled component list differs/);
+}));
+test('release verifier names the component whose assets directory is empty or missing',()=>fixture(({root,resources,verify})=>{
+  const sourceAssets=path.join(root,'source','pc','builtin-clawpkgs','answer-book','assets');
+  const packagedAssets=path.join(resources,'builtin-clawpkgs','answer-book','assets');
+  fs.unlinkSync(path.join(sourceAssets,'.keep'));
+  fs.unlinkSync(path.join(packagedAssets,'.keep'));
+  let result=verify();
+  assert.notEqual(result.status,0);
+  assert.match(result.stderr,/empty source component directory: answer-book\/assets\//);
+  fs.writeFileSync(path.join(sourceAssets,'.keep'),'');
+  fs.rmdirSync(packagedAssets);
+  result=verify();
+  assert.notEqual(result.status,0);
+  assert.match(result.stderr,/missing installer component directory: answer-book\/assets\//);
 }));

@@ -99,8 +99,10 @@ test("appearance USB sync can be cancelled and both device runtimes discard stag
   // Follow the actual dispatcher and its success-only ownership retirement;
   // equivalent C spellings alone must not make this guarantee disappear.
   assert.match(p4ProtocolSource, /strncmp\(topic, "asset\/", 6\) == 0[\s\S]*?handle_asset_topic\(state, topic, payload, send_line, ctx\)/);
+  const assetHandler = p4ProtocolSource.search(/static (?:__attribute__\(\(optimize\("Os"\)\)\) )?void handle_asset_topic\(/);
+  assert.ok(assetHandler >= 0, "expected asset dispatcher");
   const abortTopic = p4ProtocolSource.slice(
-    p4ProtocolSource.indexOf("static void handle_asset_topic("),
+    assetHandler,
     p4ProtocolSource.indexOf("void pet_p4_asset_transfer_cleanup_worker("),
   );
   assert.match(abortTopic, /bool abort=!strcmp\(topic,"asset\/abort"\)/);
@@ -108,7 +110,7 @@ test("appearance USB sync can be cancelled and both device runtimes discard stag
   assert.match(abortTopic, /if\(result==PET_APPEARANCE_COMMIT_OK\)\{\s*if\(abort\)serial_retire_locked\(state\)/);
   const retire = p4ProtocolSource.slice(
     p4ProtocolSource.indexOf("static void serial_retire_locked("),
-    p4ProtocolSource.indexOf("static void handle_asset_topic("),
+    assetHandler,
   );
   assert.match(retire, /pet_p4_appearance_end\([\s\S]*?PET_APPEARANCE_SERIAL/);
   assert.match(retire, /state->asset_transfer_active\s*=\s*false/);

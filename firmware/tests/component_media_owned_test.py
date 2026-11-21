@@ -55,6 +55,7 @@ static inline void vSemaphoreDelete(SemaphoreHandle_t p){pthread_mutex_destroy(p
 #include <pthread.h>
 #include <assert.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <stdatomic.h>
 #include <sched.h>
 static atomic_bool pause_io;
@@ -64,9 +65,12 @@ static int io_phase;
 static void pause_prepare_io(void);
 static FILE *mapped_fopen(const char *p,const char *mode){if(atomic_load(&pause_io))pause_prepare_io();if(!strncmp(p,"/spiffs/",8))p+=8;return fopen(p,mode);}
 static int mapped_stat(const char *p,struct stat *s){if(!strncmp(p,"/spiffs/",8))p+=8;return stat(p,s);}
+static DIR *mapped_opendir(const char *p){return opendir(!strcmp(p,"/spiffs")?".":p);}
+#define opendir mapped_opendir
 #define fopen mapped_fopen
 #define stat mapped_stat
 #include "pet_p4_component_media.c"
+#undef opendir
 #undef fopen
 #undef stat
 static pthread_mutex_t gate=PTHREAD_MUTEX_INITIALIZER;
@@ -134,8 +138,11 @@ int main(void){
     start = renderer_source.index('#if PET_P4_CLIP\n')
     clip_adapter = 'static uint32_t g_ext_snapshot_generation;\nvoid renderer_ext_media_snapshot(uint32_t g){g_ext_snapshot_generation=g;}\n' + renderer_source[start:]
     stubs = r'''
+#undef PET_P4_SEQUENCE
 #define PET_P4_SEQUENCE 1
+#undef PET_P4_SAMPLES
 #define PET_P4_SAMPLES 1
+#undef PET_P4_CLIP
 #define PET_P4_CLIP 1
 #define EXT_RAM_BSS_ATTR
 static atomic_bool g_capture_requested,g_conversation;
@@ -435,6 +442,9 @@ static inline int xSemaphoreTake(SemaphoreHandle_t p,unsigned t){return (t?pthre
 static inline int xSemaphoreGive(SemaphoreHandle_t p){return pthread_mutex_unlock(p)==0;}
 static inline void vSemaphoreDelete(SemaphoreHandle_t p){pthread_mutex_destroy(p);free(p);}
 ''')
+    (tmp_path/'esp_timer.h').write_text('#include <stdint.h>\nint64_t esp_timer_get_time(void);\n')
+    (tmp_path/'esp_spiffs.h').write_text('#include <stddef.h>\n#define ESP_OK 0\nint esp_spiffs_info(const char *, size_t *, size_t *);\n')
+    (tmp_path/'freertos/task.h').write_text('static inline void vTaskDelay(unsigned ticks){(void)ticks;}\n')
     source = tmp_path/'admission.c'
     source.write_text(r'''
 #include <assert.h>
@@ -449,6 +459,14 @@ static FILE *count_open(const char *p,const char *m){opens++;return fopen(p,m);}
 #define ESP_PLATFORM 1
 #include "pet_p4_component_media.c"
 #undef fopen
+static int64_t scan_time;
+static size_t simulated_used;
+static bool storage_idle = true;
+int64_t esp_timer_get_time(void){return scan_time;}
+int esp_spiffs_info(const char *label,size_t *total,size_t *used){
+ assert(!strcmp(label,"storage")&&!total&&used);*used=simulated_used;return ESP_OK;
+}
+bool pet_fs_activity_idle_epoch(uint64_t *epoch){*epoch=8;return storage_idle;}
 pet_resource_result_t pet_resources_device_owner_open(uint32_t m,pet_resource_owner_t *o){return pet_resources_owner_open(&broker,m,o);}
 pet_resource_result_t pet_resources_device_acquire(pet_resource_owner_t o,pet_resource_kind_t k,uint32_t n,pet_resource_lease_t *l){return pet_resources_try_acquire(&broker,o,k,n,l);}
 bool pet_resources_device_current(pet_resource_lease_t l){return pet_resources_current(&broker,l);}
@@ -460,6 +478,14 @@ static int held;
 static void *writer(void *arg){(void)arg;lock();pthread_mutex_lock(&gate);held=1;pthread_cond_broadcast(&ready);
  while(held==1)pthread_cond_wait(&ready,&gate);pthread_mutex_unlock(&gate);unlock();return NULL;}
 int main(void){
+ g_stage.used=100;
+ assert(disk_budget_ok()); // allocation counter proves the budget without a directory scan
+ simulated_used=PET_CMEDIA_DEVICE_BUDGET_BYTES;
+ storage_idle=false;assert(!disk_budget_ok());storage_idle=true;
+ assert(budget_scan_current(8,CMEDIA_BUDGET_SCAN_US,0));
+ scan_time=CMEDIA_BUDGET_SCAN_US;
+ assert(!budget_scan_current(8,CMEDIA_BUDGET_SCAN_US,0));
+ g_stage.used=0;
  lock();g_generation=g_active.generation=1;g_active.big_count=1;
  g_active.big_table[0]=calloc(1,28);assert(g_active.big_table[0]);
  g_active.big_table[0][14]=1;g_active.big_table[0][20]=28;g_active.big_table[0][24]=4;

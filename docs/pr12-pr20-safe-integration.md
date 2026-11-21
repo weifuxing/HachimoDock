@@ -1,52 +1,19 @@
-# Joint PR12 / PR20 integration
+# 会话与审批的集成回归
 
-Baseline: fetched `origin/main` at
-`4b24954aba704ee596747e0da09111fbc1d863e6`.
-The integration includes all changes on that main revision; the initial
-`b72fce800594947d57310c3dd3b260b8fffa28a7` baseline is its ancestor.
-Retained merge ancestry:
+会话卡片保留自己的所有者。文本变更推进气泡版本，移除卡片独立撤销该版本的显示资源。审批文本使用本地字体，不能借用普通气泡的像素快照。协议细节见[固件协议](../firmware/protocol.md)与[文字像素传输](pr12-safe-integration.md)。
 
-- PR12: `56d507fe8ba1becbb12363bb0e94ba64a75ab1ce`.
-- PR20: `7a790df5b2185d7fd8f501e82a68e4be5ffbbf0d`.
+维护会话或审批代码时，保留以下边界：
 
-The integration preserves both branches' native IPC registration/permissions,
-authenticated DSH ownership and bounded bubble authority snapshots. Session
-cards keep their session owner while text changes advance the bubble version;
-omitted owners retire independently of DSH approval/voice leases. Approval text
-uses local font rendering and cannot borrow a normal bubble's host pixel pin.
-The original 21,207-glyph fallback, 199-glyph native32 font and font notices
-remain as supplied by the reviewed PR12 branch.
+1. 审批本地文本向通用正文绘制入口传入空像素引用。
+2. 停止提示音只在会话快照通过版本与保留期校验后触发，同一版本去重。
+3. `approval/cancel` 使用协议的统一消息清理路径，包含过期请求。
 
-Automatic merging required three code corrections:
+[协议测试](../firmware/tests/protocol_contract_test.py)和[气泡渲染测试](../firmware/tests/p4_title_masks_test.py)覆盖源代码入口与文本所有权。运行桌面和 Bridge 回归时，同时核对 DSH 的审批所有权、过期事件和重连行为：
 
-1. Pass the new optional pixel pin parameter as `NULL` for local approval text.
-   Otherwise the combined renderer does not compile.
-2. Emit the stopped-session cue only after a card passes revision/retention
-   admission. Remove the second unconditional event and retain revision-based
-   deduplication, preventing duplicate or discarded-history sounds.
-3. Let `approval/cancel` reach the common parsed-message cleanup. Its early
-   return leaked the JSON allocation even for stale request IDs.
+```sh
+cd pc
+npm test
+npm run test:bridge
+```
 
-Focused host tests compile the actual approval draw functions against the actual
-body-helper prototype, the actual session snapshot handler against real cJSON,
-and the actual cancellation branch with allocation accounting. They cover local
-text isolation, current/stale/expired/replayed stop transitions and stale/current
-cancellation cleanup. Existing cue fixtures now include `session_terminated`
-and recognize the production conditional allow/deny call.
-
-Focused integration verification on 2026-11-03: 148 selected Node tests and
-22 focused host tests passed. After merging the fetched main revision, 94
-related avatar-model/recovery, DSH, session and bubble Node tests passed again.
-Checks used a synthetic HOME with external network, real credentials and
-serial/IOKit denied by the OS sandbox. Rust parsing and whitespace checks passed.
-The combined native type check passed with `cargo check --release --offline
---locked --lib --jobs 2`, reusing existing dependencies and setting
-`TAURI_CONFIG='{"bundle":{"resources":[]}}'` to omit bundle resources for this
-code-only check. No dependency installation, linking, resource copying,
-downloads or full regression was performed.
-
-Pending: actual dual-target firmware build/OTA
-headroom/static RAM and stack accounting, device/audio acceptance, actual
-Windows ACL execution and installed DSH API/runtime validation. Earlier separate
-branch checks do not establish these joint results. No HIL or release-readiness
-claim follows from the focused host checks.
+主机测试完成后，分别验证设备显示、音效、OTA 余量，以及 Windows 上已安装的 Bridge 与 ACL 行为。

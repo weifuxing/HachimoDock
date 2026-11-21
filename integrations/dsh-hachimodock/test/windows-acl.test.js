@@ -42,7 +42,7 @@ test('PowerShell invocation is fixed, bounded, NoProfile/NonInteractive; only pa
     assert.deepEqual(args.slice(0, -1), ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand'])
     const script = Buffer.from(args.at(-1), 'base64').toString('utf16le')
     assert.equal(script, fs.readFileSync(path.join(__dirname, '../windows-acl.ps1'), 'utf8'))
-    assert.ok(script.includes('GetCurrent().User')); assert.ok(script.includes('Get-Acl -LiteralPath')); assert.ok(script.includes('SetAccessRuleProtection($true, $false)'))
+    assert.ok(script.includes('GetCurrent().User')); assert.ok(script.includes('GetAccessControl($name, $sections)')); assert.ok(script.includes('SetAccessRuleProtection($true, $false)'))
     assert.equal(opts.timeout, 5000); assert.equal(opts.maxBuffer, 32768); assert.equal(opts.env.API_TOKEN, undefined)
     assert.equal(opts.env.HACHIMODOCK_DSH_ACL_PATH, file); assert.equal(args.join(' ').includes(file), false)
     assert.equal(script.includes('ReadAllText'), false); assert.equal(script.includes('Get-Content'), false)
@@ -112,6 +112,28 @@ test('Windows creation receives owner/protected ACL at creation and rejects fore
   const bad = clone(good); bad.item.owner = 'S-1-5-32-544'
   assert.throws(() => validateAclReceipt(bad, 'create-file', file))
 })
+test('existing credential entries persist only access rules without an audit privilege', () => {
+  const script = fs.readFileSync(path.join(__dirname, '../windows-acl.ps1'), 'utf8')
+  assert.doesNotMatch(script, /\bSet-Acl\s+|AccessControlSections\]::(?:Audit|All)\b/i)
+  assert.match(script, /if \(\$creating\) \{ \$acl\.SetOwner\(\$current\)/)
+  assert.ok(script.includes('$acl = New-PrivateAcl $directory $false'))
+  for (const kind of ['Directory', 'File']) {
+    assert.ok(script.includes(`[IO.${kind}]::SetAccessControl($name, $acl)`))
+  }
+})
+test('Windows credential directories and files survive creation and re-protection', { skip: process.platform !== 'win32' }, t => {
+  const parent = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'dsh-acl-test-'))
+  t.after(() => fs.rmSync(parent, { recursive: true, force: true }))
+  const dir = path.join(parent, 'private')
+  const target = path.join(dir, 'fixture')
+  windowsAcl('prepare-directory', dir)
+  windowsAcl('create-file', target)
+  fs.writeFileSync(target, 'fixture')
+  windowsAcl('prepare-directory', dir)
+  windowsAcl('protect-file', target)
+  windowsAcl('verify-file', target)
+  assert.equal(fs.readFileSync(target, 'utf8'), 'fixture')
+})
 test('actual server secures auth directory before generating epoch/tokens, including failed prepare', async () => {
   const source = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8'), log = []
   const sandbox = { module: { exports: {} }, require(name) { if (name === './capability') return { equal: () => false, secret: () => { log.push('mint'); return 'secret' }, prepareDirectory() { log.push('prepare'); throw Error('ACL denied') }, writeDescriptor() { log.push('write') } }; return require(name) } }
@@ -124,4 +146,28 @@ test('distributed ACL implementations and native embedded reference have one byt
   for (const name of ['windows-acl.js', 'windows-acl.ps1']) assert.deepEqual(fs.readFileSync(path.join(bus, name)), fs.readFileSync(path.join(__dirname, '..', name)))
   const rust = fs.readFileSync(path.join(base, 'pc/src-tauri/src/dsh_windows_acl.rs'), 'utf8')
   assert.ok(rust.includes('include_str!("../../../integrations/dsh-hachimodock/windows-acl.ps1")'))
+})
+test('public profile metadata accepts trusted owners and private credentials still require the user owner', () => {
+  const { createHash } = require('node:crypto')
+  const { validateProfileMetadataReceipt } = require('../profile-metadata-windows-acl')
+  const nonce = '0'.repeat(32)
+  const target = 'C:\\Users\\fixture'
+  const item = { directory: true, reparse: false, ownerSid: 'S-1-5-32-544', daclPresent: true, protected: false, aceCount: 0, aces: [] }
+  function validate(operation, metadata) {
+    const binding = createHash('sha256').update([operation, target, nonce].join('\0')).digest('hex')
+    validateProfileMetadataReceipt({ schema: 'dsh-profile-metadata-acl-v1', operation, binding,
+      currentSid: SID, ancestorCount: 3, ancestorsNoReparse: true, item: metadata }, operation, target, nonce)
+  }
+  for (const ownerSid of [SID, SYSTEM, 'S-1-5-32-544']) {
+    validate('verify-directory', { ...item, ownerSid })
+    validate('verify-file', { ...item, directory: false, ownerSid })
+  }
+  assert.throws(() => validate('verify-directory', { ...item, ownerSid: 'S-1-1-0' }))
+  assert.throws(() => validate('verify-directory', { ...item, reparse: true }))
+  assert.throws(() => validate('verify-directory', { ...item, aceCount: 1, aces: [{ sid: 'S-1-1-0', type: 0, mask: 2, flags: 0 }] }))
+  for (const owner of [SYSTEM, 'S-1-5-32-544']) {
+    const r = receipt()
+    r.item.owner = owner
+    assert.throws(() => validateAclReceipt(r, 'verify-file', file))
+  }
 })

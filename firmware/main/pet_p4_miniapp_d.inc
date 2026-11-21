@@ -46,6 +46,11 @@ static void miniapp_d_drain_locked(bool visible){
 #if PET_P4_DATA_ROWS
   if(g_runtime.data_refresh_pending){
     g_runtime.data_refresh_pending=false;
+#if PET_P4_SYSTEM_WIFI
+    if (visible && g_runtime.active && g_runtime.wifi_feed.source[0]) {
+      pet_wifi_data_refresh(g_runtime.wifi_feed.source);
+    } else
+#endif
     if(visible&&g_runtime.active){
       cJSON *p=cJSON_CreateObject();if(p){cJSON_AddStringToObject(p,"componentId",g_runtime.widget_id);cJSON_AddStringToObject(p,"source",g_runtime.data_source);pet_app_host_emit("widget/data/refresh",p);cJSON_Delete(p);}
     }

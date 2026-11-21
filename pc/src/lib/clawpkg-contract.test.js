@@ -26,7 +26,45 @@ import {
   P4_WIDGET_MAX_EFFECTS,
   P4_WIDGET_JSON_MAX_BYTES,
   validateClawpkgManifest,
+  validateWidgetData,
 } from "./clawpkg-contract.js";
+
+test("WiFi feed mapping accepts bounded paths only for public HTTPS feeds", () => {
+  const responseMap = {rows: "$", id: "record.id", label: "Name", value: "x".repeat(63)};
+  const data = {source: "wifi.feed", page_var: "page", url: "https://feeds.example.org/today.json"};
+  const validate = (declaration) => {
+    const errors = [];
+    validateWidgetData({
+      engine: "p4-bounded-runtime-v4", vars: {page: {type: "int"}}, data: declaration,
+    }, errors);
+    return errors;
+  };
+  assert.deepEqual(validate(data), []);
+  assert.deepEqual(validate({...data, response_map: responseMap}), []);
+  for (const id of ["", "a..b", "a.b.c.d.e", "a[0]", "a\n", "a".repeat(64), "$"]) {
+    assert.ok(validate({...data, response_map: {...responseMap, id}}).length, id);
+  }
+  assert.ok(validate({...data, response_map: null}).length);
+  assert.ok(validate({...data, response_map: {...responseMap, ttlMs: "ttl"}}).length);
+  assert.ok(validate({...data, url: "https://127.0.0.1/", response_map: responseMap}).length);
+  assert.ok(validate({source: "stocks.watchlist", page_var: "page", response_map: responseMap}).length);
+});
+
+test("WiFi API exposes only fixed, credential-free HTTP options", () => {
+  const data = {source: "wifi.feed", page_var: "page", url: "https://feeds.example.org/today.json"};
+  const valid = declaration => {
+    const errors = [];
+    validateWidgetData({engine: "p4-bounded-runtime-v4", vars: {page: {type: "int"}}, data: declaration}, errors);
+    return errors.length === 0;
+  };
+  const http = {accept: "application/geo+json", revalidate: true, cache: "last-good"};
+  assert.ok(valid({...data, http}));
+  for (const invalid of [null, {}, {method: "POST"}, {authorization: "key"}, {revalidate: 1},
+    {cache: true}, {accept: "application/json\r\nAuthorization: key"}]) {
+    assert.ok(!valid({...data, http: invalid}));
+  }
+  assert.ok(!valid({source: "news.hn", page_var: "page", http}));
+});
 
 const profileManifest=runtime=>({
   'component.json':{id:'profile-check',name:'Profile',version:'1',kind:'tool'},

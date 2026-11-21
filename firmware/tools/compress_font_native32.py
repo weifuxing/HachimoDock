@@ -18,8 +18,8 @@ def source_data():
  if len(raw)!=30579 or hashlib.sha256(raw).hexdigest()!=BITMAP_SHA:raise ValueError('Changed 32px bitmap')
  return source,raw
 
-def outputs():
- source,raw=source_data();packed=zlib.compress(raw,9)
+def outputs(packed):
+ _,raw=source_data()
  inc='/* Identity zlib, no changed pixels or glyph order. '+PROVENANCE+' */\n'+''.join('  '+','.join(f'0x{v:02x}' for v in packed[i:i+16])+',\n' for i in range(0,len(packed),16))
  header=('/* Original 199-glyph MiSans Medium 32px/2bpp data, lossless. */\n'
   '#pragma once\n#include <stdint.h>\n'
@@ -32,8 +32,17 @@ def outputs():
  return {'assets/fonts/pet_cn_32.deflate':packed,'main/pet_p4_font_native32_packed.inc':inc.encode(),'main/pet_p4_font_native32_size.h':header.encode()}
 
 def main():
- p=argparse.ArgumentParser(description=__doc__);p.add_argument('--check',action='store_true');p.add_argument('--output-root',type=Path);args=p.parse_args()
- expected=outputs();root=args.output_root or ROOT
+ p=argparse.ArgumentParser(description=__doc__);p.add_argument('--check',action='store_true');p.add_argument('--output-root',type=Path)
+ p.add_argument('--zopfli',action='store_true',help='use a denser encoder when regenerating');args=p.parse_args()
+ root=args.output_root or ROOT
+ if args.check:
+  packed=(root/'assets/fonts/pet_cn_32.deflate').read_bytes()
+ elif args.zopfli:
+  from zopfli.zlib import compress
+  packed=compress(source_data()[1],numiterations=15)
+ else:
+  packed=zlib.compress(source_data()[1],9)
+ expected=outputs(packed)
  if not args.check and args.output_root is None:p.error('Explicit --output-root required to generate; use --check for read-only validation')
  for name,data in expected.items():
   target=root/name

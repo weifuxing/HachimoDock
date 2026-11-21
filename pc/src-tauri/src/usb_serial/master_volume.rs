@@ -267,7 +267,10 @@ impl UsbSerialManager {
         let _bulk = self
             .asset_transfer_guard
             .try_lock()
-            .map_err(|_| "device transfer busy; volume not submitted")?;
+            .map_err(|error| match error {
+                std::sync::TryLockError::WouldBlock => "device transfer busy; volume not submitted",
+                std::sync::TryLockError::Poisoned(_) => "device transfer lock unavailable",
+            })?;
         let (generation, cancel) = {
             let (_lease, slot) = self.inbound_owner.connection(&self.connection)?;
             let connection = slot.as_ref().ok_or("USB is not connected")?;

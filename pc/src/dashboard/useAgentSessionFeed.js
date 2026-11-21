@@ -22,6 +22,12 @@ export const P4_SESSION_EVENT_POLL_MS = 750;
 export const P4_SESSION_SNAPSHOT_POLL_MS = 5000;
 export const P4_SESSION_EVENT_DISPATCH_GAP_MS = 25;
 
+let lastFeedContact = { agentId: "", at: -Infinity };
+
+export function agentSessionFeedFresh(agentId) {
+  return lastFeedContact.agentId === agentId && performance.now() - lastFeedContact.at < 9000;
+}
+
 const EMPTY_SESSIONS = Object.freeze([]);
 
 export const AGENT_SESSION_FEED_INITIAL_STATE = Object.freeze({
@@ -187,6 +193,7 @@ export function useAgentSessionFeed({ agentId, displayEnabled, dismissedSessions
           ctl.signal,
         );
         if (cancelled) return;
+        lastFeedContact = { agentId, at: performance.now() };
         const streamChanged = Boolean(
           eventStreamId && result.streamId && eventStreamId !== result.streamId,
         );
@@ -221,6 +228,7 @@ export function useAgentSessionFeed({ agentId, displayEnabled, dismissedSessions
       try {
         const nextSessions = await fetchAgentSessions(agentId, ctl.signal);
         if (!cancelled) {
+          lastFeedContact = { agentId, at: performance.now() };
           dispatch({
             type: "replace_snapshot",
             agentId,

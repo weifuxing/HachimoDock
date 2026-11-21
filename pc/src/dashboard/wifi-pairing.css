@@ -1,0 +1,77 @@
+.wifi-pairing {
+  display: grid;
+  gap: 18px;
+}
+
+.wifi-pairing h3,
+.wifi-pairing p {
+  margin: 0;
+}
+
+.wifi-pairing h3 {
+  font-size: .875rem;
+  margin-bottom: 4px;
+}
+
+.wifi-pairing__current,
+.wifi-pairing__section-head,
+.wifi-pairing__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+}
+
+.wifi-pairing__current,
+.wifi-pairing__section-head {
+  justify-content: space-between;
+}
+
+.wifi-pairing__current,
+.wifi-pairing__device,
+.wifi-pairing details {
+  padding: 10px 12px;
+  border: 1px solid var(--color-border, #e3e5e8);
+  border-radius: 8px;
+}
+
+.wifi-pairing__current p {
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+.wifi-pairing__list {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.wifi-pairing__device {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.wifi-pairing__device small {
+  display: block;
+  color: var(--color-text-muted, #626977);
+}
+
+.wifi-pairing__device strong {
+  overflow-wrap: anywhere;
+}
+
+.wifi-pairing__device:has(input:checked) {
+  border-color: #ff7415;
+}
+
+.wifi-pairing summary,
+.wifi-pairing__device:has(input:enabled) {
+  cursor: pointer;
+}
+
+.wifi-pairing details[open] summary,
+.wifi-pairing__actions {
+  margin-bottom: 8px;
+}

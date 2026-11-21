@@ -1,0 +1,8 @@
+{
+  "id": "today-meal-menu",
+  "name": "今天吃点什么",
+  "version": "1.0.0",
+  "kind": "tool",
+  "description": "选今天想做的自己，马上看到早、中、晚餐推荐。四种身份各有六套，随时换一桌。",
+  "author": "Yici"
+}

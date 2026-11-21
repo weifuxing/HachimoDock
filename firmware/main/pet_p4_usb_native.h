@@ -18,6 +18,9 @@ typedef bool (*pet_p4_native_protocol_enqueue_fn)(
 );
 
 bool pet_p4_native_usb_route_current(void *route);
+/* Only physical input bindings can enqueue these preset taps. */
+bool pet_p4_native_voice_key_profile_valid(const char *profile);
+bool pet_p4_native_voice_key_tap(const char *profile);
 esp_err_t pet_p4_native_usb_init(
   pet_p4_runtime_state_t *state,
   SemaphoreHandle_t state_mutex,

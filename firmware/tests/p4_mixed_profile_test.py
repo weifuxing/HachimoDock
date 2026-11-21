@@ -74,7 +74,7 @@ int main(void){
  assert(pet_resources_limit(PET_RESOURCE_PROGRAM).leases==2);
  assert(pet_resources_limit(PET_RESOURCE_PROGRAM).units==4096);
  assert(!pet_resources_limit(PET_RESOURCE_PERIPHERAL).leases);
- assert(PET_P4_MINIAPP_CATALOG_MAX==33&&PET_P4_UART_PACED_BYTES==256);
+ assert(PET_P4_MINIAPP_VISIBLE_MAX==41&&PET_P4_MINIAPP_CATALOG_MAX==43&&PET_P4_UART_PACED_BYTES==256);
  assert(PET_P4_STORAGE_CACHE_SCOPE_ENABLED&&PET_P4_SERIAL_CONTROL_INTEGRITY);
  return 0;
 }

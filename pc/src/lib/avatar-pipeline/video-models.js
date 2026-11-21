@@ -1,5 +1,6 @@
 /** Advisory Ark catalog with version/date-ranked Fast defaults. Listing is not proof of inference permission; keep endpoint-ID entry available.
  * No management credentials, billable probes or persisted catalog credentials. */
+import { requireKlingVideoModel } from "./kling-models.js";
 import { pipelineFetch } from "./http.js";
 import { DEFAULT_VOLCANO_BASE_URL, isVolcanoModelRejected } from "./providers/volcano.js";
 
@@ -70,6 +71,10 @@ export function normalizeVideoModels(rows) {
 }
 
 export async function requireAvailableVideoModel(config, signal) {
+  if (config.provider === "kling") {
+    requireKlingVideoModel(config);
+    return;
+  }
   if (config.provider !== "volcengine") return;
   if (signal?.aborted) throw new DOMException("aborted", "AbortError");
   if (!config.apiKey?.trim()) throw new Error("请先配置火山 API Key。");

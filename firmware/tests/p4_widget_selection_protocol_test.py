@@ -10,6 +10,11 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_real_selection_parser_preserves_active_and_restores_visible_id(tmp_path):
     protocol = (ROOT/'main/pet_p4_protocol.c').read_text()
     miniapp = (ROOT/'main/pet_p4_miniapp.c').read_text()
+    commit_errors = [
+        line for line in (ROOT/'main/pet_p4_miniapp.h').read_text().splitlines()
+        if line.startswith('#define PET_P4_WIDGET_COMMIT_')
+    ]
+    assert len(commit_errors) == 3
     native = (ROOT/'main/pet_p4_usb_native.c').read_text()
     code = r'''
 #include <assert.h>
@@ -19,10 +24,12 @@ def test_real_selection_parser_preserves_active_and_restores_visible_id(tmp_path
 #include <stdlib.h>
 #include <string.h>
 #include "cJSON.h"
+#include "pet_p4_component_metadata.h"
 #include "pet_p4_json_source.h"
 #include "pet_p4_storage_lane.h"
+#include "pet_p4_center_layout.h"
 #define PET_P4_MINIAPP_WIDGET_ID_MAX 48
-#define PET_P4_MINIAPP_CATALOG_MAX 30
+#include "pet_p4_catalog_profile.h"
 #define PET_WIDGET_TRACE_SCOPE(name,kind) ((void)0)
 #define PET_WIDGET_TRACE_OPERATION(name,kind) int name=0
 #define PET_WTRACE_COMMIT 1
@@ -35,8 +42,8 @@ static void pet_widget_trace_end(int*p,bool ok){(void)p;(void)ok;}
 typedef void (*pet_p4_send_line_fn)(const char*,void*);
 typedef struct {char board_device_id[48],screen_page[24];unsigned stats,last_update_ms;}pet_p4_runtime_state_t;
 typedef struct {char *line;}pet_p4_query_reply_t;
-typedef struct {char widget_id[48],title[64];bool active;unsigned resource_state,image_count;}pet_p4_miniapp_catalog_entry_t;
-typedef struct {char widget_id[48],title[64];unsigned resource_state,image_count;}miniapp_catalog_item_t;
+typedef struct {char widget_id[48],title[64];bool active;unsigned resource_state,image_count,center_title_checksum,center_title_slot,center_title_generation;pet_p4_component_metadata_t package_metadata;}pet_p4_miniapp_catalog_entry_t;
+typedef struct {char widget_id[48],title[64];unsigned resource_state,image_count,center_title_checksum,slot,package_generation;pet_center_filter_t center_category;pet_p4_component_metadata_t package_metadata;}miniapp_catalog_item_t;
 static miniapp_catalog_item_t g_catalog[4]={
  {.widget_id="music-player"},{.widget_id="user-z",.resource_state=1},
  {.widget_id="user-a",.resource_state=1},{.widget_id="fixture",.resource_state=1}};
@@ -54,9 +61,10 @@ static bool pet_p4_miniapp_active_id(char*out,size_t n){if(g_runtime.active)copy
 static bool forbidden(void){forbidden_calls++;assert(!"selection invoked unrelated side effect");return false;}
 static bool refused_install(const cJSON*p,char*e,size_t n){(void)p;(void)e;(void)n;return forbidden();}
 static bool refused_remove(const char*p,char*e,size_t n){(void)p;(void)e;(void)n;return forbidden();}
-#define pet_p4_miniapp_install_begin refused_install
-#define pet_p4_miniapp_install_chunk refused_install
-#define pet_p4_miniapp_install_commit refused_install
+#define pet_p4_miniapp_transfer_begin refused_install
+#define pet_p4_miniapp_transfer_chunk refused_install
+#define pet_p4_miniapp_transfer_commit refused_install
+static void pet_p4_miniapp_install_status(const cJSON *p,cJSON *r){(void)p;(void)r;forbidden();}
 #define pet_p4_miniapp_remove refused_remove
 #define pet_p4_miniapp_remove_preserving_save refused_remove
 static bool pet_p4_miniapp_resource_repair_active(void){return forbidden();}
@@ -91,10 +99,10 @@ static bool send_catalog_admin(pet_p4_runtime_state_t*s,const char*t,const cJSON
 static cJSON *response;
 static void capture(const char*line,void*ctx){(void)ctx;assert(!response);response=cJSON_ParseWithOpts(line,NULL,true);assert(response);}
 '''
-    for name in ('catalog_item_visible','catalog_entry_visible','catalog_visible_index',
+    for name in ('catalog_id_visible','catalog_item_visible','catalog_visible_count','catalog_entry_visible','catalog_entry_matches','catalog_filtered_index','catalog_visible_index',
                  'pet_p4_miniapp_catalog_recovery_blocked','pet_p4_miniapp_catalog_count',
                  'pet_p4_miniapp_catalog_capacity','pet_p4_miniapp_catalog_selected',
-                 'pet_p4_miniapp_catalog_get','catalog_select_id_durable',
+                 'catalog_get_filtered','pet_p4_miniapp_catalog_get','catalog_select_id_durable',
                  'pet_p4_miniapp_catalog_select_durable','pet_p4_miniapp_catalog_select'):
         code += function(miniapp,name)+'\n'
     # Preserve the actual route preflight dependency; no unconditional-true stub.
@@ -107,8 +115,9 @@ static void pet_p4_native_usb_send_json_line(const char*line,void*ctx){(void)lin
     for name in ('native_route_context','pet_p4_native_usb_route_current'):
         code += function(native,name)+'\n'
     code += function(protocol,'asset_phase_send_current')+'\n'
+    code += '\n'.join(commit_errors)+'\n'
     for name in ('send_topic_payload','send_protocol_ack','send_widget_ack',
-                 'send_widget_inventory','handle_widget_topic','pet_p4_protocol_source_valid'):
+                 'pet_p4_widget_inventory','send_widget_inventory','handle_widget_topic','pet_p4_protocol_source_valid'):
         code += function(protocol,name)+'\n'
     # The real outer representation/envelope parser prefix, then only its real
     # widget delegate; unrelated hardware dispatch branches are not compiled.
@@ -138,7 +147,26 @@ static void ack(bool ok,const char*request,const char*code){
  if(request)assert(!strcmp(json_string(p,"requestId"),request));
  if(code)assert(!strcmp(json_string(p,"code"),code));
 }
+static void check_commit_ack(bool ok,const char*phase,const char*message,const char*code){
+ cJSON_Delete(response);response=NULL;
+ cJSON*request=cJSON_Parse("{\"index\":2}");assert(request);
+ send_widget_ack(capture,NULL,"same-transfer",phase,request,ok,message);
+ cJSON_Delete(request);
+ assert(!strcmp(json_string(response,"topic"),"widget-install-ack"));
+ cJSON*p=payload();
+ assert(!strcmp(json_string(p,"transferId"),"same-transfer"));
+ assert(!strcmp(json_string(p,"phase"),phase));
+ assert(cJSON_GetObjectItemCaseSensitive(p,"index")->valueint==2);
+ assert(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(p,"ok"))==ok);
+ assert(!strcmp(json_string(p,"msg"),message));
+ assert(!strcmp(json_string(p,"errorCode"),code));
+}
 int main(void){
+ check_commit_ack(false,"commit",PET_P4_WIDGET_COMMIT_STORAGE_DEFERRED,"commit_storage_deferred");
+ check_commit_ack(false,"commit",PET_P4_WIDGET_COMMIT_AUDIO_BUSY,"commit_audio_busy");
+ check_commit_ack(false,"commit",PET_P4_WIDGET_COMMIT_STORAGE_INTERRUPTED,"commit_storage_interrupted");
+ check_commit_ack(false,"commit","audio or component storage is busy","");
+ check_commit_ack(false,"chunk",PET_P4_WIDGET_COMMIT_STORAGE_DEFERRED,"");
  assert(pet_storage_lane_configure(&selection_lane,storage_unlock,storage_lock,storage_owner,NULL));
  assert(pet_storage_lane_enter(&selection_lane));
  inventory("user-a",1);size_t original=g_catalog_selected;

@@ -257,5 +257,5 @@ def test_private_reuse_profile_does_not_grant_execution_or_change_transaction():
     assert helper.index('pet_storage_physical_finish(')<helper.index('if(exact==PET_FILE_EXACT_MATCH)return true;')
     assert 'g_spare_json_seen[slot][generation]' in helper
     assert 'checksum==miniapp_checksum(data,length)' in helper
-    commit=function(text,'pet_p4_miniapp_install_commit')
+    commit=function(text,'install_commit_fenced')
     assert commit.index('write_spare_package_json(')<commit.index('load_catalog_runtime_item(')<commit.index('write_catalog_snapshot_at(')

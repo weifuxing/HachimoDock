@@ -87,6 +87,8 @@ static cJSON *wire(const char *input,bool want_ok){
   return p;
 }
 static void runtime_tests(esp_codec_dev_handle_t dev,const char *scenario){
+  bool fresh=!strcmp(scenario,"fresh");
+  if(fresh)nvs_fail_open=ESP_ERR_NVS_NOT_FOUND;
   bool corrupt=!strcmp(scenario,"corrupt");
   if(corrupt)nvs_fail_get=ESP_ERR_NVS_TYPE_MISMATCH;
   bool range=!strcmp(scenario,"out-of-range");
@@ -94,15 +96,15 @@ static void runtime_tests(esp_codec_dev_handle_t dev,const char *scenario){
   bool boot_mute=!strcmp(scenario,"boot-mute");
   bool boot_low=!strcmp(scenario,"boot-low");
   if(boot_mute || boot_low){nvs_fail_get=0;stored_value=boot_low?35:0;}
-  unsigned expected_boot=boot_mute?0:boot_low?35:100;
-  assert(pet_audio_volume_boot_load()==expected_boot && nvs_reads==1);
+  unsigned expected_boot=boot_mute?0:boot_low?35:80;
+  assert(pet_audio_volume_boot_load()==expected_boot && nvs_reads==(fresh?0:1));
   cost_us=0;now=0;
   assert(pet_audio_volume_attach(dev,(void *)1,(void *)1)==0 && !lock_depth);
   pet_audio_volume_status_t s;
   assert(pet_audio_volume_get(&s)==0 && s.volume==(int)expected_boot && s.persisted==!(corrupt || range));
   assert((regs[0x31]&0x60)==(boot_mute?0x60:0));
   assert(!nvs_writes && !pet_audio_volume_pending());
-  if(boot_mute || boot_low) return;
+  if(fresh || boot_mute || boot_low) return;
   const char *invalid[]={
     "{\"operation\":\"set\",\"volume\":1.1}","{\"operation\":\"set\",\"volume\":-1}",
     "{\"operation\":\"set\",\"volume\":101}","{\"operation\":\"set\",\"volume\":true}",

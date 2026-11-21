@@ -8,7 +8,7 @@ OPERATIONS={
     'desktop-tasks':{'voice','details','previous','next'},
     'journey':{'depart','collection','previous','next'},
     'weather':{'refresh','todo','details','choose_city','previous','next'},
-    'notes':{'record','save','todo','delete','previous','next'},
+    'notes':{'record','save','todo','delete','previous','next','tasks','open','toggle','filter','up','down','row_a','row_b','row_c'},
     'todos':{'open','toggle','filter','previous','next','up','down','row_a','row_b','row_c','row_d','row_e'},
     'hotkeys':{'profile','key_1','key_2','key_3','key_4','key_5','key_6'},
     'knowledge':{'speak','favorite','previous','next','random','category'},
@@ -71,13 +71,15 @@ def application_errors(value,runtime):
             assert service=='weather'
             validate_location_profile(value['location'])
         assert runtime.get('host') is True and runtime.get('surface',{}).get('engine')=='p4-app-surface-v1'
-        assert not runtime.get('vars') and not runtime.get('tick') and 'persist' not in runtime
+        vars_ = runtime.get('vars')
+        assert (not vars_ or news and vars_ == {'petui.wifi_data': {'type': 'string', 'init': 'news.hn'}})
+        assert not runtime.get('tick') and 'persist' not in runtime
         input_v1=runtime.get('input',{}).get('engine')=='p4-input-v1'
         actions=value['actions'];assert isinstance(actions,dict) and 1<=len(actions)<=(16 if input_v1 else 8)
         assert input_v1 or service!='soundscape' or not set(actions.values())&{'rain','sea','fire','insects'}
         assert all(re.fullmatch(r'host\.[a-z_]{1,32}',k) and v in OPERATIONS[service] for k,v in actions.items())
         assert len(set(actions.values()))==len(actions)
-        if service=='todos':
+        if service=='todos' or service=='notes' and 'tasks' in actions.values():
             assert input_v1
             assert all(isinstance(runtime.get('input',{}).get('confirm',{}).get(a),str) and runtime['input']['confirm'][a].strip() for a,op in actions.items() if op=='toggle')
         if service=='weather' and set(actions.values())&{'choose_city','previous','next'}:

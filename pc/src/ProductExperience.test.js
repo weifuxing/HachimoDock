@@ -70,7 +70,7 @@ test("generation result acknowledgement also removes its persistent toast", () =
 test("Agent discovery leaves the UI thread without permanently caching missing executables", () => {
   const backend = readSource("src-tauri/src/lib.rs");
   assert.match(backend, /async fn detect_local_agents\(/);
-  assert.match(backend, /spawn_blocking\(detect_local_agents_inner\)/);
+  assert.match(backend, /spawn_blocking\(move \|\| detect_local_agents_inner\(devin_cloud_enabled\)\)/);
   assert.doesNotMatch(backend, /static (?:FULL_SHELL_PATH|NPM_GLOBAL_BIN): OnceLock/);
 });
 
@@ -202,7 +202,7 @@ test("Tauri release resources are target-specific and package only audited LGPL 
   assertResource(macosConfig.bundle.resources, "generated-runtime/ffmpeg.LICENSE", "tools/ffmpeg.LICENSE");
   assertResource(macosConfig.bundle.resources, "generated-runtime/ffmpeg.README", "tools/ffmpeg.README");
   assertResource(macosConfig.bundle.resources, "generated-runtime/ffmpeg.SOURCE.txt", "tools/ffmpeg.SOURCE.txt");
-  assertResource(macosConfig.bundle.resources, "generated-runtime/ffmpeg-8.1.2.tar.xz", "tools/source/ffmpeg-8.1.2.tar.xz");
+  assertResource(macosConfig.bundle.resources, "generated-runtime/ffmpeg-8.1.3.tar.xz", "tools/source/ffmpeg-8.1.3.tar.xz");
   assert.equal(macosConfig.bundle.macOS.signingIdentity, "-");
   assert.match(packageJson.scripts["build:mac:local"], /sign:mac:local/);
   assert.match(packageJson.scripts["build:mac:local"], /tauri build --bundles app,dmg --ci/);
@@ -211,9 +211,11 @@ test("Tauri release resources are target-specific and package only audited LGPL 
   assert.match(packageJson.scripts["sign:mac:local"], /sign-macos-local-app\.mjs/);
   assert.match(packageJson.scripts["bundle:mac:local"], /bundle-macos-local-dmg\.mjs/);
   assert.match(packageJson.scripts["verify:mac:local"], /--verify-only/);
-  assert.match(localMacSigner, /designated => identifier "com\.petmanager\.desktop"/);
+  assert.match(localMacSigner, /certificate leaf = H/);
+  assert.match(localMacSigner, /anchor apple generic/);
+  assert.match(localMacSigner, /macos\?\.signingIdentity/);
   assert.match(localMacSigner, /--verify/);
-  assert.match(localMacSigner, /stable local designated requirement is missing/);
+  assert.match(localMacSigner, /Missing certificate-bound Developer ID designated requirement/);
   assert.match(localMacDmgBundler, /verifyStableApp\(appPath\)/);
   assert.match(localMacDmgBundler, /readFileSync\(tauriConfigPath, "utf8"\)/);
   assert.match(localMacDmgBundler, /PET_MANAGER_DMG_FLAVOR/);
@@ -239,7 +241,7 @@ test("Tauri release resources are target-specific and package only audited LGPL 
   assertResource(windowsConfig.bundle.resources, "generated-runtime/ffmpeg.LICENSE", "tools/ffmpeg.LICENSE");
   assertResource(windowsConfig.bundle.resources, "generated-runtime/ffmpeg.README", "tools/ffmpeg.README");
   assertResource(windowsConfig.bundle.resources, "generated-runtime/ffmpeg.SOURCE.txt", "tools/ffmpeg.SOURCE.txt");
-  assertResource(windowsConfig.bundle.resources, "generated-runtime/ffmpeg-8.1.2.tar.xz", "tools/source/ffmpeg-8.1.2.tar.xz");
+  assertResource(windowsConfig.bundle.resources, "generated-runtime/ffmpeg-8.1.3.tar.xz", "tools/source/ffmpeg-8.1.3.tar.xz");
   assertResource(windowsConfig.bundle.resources, "generated-runtime/zlib.LICENSE", "tools/zlib.LICENSE");
   assertResource(resources, "../skills/petui", "skills/petui");
 
@@ -306,7 +308,7 @@ test("Tauri release resources are target-specific and package only audited LGPL 
   assert.match(prepareScript, /PET_MANAGER_FFMPEG_SOURCE_ARCHIVE/);
   assert.match(prepareScript, /PET_MANAGER_ZLIB_LICENSE/);
   assert.match(prepareScript, /auditedFfmpegBinarySha256/);
-  assert.match(prepareScript, /ffmpeg-8\.1\.2\.tar\.xz/);
+  assert.match(prepareScript, /ffmpeg-8\.1\.3\.tar\.xz/);
   assert.match(prepareScript, /x86_64-w64-mingw32-objdump/);
   assert.doesNotMatch(prepareScript, /ffmpegStaticRelease|eugeneware|martin-riedl/);
   assert.match(prepareScript, /Git LFS 指针/);
@@ -346,7 +348,7 @@ test("Tauri release resources are target-specific and package only audited LGPL 
   assert.match(ffmpeg, /find_executable\("ffmpeg", &\[\]\)/);
   assert.match(crossInstaller, /windowsFfmpeg/);
   assert.match(crossInstaller, /tools["', ]+ffmpeg\.exe/);
-  assert.match(crossInstaller, /ffmpeg-8\.1\.2\.tar\.xz/);
+  assert.match(crossInstaller, /ffmpeg-8\.1\.3\.tar\.xz/);
   assert.match(
     crossInstaller,
     /join\(\s*stageRoot,\s*"firmware",\s*"esp32-p4",\s*"firmware\.bin",\s*\)/,
@@ -430,8 +432,8 @@ test("coding-agent and media-tool detection uses user/environment-derived paths"
 
   for (const [label, source] of Object.entries({
     tauri,
-    ffmpeg,
-    composer,
+    ffmpeg: ffmpeg.split("fn community_npx_search_dirs")[0],
+    composer: composer.replaceAll('"/usr/bin/open"', '"system-open"'),
     codex,
     claude,
     mimocode,
@@ -478,7 +480,7 @@ test("app shell routes device, pet album, component center, API settings, detail
   assert.match(app, /<AppearanceGallery/);
   assert.match(app, /<CustomAvatarWizard/);
   assert.match(app, /<AppearanceDetail/);
-  assert.match(app, /<ComponentCenter active=\{view === "components"\} \/>/);
+  assert.match(app, /<ComponentCenter active=\{view === "components"\} onOpenWirelessMaintenance=\{openWirelessMaintenance\} \/>/);
   assert.match(app, /<ApiSettings/);
   assert.doesNotMatch(app, /CommunityImportHelp/);
 });
@@ -487,16 +489,20 @@ test("bound dashboard keeps its controller mounted but drops visual content off-
   const app = readSource("src/App.jsx");
   const dashboard = readSource("src/DeviceDashboard.jsx");
 
-  assert.match(app, /\{binding && \(\s*<DeviceDashboard[\s\S]*active=\{isDashboard\}/);
-  assert.doesNotMatch(app, /\{isDashboard && binding && \(/);
+  assert.match(app, /\{dashboardBinding && \(\s*<DeviceDashboard[\s\S]*active=\{isDashboard\}/);
+  assert.doesNotMatch(app, /\{isDashboard && dashboardBinding && \(/);
+  assert.match(app, /title="键盘配置"[\s\S]*title="模型配置"/);
+  assert.match(app, /keyboardActive=\{view === "keyboard"\}/);
+  const settings = readSource("src/DeviceSettings.jsx");
+  assert.doesNotMatch(settings, /BluetoothShortcutPanel/);
   assert.match(dashboard, /\{active && <PageShell/);
   assert.match(dashboard, /editingPersona && <div hidden=\{!active\}><PersonaVoiceModal/);
 });
 
-test("appearance detail receives the current board binding for exact native USB sync", () => {
+test("appearance detail enables native sync only for a verified USB board", () => {
   const source = readSource("src/App.jsx");
 
-  assert.match(source, /<AppearanceDetail[\s\S]*boardDeviceId=\{binding\?\.boardDeviceId \|\| ""\}/);
+  assert.match(source, /<AppearanceDetail[\s\S]*boardDeviceId=\{usb\.connected && \(!binding\?\.boardDeviceId \|\| binding\.boardDeviceId === usb\.boardDeviceId\)\s*\? usb\.boardDeviceId : ""\}/);
 });
 
 test("desktop sidebar stays viewport-bound instead of stretching with page height", () => {

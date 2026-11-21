@@ -1,9 +1,9 @@
 <div align="center">
   <img src="assets/hachimodock-mark.png" width="112" alt="HachimoDock（哈基米机）logo" />
   <h1>HachimoDock（哈基米机）</h1>
-  <p><strong>面向 AI Agent 的桌面交互终端</strong></p>
+  <p><strong>把 AI 助手、语音和日常小工具放到桌面上</strong></p>
   <p>
-    通过 Windows/macOS 管理端与 ESP32-P4 设备，呈现任务状态、语音输入与互动组件。
+    一块会跟随任务变化的小屏，配上实体按键、摇杆和你喜欢的形象。
   </p>
   <p>
     <a href="https://oshwhub.com/eda_gqvzlprk/project_cnbmkbjc#3-%E7%A1%AC%E4%BB%B6%E5%A4%8D%E5%88%BB">
@@ -11,12 +11,11 @@
     </a>
   </p>
   <p>
-    <a href="#硬件方案">硬件方案</a>
-    · <a href="#硬件端资料">硬件端资料</a>
-    · <a href="#图集">图集</a>
-    · <a href="#软件架构">软件架构</a>
-    · <a href="#复刻与部署">复刻与部署</a>
+    <a href="#当前版本与下载">下载</a>
+    · <a href="#你可以用它做什么">功能与场景</a>
     · <a href="#快速开始">快速开始</a>
+    · <a href="#硬件方案">硬件与屏幕</a>
+    · <a href="#源码与开发">源码</a>
     · <a href="#常见问题">常见问题</a>
   </p>
   <p>
@@ -25,14 +24,14 @@
     <img alt="Device" src="https://img.shields.io/badge/device-ESP32--P4%20%7C%20480%C3%97640-e8a23a" />
   </p>
   <p>
-    <a href="https://github.com/YizhengWw/HachimoDock/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/YizhengWw/HachimoDock?style=social" /></a>
+    <a href="https://github.com/ai-maker-lab/HachimoDock/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/ai-maker-lab/HachimoDock?style=social" /></a>
     <a href="https://github.com/YizhengWw"><img alt="Follow @YizhengWw" src="https://img.shields.io/github/followers/YizhengWw?label=Follow%20%40YizhengWw&style=social" /></a>
   </p>
 </div>
 
 ## 本分支的硬件适配
 
-本分支基于公开 R181 固件源码，提供 HD28091C40-V1 屏幕、CST328 触摸、自制屏幕转接板和外壳，以及 ESP32-P4-WIFI6 / ESP32-P4-Pico 按键映射适配。v3 当前采用 20 MHz DPI 像素时钟进行显示效果对比。触摸默认每 15 ms 轮询一次，INT 可悬空。
+本分支已合入官方 0.1.245 / R292 公开源码，保留 HD28091C40-V1 屏幕、CST328 触摸、自制屏幕转接板和外壳适配。Pico 使用官方板型配置，SW1/SW2 为 GPIO14/GPIO6。显示默认采用 2 路 DSI、每路 500 Mbps，v3 保留 20 MHz DPI 像素时钟。触摸默认每 15 ms 轮询一次，INT 可悬空。适配固件版本带有 `-hd28091` 后缀。
 
 接线、板型编译目标、打印文件及实测范围见 [HD28091 硬件改动与固件适配说明](docs/hd28091-hardware-adaptation.md)。本分支适配固件按该说明自行编译，下方版本与下载表对应上游官方发布。
 
@@ -46,68 +45,101 @@
 
 ## 项目简介
 
-HachimoDock（哈基米机）是面向 AI Agent 的桌面交互终端，由 Windows/macOS 管理端与 ESP32-P4 设备组成，提供工作状态显示、语音输入、自定义形象和互动组件。桌面应用的安装名称为 **HachimiDock**，部分开发文档使用 **Pet Manager** 指代管理端。
+HachimoDock（哈基米机）是一台与电脑协作的桌面小伙伴：让 AI Agent 的工作状态变成看得见的动画，用实体按键说出下一条需求，也可以切到游戏、计时器或信息组件。它由 **Windows/macOS 客户端和 ESP32-P4 设备**组成。设备负责显示、输入与音频，电脑连接 Agent 和所需服务。
 
-[English](README.en.md) · [下载最新版本](https://github.com/ai-maker-lab/HachimoDock/releases/latest) · [问题反馈](https://github.com/YizhengWw/HachimoDock/issues) · [安全反馈](SECURITY.md)
+你可以把它放在显示器旁跟随任务，用语音给 Agent 写草稿，或在工作间隙与宠物聊天。支持的 WiFi6 板型还能通过局域网连接电脑，或切换成蓝牙快捷键盘。无线使用时，设备需要单独供电，电脑协同功能需要客户端保持运行。
+
+桌面应用的安装名称为 **HachimiDock**。开发文档中的 **Pet Manager** 指同一应用。
+
+[English](README.en.md) · [下载最新版本](https://github.com/ai-maker-lab/HachimoDock/releases/latest) · [问题反馈](https://github.com/ai-maker-lab/HachimoDock/issues) · [安全反馈](SECURITY.md)
 
 ## 当前版本与下载
 
 | 项目 | 版本 | 下载 |
 | --- | --- | --- |
-| Windows x64 | **0.1.217** | [下载安装包](https://github.com/ai-maker-lab/HachimoDock/releases/download/v0.1.217/HachimiDock_0.1.217_Windows-x64-setup.exe) |
-| macOS Apple silicon | **0.1.217** | [下载安装包](https://github.com/ai-maker-lab/HachimoDock/releases/download/v0.1.217/HachimiDock_0.1.217_macOS-arm64.dmg) |
-| 配套设备固件 | **0.7.103-p4-r206** | [WiFi6 / Pico 完整烧录包](https://github.com/ai-maker-lab/HachimoDock/releases/tag/v0.1.217#设备固件) |
+| Windows x64 | **0.1.245** | [下载安装包](https://github.com/ai-maker-lab/HachimoDock/releases/download/v0.1.245/HachimiDock_0.1.245_Windows-x64-setup.exe) |
+| macOS Apple silicon | **0.1.245** | [下载安装包](https://github.com/ai-maker-lab/HachimoDock/releases/download/v0.1.245/HachimiDock_0.1.245_macOS-arm64.dmg) |
+| 配套设备固件 | **0.7.107-p4-r292 / R292** | 客户端内置 OTA · [完整烧录包](https://github.com/ai-maker-lab/HachimoDock/releases/tag/v0.1.245) |
 
-0.1.217 改善实时对话断线后的恢复和 WASM 组件预览。客户端内置 WiFi6 与 Pico 的 v1、v3 升级固件；完整烧录请同时核对板型和芯片修订版。请按 [v0.1.217 发布页](https://github.com/ai-maker-lab/HachimoDock/releases/tag/v0.1.217) 的 `SHA256SUMS` 核对下载。
+更新说明见 [0.1.245 发布页](https://github.com/ai-maker-lab/HachimoDock/releases/tag/v0.1.245)。客户端内置 WiFi6 与 Pico 的 v1、v3 四种 R292 OTA 固件；Wi-Fi 按键与对话状态同步需要同时更新客户端和固件。Wi-Fi 配对后可脱离电脑 USB 数据连接，设备仍需供电，电脑协同功能仍需管理端运行；Pico 固件不包含 Wi-Fi／蓝牙。下载后可核对 Release 页面显示的 SHA-256。
 
-当前预编译客户端支持 Apple silicon Mac 和 Windows x64；不提供 Intel Mac 或 Linux 安装包。macOS 安装包已签名并通过 Apple 公证。Windows 安装器未做发行者签名。公开源码与安装包的对应关系见发布说明；[PC 构建](pc/README.md)和[固件构建](firmware/BUILD.md)文档以当前源码为准。
+完整烧录包用于新设备或恢复出厂，会清除设置、形象和组件；请同时核对板型和芯片修订版，WiFi6 与 Pico、v1 与 v3 不可混刷。日常升级优先使用客户端内置 OTA。
 
-## 核心能力
+当前预编译客户端支持 Apple silicon Mac 和 Windows x64；不提供 Intel Mac 或 Linux 安装包。macOS 包使用 Developer ID 签名并通过 Apple 公证；Windows 安装器未做 Authenticode 签名。发行包不内置服务 Key。公开源码与安装包的关系见下方“源码与发布对应关系”；[PC 构建](pc/README.md)和[固件构建](firmware/BUILD.md)文档以当前公开源码为准。
 
-| 能力 | 说明 |
-| --- | --- |
-| Agent 状态跟随 | 将活动会话的思考、执行、等待、完成和错误状态呈现在设备动画与任务气泡中。事件完整程度取决于 Agent 适配器。 |
-| 语音输入 | 按住语音键录音，松开后识别并追加到目标输入框；确认后才发送。灰色提示文字不属于草稿。 |
-| 实时对话 | 在宠物页面长按 SW2 开始或结束；使用用户配置的识别、对话和语音服务。 |
-| 形象与音效 | 内置西高地形象，支持导入或生成自定义外观、状态视频和提示音；兼容固件支持独立下发音效。 |
-| 组件中心 | 预览、安装和移除游戏、工具及 PC 数据组件；通过 `petui` Skill 创作声明式有界组件。 |
-| 音量与城市 | 首页语音输入模块下方统一调整设备总音量、自动识别城市或搜索并保存手动城市/区县。 |
-| 按键配置 | 配置三个按键与摇杆的操作，组件退出遵循设备全局返回设置。 |
-| USB 协同 | 桌面端负责状态、数据、素材与升级传输；连接状态和回执未知时不会自动重放变更。 |
+### 按板型和芯片修订版下载完整烧录包
 
-公开发行版不提供服务 Key。需要语音、对话或内容生成能力时，请在客户端“API 配置”中填写自己的凭据。城市定位可关闭；自动模式通过出口 IP 估算城市，不能代替 GPS。详见[音量与共享城市](pc/docs/shared-device-settings.md)。
+**第一次烧录，建议直接用 ChatGPT、WorkBuddy 等 AI 工具协助。** 下载并解压下表中与设备匹配的完整包，把包内的 `FLASH.md` 交给工具，并告诉它你的电脑系统和板型。可以这样问：「请先帮我核对连接的设备和固件包是否匹配，再按这份说明带我完成首次烧录，并检查写入结果。」
 
-### Agent 兼容范围
+| 板型 | 芯片修订版 | R292 完整烧录包 |
+| --- | --- | --- |
+| WiFi6 | v1 | [下载 WiFi6 v1](https://github.com/ai-maker-lab/HachimoDock/releases/download/v0.1.245/HachimiDock_0.1.245_wifi6-v1_FULL-FACTORY.zip) |
+| WiFi6 | v3 | [下载 WiFi6 v3](https://github.com/ai-maker-lab/HachimoDock/releases/download/v0.1.245/HachimiDock_0.1.245_wifi6-v3_FULL-FACTORY.zip) |
+| Pico | v1 | [下载 Pico v1](https://github.com/ai-maker-lab/HachimoDock/releases/download/v0.1.245/HachimiDock_0.1.245_pico-v1_FULL-FACTORY.zip) |
+| Pico | v3 | [下载 Pico v3](https://github.com/ai-maker-lab/HachimoDock/releases/download/v0.1.245/HachimiDock_0.1.245_pico-v3_FULL-FACTORY.zip) |
 
-当前适配 ChatGPT（Codex）、Claude、OpenClaw、MiMoCode、WorkBuddy 和 DeepSeek Harness。**状态跟随、语音草稿、确认发送与桌面对话切换是不同能力**；检测到程序不代表其输入框已可用。
+## 你可以用它做什么
 
-- ChatGPT（Codex）、Claude、WorkBuddy、DeepSeek Harness 的桌面语音输入依赖当前可用的系统辅助功能输入框。
-- WorkBuddy 与 DeepSeek 的目标对话需在对应应用中打开；设备气泡选择不会自动切换它们的桌面对话。
-- MiMoCode 的语音支持与平台相关；OpenClaw 使用其会话路由。具体限制见 [Agent 接入与兼容说明](pc/docs/agent-integration-audit.md)。
-- 目标不明确、输入框不可用或提交结果未知时，本次操作会停止；不会选取最近的历史会话或自动重复发送。
+### 工作时，抬眼看看 Agent 进行到哪一步
 
-### 组件与资源
+设备用宠物动画和任务气泡显示思考、执行、等待、完成及错误状态。选择正在跟随的 Agent 或会话，就能在电脑之外保留一个简洁的工作状态窗口。
 
-设备运行声明式组件及受限运行时原语，不是通用浏览器或任意脚本环境。新能力以设备实际声明和对应契约为准；开发配置、离线测试和编译通过不能代替实机兼容与性能验证。
+当前适配 **ChatGPT（Codex）、Claude、OpenClaw、MiMo Desktop / MiMoCode、WorkBuddy 和 DeepSeek Harness**。不同适配器提供的状态和操作能力不同；状态跟随不代表支持所有应用的语音输入或对话切换。
 
-组件通过 PC 同步。缺少可选触控能力不阻止安装，但触控玩法可能无法使用；包格式、资源完整性和存储上限仍需满足。音乐、电台、天气等 PC 数据功能需要管理端保持运行，部分内容需要联网。用户上传内容的权利由相应权利人保留。
-
-1. 在支持的 Agent 中使用 `petui` Skill 描述游戏或工具。
-2. 按设备逻辑画布、输入与资源配额生成组件，通过结构和资源校验。
-3. 在组件中心预览，选择“同步到设备”；不用的组件可从设备移除。
-
-开发契约见 [PetUI Skill](pc/skills/petui/SKILL.md)，实时数据见 [数据组件](pc/docs/widget-live-data.md)、[电脑状态与近期待办](pc/docs/local-live-widgets.md)。
-
-### 状态跟随演示
+跟随 WorkBuddy 或 DeepSeek Harness 时，可以在设备上看到当前会话标题和任务状态。无论通过 USB 还是 Wi-Fi 连接，任务气泡都使用 MiSans Medium，标题 32px、正文 24px。
 
 <p align="center"><img src="assets/agent-status.gif" alt="Agent 工作状态与设备宠物动画" /></p>
 
+### 给 Agent 写语音草稿，或直接和宠物聊天
+
+| 你想做的事 | 使用方式 | 需要什么 |
+| --- | --- | --- |
+| 把想法交给电脑上的 Agent | 默认按住 SW1 录音，松开后识别并追加到目标输入框；检查草稿，再按确认键发送 | USB 连接、已配置的识别服务，以及可用的目标输入框和系统权限 |
+| 与设备上的宠物连续对话 | 在宠物页面默认长按 SW2 开始，再次长按或按返回键结束；设备显示聆听、思考和回复字幕 | 已配置的识别、对话及语音合成服务；USB，或已配对并授权的 WiFi6 连接 |
+
+实时对话还可以配合本机待办、电脑状态等工具使用。连接米家账号后，可控制账号授权且开放相应能力的设备与场景；目前使用中国大陆服务，具体支持范围见[智能家居说明](pc/docs/smart-home.md)。这些能力需要电脑客户端运行，并按功能连接相应服务。
+
+**语音草稿不会自动发送。** ChatGPT（Codex）、Claude、WorkBuddy 和 DeepSeek Harness 的桌面输入依赖系统辅助功能与可访问的输入框。WorkBuddy 和 DeepSeek 的目标对话需先在对应应用中打开，选择设备气泡不会自动切换它们的桌面对话。MiMoCode 的语音支持与平台相关，OpenClaw 使用自己的会话路由。目标不明确或输入框不可用时会停止操作，不会猜选历史会话或重复发送。
+
+详见[客户端兼容说明](pc/README.md)、[WorkBuddy 使用说明](pc/docs/workbuddy.md)和[实时对话](pc/docs/realtime-chat.md)。确认语音发送也不等于批准 Agent 的工具权限请求。
+
+### 少一根数据线：通过 Wi-Fi 放在桌面喜欢的位置
+
+WiFi6 板型可在**同一局域网**内与电脑配对，支持 Agent 状态跟随、实时对话，以及已授权的无线组件安装和固件升级。拔掉电脑 USB 数据线后，设备仍需另行供电。使用电脑协同功能时，客户端需要保持运行，云服务需要联网。
+
+首次配对应在可信的局域网中进行。要使用实时对话等无线控制，先通过 USB 连接同一设备，在客户端 Wi-Fi 配对设置中完成一次有线授权。**配对成功与获得无线控制权限是两步。** 更换电脑时，先在设备上解除旧配对。使用方法见 [Wi-Fi 配对与授权](pc/docs/lan-agent-pairing.md)。
+
+USB 客户端在线时优先走 USB，接管时会结束正在进行的 Wi-Fi 实时对话。「电脑状态」组件支持 USB 和已配对的 Wi-Fi，显示数据时电脑客户端需要在线。城市电台的播放方式取决于板型和音源，支持的音源可由 WiFi6 设备直接播放。Pico 固件不提供 Wi-Fi 或蓝牙。
+
+### 把实体按键变成电脑快捷键
+
+在 WiFi6 设备的「蓝牙快捷键」中配置按键，开启蓝牙模式，再到电脑的蓝牙设置里配对 **HachimiDock**。三个实体按键支持分别设置单击、双击和长按，摇杆方向与中键也有对应配置，可用于复制、粘贴或你常用的软件快捷键。
+
+快捷键可组合主键和修饰键，实际效果取决于电脑系统及当前应用。默认单击 1、2、3 键分别发送 **Ctrl+C、Ctrl+V、Ctrl+A**；Mac 用户可按习惯改为 Command 组合键。
+
+蓝牙键盘连接后，实体按键和摇杆用于向电脑发送快捷键，原有设备按键功能暂停；断开蓝牙或关闭该模式后恢复。每次操作发送一组按键组合。
+
+### 工作间隙，换个形象或打开一个小组件
+
+内置西高地形象，也可导入自定义外观、状态视频和提示音，或配置生成服务制作素材。在组件中心预览、安装与移除小游戏和工具，例如番茄钟、五子棋、贪吃蛇、木鱼、电脑状态和城市电台。
+
+- **设备本地组件**：安装后在设备上运行；是否需要联网或电脑协同，取决于组件自身功能。
+- **WiFi6 联网组件**可在设备上直接读取 HTTPS JSON、订阅 MQTT。公开数据打开即用，私人数据在组件内授权一次，设备重启后会重新连接。
+- **电脑状态**等使用电脑数据的组件通过 USB 或已配对的 Wi-Fi 从桌面客户端取数。
+- **自己的组件**：在支持的 Agent 中使用 [PetUI Skill](pc/skills/petui/SKILL.md)描述游戏或工具，生成后在组件中心预览、校验并同步到设备。组件受设备能力和存储限制，不是任意网页或脚本。
+
+缺少触控不影响一般组件安装，但触控玩法可能无法使用。城市可以手动设置或关闭自动定位；自动定位按出口 IP 估算城市，不是 GPS。待办保存在本机，目前不提供跨电脑同步或到点通知。
+
+更多说明：[数据组件](pc/docs/widget-live-data.md) · [电脑状态与近期待办](pc/docs/local-live-widgets.md) · [音量与共享城市](pc/docs/shared-device-settings.md) · [城市电台](pc/docs/city-radio.md)。
+
 ## 快速开始
 
-1. 下载并安装适合电脑系统的客户端，将设备通过数据线连接电脑。
-2. 在设备首页确认设备连接与固件版本；已有设备优先使用“固件升级”。
-3. 选择跟随的 Agent、形象和按键配置。需要语音输入时，授权客户端的系统辅助功能，并打开目标对话。
-4. 配置所需语音与对话服务；按住 SW1 说话，松开后查看草稿，短按确认键发送。
+如果是还没烧录过的新板，请先按上方的[完整烧录包指南](#按板型和芯片修订版下载完整烧录包)完成首次烧录，再连接客户端。
+
+1. **安装客户端并连接设备。** 选择对应系统的安装包，用支持数据传输的 USB 线连接设备；在客户端确认板型与固件版本。
+2. **先体验状态跟随。** 打开支持的 Agent，在客户端选择跟随目标、形象和按键配置。已有设备需要升级时优先使用客户端 OTA。
+3. **按需开启语音。** 在 API 配置中填写自己的服务凭据，并完成所需系统权限授权。语音输入前打开目标对话；实时对话还需要配置对话模型与声音。
+4. **可选：配置无线或蓝牙。** WiFi6 用户可按上文完成局域网配对和 USB 授权，或将实体按键配置为蓝牙快捷键。
 
 | 默认操作 | 行为 |
 | --- | --- |
@@ -116,6 +148,7 @@ HachimoDock（哈基米机）是面向 AI Agent 的桌面交互终端，由 Wind
 | SW2 短按 | 切换宠物页面与组件中心；组件可绑定自己的动作 |
 | SW2 长按 | 开始或结束实时对话 |
 | SW3 短按 | 返回或取消 |
+| SW3 长按 | 打开设备系统设置 |
 | 摇杆方向 | 选择会话、组件或执行组件映射动作 |
 
 这些是出厂默认值，用户配置优先。语音确认发送不等于批准 Agent 的工具权限请求。WorkBuddy 的操作边界见[专门说明](pc/docs/workbuddy.md)。
@@ -124,11 +157,9 @@ macOS 安装受阻时，先检查下载来源和校验值，再按系统“隐�
 
 ### 新设备或恢复出厂
 
-[v0.1.217 Release](https://github.com/ai-maker-lab/HachimoDock/releases/tag/v0.1.217#设备固件) 提供 WiFi6 和 Pico 原底板的完整烧录包，两种板型各有 v1、v3 版本。包内包含 Bootloader、应用固件、形象、组件及双平台烧录工具。请同时核对板型和实际芯片修订版；微雪 ESP32-P4-WIFI6-M 的 M 不代表芯片版本。同一芯片的固件由 Windows/macOS 共用。完整镜像会覆盖设备现有数据。
+[v0.1.245 Release](https://github.com/ai-maker-lab/HachimoDock/releases/tag/v0.1.245) 提供 WiFi6 v3 和 Pico v3 原底板的完整烧录包。包内包含 Bootloader、应用固件、形象、组件及双平台烧录工具。请同时核对板型和实际芯片修订版；微雪 ESP32-P4-WIFI6-M 的 M 不代表芯片版本。同一芯片的固件由 Windows/macOS 共用。完整镜像会覆盖设备现有数据。
 
 **v1 与 v3 烧录包不可互刷，具体版本可以咨询客服进行确认。** 包内脚本需要 Python 3.10+，自动安装 esptool **5.4.0**。屏幕连接 **DSI**，不是 CSI；请断电后插拔排线。详细版本和步骤见 [固件构建与烧录指南](firmware/BUILD.md)。
-
-v3 的 24 MHz 显示修复已在实机确认恢复宠物动画；本版本按键、麦克风、完整形象与固件传输等仍需实机验收，请先在测试设备上验证。
 
 ## 图集
 
@@ -147,9 +178,15 @@ v3 的 24 MHz 显示修复已在实机确认恢复宠物动画；本版本按键
   </tr>
 </table>
 
-家居控制能力由[**Xiaomi MiLoCo**](https://github.com/XiaoMi/xiaomi-miloco) 提供，相关 MiLoCo 授权作品的版权归小米所有，适用 [Xiaomi Miloco License](https://github.com/YizhengWw/HachimoDock/blob/main/licenses/Xiaomi-Miloco-LICENSE.md)，版权标识、免责声明及许可证随相关实现一并保留。非商业使用仍须符合该许可证的用途范围；本项目不向第三方授予额外的商业使用、再许可或商标权限。完整说明见 [第三方声明](https://github.com/YizhengWw/HachimoDock/blob/main/THIRD_PARTY_NOTICES.md)。
+家居控制能力由[**Xiaomi MiLoCo**](https://github.com/XiaoMi/xiaomi-miloco) 提供，相关 MiLoCo 授权作品的版权归小米所有，适用 [Xiaomi Miloco License](https://github.com/ai-maker-lab/HachimoDock/blob/main/licenses/Xiaomi-Miloco-LICENSE.md)，版权标识、免责声明及许可证随相关实现一并保留。非商业使用仍须符合该许可证的用途范围；本项目不向第三方授予额外的商业使用、再许可或商标权限。完整说明见 [第三方声明](https://github.com/ai-maker-lab/HachimoDock/blob/main/THIRD_PARTY_NOTICES.md)。
 
 ## 硬件方案
+
+### 原屏缺货与替代屏幕方案
+
+原方案屏幕目前缺货，可参考社区作者 fosen 的[哈基米机屏幕转接板方案](https://oshwhub.com/fosen/project_tzekpmhv)，用于适配另一款 2.8 英寸触摸屏。项目页提供转接板设计、配套外壳模型，以及 HD28091C40-V1 结构图和屏幕初始化配置附件。
+
+替换时请按该项目的屏幕型号、转接板、排线、外壳及初始化配置配套选择。目前尚未在这款替代屏上完成实机验证，不能仅凭同为 2.8 英寸判断可直接替换。复刻资料和更新以该社区项目页为准。
 
 本仓库给出软件和固件配套；PCB、BOM、硬件装配和复刻资料请看：
 [OSHWHub 硬件端页面](https://oshwhub.com/eda_gqvzlprk/project_cnbmkbjc#3-%E7%A1%AC%E4%BB%B6%E5%A4%8D%E5%88%BB)。
@@ -161,7 +198,7 @@ v3 的 24 MHz 显示修复已在实机确认恢复宠物动画；本版本按键
 | 屏幕 | 2.8 英寸 MIPI-DSI；物理面板 480×640，应用逻辑画布 640×480，经旋转输出 |
 | 输入 | 3 个实体按键、四向中按摇杆及配套触控屏；按键可配置 |
 | 音频 | 板载麦克风语音采集，桌面端 ASR 与 Agent 输入路由 |
-| 连接 | USB-UART 用于烧录、日志和日常数据传输；硬件保留原生 USB HS OTG 能力 |
+| 连接 | USB 数据连接；WiFi6 板型另支持局域网连接与蓝牙键盘，Pico 固件不提供无线功能 |
 | 扩展 | PetUI 通用小组件/小游戏运行时，组件通过桌面端同步到设备 |
 
 ## 硬件端资料
@@ -172,42 +209,41 @@ v3 的 24 MHz 显示修复已在实机确认恢复宠物动画；本版本按键
 |---|---|
 | 硬件复刻总入口 | [OSHWHub 项目页](https://oshwhub.com/eda_gqvzlprk/project_cnbmkbjc#3-%E7%A1%AC%E4%BB%B6%E5%A4%8D%E5%88%BB) |
 | 桌面客户端与完整固件 | [GitHub Releases](https://github.com/ai-maker-lab/HachimoDock/releases/latest) |
-| 完整性校验 | 当前 Release 提供 `SHA256SUMS`；烧录清单位于完整烧录包内 |
+| 完整性校验 | Release 页面显示 SHA-256，烧录包内另含分段校验清单 |
 
-## 软件架构与开发
-
-```mermaid
-flowchart LR
-  agents[Agent 适配器] --> desktop[桌面管理端 Tauri + React]
-  desktop --> bridge[本机 Bridge / 语音与数据服务]
-  bridge -->|USB| board[ESP32-P4 运行时]
-  board --> screen[动画 / 气泡 / 组件]
-  board -->|按键 / 触控 / 录音| desktop
-```
+## 源码与开发
 
 | 目录 | 内容 | 开发入口 |
 | --- | --- | --- |
-| `pc/` | 桌面 UI、本机适配器、组件 Skill 与资源 | [PC 构建](pc/README.md) |
-| `firmware/` | 板级驱动、渲染、输入、协议及出厂镜像工具 | [固件构建](firmware/BUILD.md)、[协议](firmware/protocol.md) |
-| `integrations/` | Agent 集成与相关契约 | [DSH 集成](integrations/dsh-hachimodock/README.md) |
+| `pc/` | Tauri + React 桌面客户端、Agent 适配与组件资源 | [PC 构建](pc/README.md) |
+| `firmware/` | ESP32-P4 的显示、音频、输入与组件运行时 | [固件构建](firmware/BUILD.md)、[设备协议](firmware/protocol.md) |
+| `integrations/` | Agent 集成与接口说明 | [DSH 集成](integrations/dsh-hachimodock/README.md) |
 
-资源保存在普通 Git 中，克隆不依赖 Git LFS。构建以锁定依赖和目标平台配置为准；不同发布包的源码对应关系以各 Release 说明为准。源码实现、离线验证、硬件测试和声学验证应分别评估，不作所有设备均已验收的承诺。
+### 源码与发布对应关系
 
-新机的 32 MiB Flash 使用双 OTA 各 3 MiB、组件与元数据 8.875 MiB、内置及自定义形象各 8.5 MiB。普通 OTA 不会改变旧设备分区；迁移分区需要完整烧录，会清除设备数据。
+`main` 和 `v0.1.245` 标签提供 0.1.245 / R292 的公开源码。安装包和固件的 SHA-256 见 [发布元数据](latest-release.json)。
+
+资源保存在普通 Git 中，克隆不依赖 Git LFS。构建以锁定依赖和目标平台配置为准；不同发布包的源码对应关系以各 Release 说明为准。自行编译请查阅下列构建文档，并按实际板型选择配置。
 
 ## 常见问题
 
-**物理屏幕与组件画布为什么尺寸不同？** 物理面板为 480×640，组件使用 640×480 横向逻辑坐标，由固件旋转输出。更换屏幕需同时核对接口、初始化和触控坐标，不能只看驱动芯片名称。
+**首次烧录成功后屏幕全白，怎么办？** 等烧录工具显示写入和校验均已成功，再拔下设备的 USB 线，重新插上并保持供电。屏幕可能需要约 **5 分钟**预热，随后应恢复正常显示。若仍是白屏，先核对完整包的板型和芯片修订版。
 
-**缺少触控还能安装组件吗？** 可以安装；依赖触控的玩法可能不可用。实体按键、摇杆和语音有各自的输入路径。
+**电脑关机后还能用吗？** 已安装且不依赖 PC 的本地组件可以继续在有电的设备上运行。Agent 状态、语音识别与对话，以及电脑提供的数据需要客户端在线；设备不会自行运行电脑上的 Agent 或云端模型。
 
-**设备一定要联网吗？** 设备状态、形象和组件同步走 USB，不要求 ESP32-P4 加入局域网。语音识别、Agent 本身以及 AI 形象或组件生成仍可能需要电脑联网。
+**USB、Wi-Fi 和蓝牙有什么区别？** USB 是初次设置和日常协同的数据连接。Wi-Fi 用于受支持板型与同一局域网电脑的无线协同，部分控制需先 USB 授权。蓝牙模式把实体按键变成电脑键盘输入，不传输 Agent 对话或代替 Wi-Fi 配对。
 
-**如何反馈？** 使用 [GitHub Issues](https://github.com/YizhengWw/HachimoDock/issues)，附客户端/固件版本、系统和复现步骤。不要公开 Key、完整用户日志、对话正文或设备/个人标识。安全问题请按 [SECURITY.md](SECURITY.md) 私下反馈。
+**需要自己准备 API Key 吗？** 安装包不内置服务 Key。使用在线识别、对话、语音合成或素材生成时，需在客户端配置支持的服务和自己的凭据；费用、可用地区和网络要求由相应服务决定。不使用这些功能时，可先体验状态跟随和本地组件。
+
+**物理屏幕与组件画布为什么尺寸不同？** 面板为 480×640，组件使用 640×480 横向逻辑坐标，由固件旋转输出。更换屏幕要同时核对接口、初始化和触控坐标，不能只看尺寸或驱动芯片名称。
+
+**升级会清空设备吗？** 日常升级优先使用客户端 OTA。新机初始化、恢复出厂或分区迁移需要完整烧录，会清除设备上的设置、形象和组件；请先保留所需资料，并核对板型及芯片修订版。
+
+**如何反馈？** 使用 [GitHub Issues](https://github.com/ai-maker-lab/HachimoDock/issues)，说明客户端/固件版本、电脑系统、板型、连接方式及复现步骤。提交前请移除凭据、对话与个人数据。安全问题请按 [SECURITY.md](SECURITY.md) 私下反馈。
 
 ## 下载完整性
 
-当前 Release 的 `SHA256SUMS` 对照实际附件；完整烧录包内部另含镜像和分段校验清单。下载后核对 SHA-256，避免混用不同版本、芯片的镜像及清单。校验值能检查文件一致性，不替代来源与签名核验。
+Release 页面显示各附件的 SHA-256；完整烧录包内部另含镜像和分段校验清单。下载后核对 SHA-256，避免混用不同版本、芯片的镜像及清单。校验值能检查文件一致性，不替代来源与签名核验。
 
 ## 致谢 / Acknowledgements
 

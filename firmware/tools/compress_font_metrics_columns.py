@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """New, gated byte-column format; retain all original licensed metric records.
-Standard library only. Never modifies the legacy asset or the source font.
+Verification uses the standard library. Repacking can use zopfli 0.2.3.post1.
+Never modifies the legacy asset or the source font.
 """
 import argparse,hashlib,json,re,struct,zlib
 from pathlib import Path
@@ -48,14 +49,23 @@ def header(raw,data,packed):
   f'#define PET_FONT_METRIC_COLUMNS_ORIGINAL_ADLER UINT32_C(0x{zlib.adler32(raw):08x})\n'
   f'#define PET_FONT_METRIC_COLUMNS_ORIGINAL_SHA256 "{ORIGINAL_SHA}"\n')
 def main():
- p=argparse.ArgumentParser(description=__doc__);p.add_argument('--source',type=Path,default=ROOT/'main/pet_p4_font_cn.c');p.add_argument('--asset',type=Path,default=ROOT/'assets/fonts/pet_cn_metrics_columns.deflate');p.add_argument('--header',type=Path,default=ROOT/'main/pet_p4_font_metrics_columns_size.h');p.add_argument('--check',action='store_true');a=p.parse_args()
- raw=original(a.source);data=columns(raw);packed=zlib.compress(data,9)
+ p=argparse.ArgumentParser(description=__doc__);p.add_argument('--source',type=Path,default=ROOT/'main/pet_p4_font_cn.c');p.add_argument('--asset',type=Path,default=ROOT/'assets/fonts/pet_cn_metrics_columns.deflate');p.add_argument('--header',type=Path,default=ROOT/'main/pet_p4_font_metrics_columns_size.h');p.add_argument('--check',action='store_true')
+ p.add_argument('--zopfli', action='store_true', help='use the denser encoder when regenerating a candidate')
+ a=p.parse_args()
+ raw=original(a.source);data=columns(raw)
+ # A smaller match table improves the compression ratio for these byte columns.
+ encoder=zlib.compressobj(9,zlib.DEFLATED,zlib.MAX_WBITS,5)
+ packed=encoder.compress(data)+encoder.flush()
  if inverse(data)!=raw:raise ValueError('Metric inverse mismatch')
  if a.check:
   existing=a.asset.read_bytes();d=zlib.decompressobj();unpacked=d.decompress(existing)+d.flush()
   if not d.eof or d.unused_data or d.unconsumed_tail or unpacked!=data or a.header.read_text()!=header(raw,data,existing):raise ValueError('Changed/stale/trailing metric column asset')
   packed=existing
  else:
+  if a.zopfli:
+   from zopfli.zlib import compress
+   packed=compress(data,numiterations=15)
+  if zlib.decompress(packed)!=data:raise ValueError('Packed metrics mismatch')
   for f,b in [(a.asset,packed),(a.header,header(raw,data,packed).encode())]:
    with f.open('xb') as stream:stream.write(b)
  print(json.dumps({'records':RECORDS,'originalBytes':len(raw),'originalZlib9Bytes':len(zlib.compress(raw,9)),'columnZlib9Bytes':len(packed),'savedBytes':len(zlib.compress(raw,9))-len(packed),'originalSha256':ORIGINAL_SHA,'columnsSha256':hashlib.sha256(data).hexdigest(),'packedSha256':hashlib.sha256(packed).hexdigest(),'roundTripExact':True}))

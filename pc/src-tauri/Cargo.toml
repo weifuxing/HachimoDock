@@ -1,6 +1,6 @@
 [package]
 name = "pet-manager-tauri"
-version = "0.1.201"
+version = "0.1.245"
 description = "pet-manager Tauri client"
 authors = ["pet-manager contributors"]
 license-file = "../../LICENSE"
@@ -8,7 +8,7 @@ edition = "2021"
 
 [lib]
 name = "pet_manager_tauri_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [features]
 default = []
@@ -36,7 +36,7 @@ encoding_rs = "0.8"
 sysinfo = { version = "0.39", default-features = false, features = ["system", "network"] }
 chrono = "0.4"
 chrono-tz = "0.10"
-reqwest = { version = "0.12", features = ["blocking", "json", "stream", "native-tls", "system-proxy", "gzip"] }
+reqwest = { version = "0.12", features = ["blocking", "json", "stream", "native-tls", "system-proxy", "gzip", "multipart"] }
 uuid = { version = "1", features = ["v4"] }
 flate2 = "1"
 futures-util = "0.3"
@@ -66,7 +66,7 @@ spki = { version = "0.7.3", default-features = false }
 zeroize = { version = "1.8.2", features = ["alloc"] }
 rand = "0.8"
 ring = "0.17.14"
-zip = "0.6"
+zip = { version = "9.7", default-features = false, features = ["aes-crypto", "bzip2", "deflate-flate2-zlib-rs", "time", "zstd"] }
 # Used by install_clawpkg_over_ssh to stage widget dirs before scp.
 tempfile = "3.27.0"
 
@@ -82,8 +82,8 @@ core-foundation = "0.10"
 core-graphics = { version = "0.24", features = ["elcapitan"] }
 dispatch2 = "0.3.1"
 objc2 = "0.6.4"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["libc", "NSPasteboard", "NSPasteboardItem", "NSRunningApplication"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSData", "NSPathUtilities", "NSString", "NSProcessInfo"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["libc", "NSApplication", "NSPasteboard", "NSPasteboardItem", "NSRunningApplication"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSArray", "NSBundle", "NSData", "NSPathUtilities", "NSString", "NSProcessInfo", "NSURL"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

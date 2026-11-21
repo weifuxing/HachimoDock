@@ -3,6 +3,24 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { defaultAgentAppearanceMap, normalizeDetectedAgents, sanitizeAgentAppearanceMap } from "./lib/agent-appearance-config.js";
 const read = p => readFileSync(new URL(p, import.meta.url), "utf8");
+test("WorkBuddy native entries share its profile resolver without changing generic home or Bridge inheritance", () => {
+  const rust = read("../src-tauri/src/lib.rs");
+  const body = name => rust.split(`fn ${name}(`)[1].split("\n}\n")[0];
+  assert.match(rust, /mod workbuddy_paths;/);
+  assert.match(body("workbuddy_config_dir"), /workbuddy_paths::config_dir\(home\)/);
+  assert.match(body("detect_workbuddy"), /workbuddy_config_dir\(&home\)/);
+  assert.match(body("detect_workbuddy"), /root\.as_ref\(\)\.is_ok_and/);
+  assert.match(body("sync_widget_skills"), /target\.agent == "WorkBuddy"[\s\S]*match workbuddy_config_dir\(home\)/);
+  assert.match(body("sync_widget_skills"), /Err\(reason\)[\s\S]*skipped\.push[\s\S]*continue;/);
+  // Other Agents still receive exactly the existing HOME-first behavior.
+  assert.match(body("get_home_dir"), /var_os\("HOME"\)[\s\S]*or_else\(\|\| env::var_os\("USERPROFILE"\)\)/);
+  for (const name of ["command_for_host", "start_bridge_direct", "build_windows_bridge_launcher_script"]) {
+    // Reject accidental home overrides in either direct or autostart launch.
+    const source = name === "command_for_host"
+      ? rust.split("fn command_for_host<")[1].split("\n}\n")[0] : body(name);
+    assert.doesNotMatch(source, /env_clear\(|env(?:_remove)?\("(?:HOME|USERPROFILE)"|\$env:(?:HOME|USERPROFILE)\s*=/);
+  }
+});
 test("WorkBuddy has an independent appearance binding without changing existing agents", () => {
   const records = [{ id: "builtin-terrier" }, { id: "custom" }];
   const defaults = defaultAgentAppearanceMap(records);
@@ -10,7 +28,9 @@ test("WorkBuddy has an independent appearance binding without changing existing 
   const bound = sanitizeAgentAppearanceMap({ ...defaults, workbuddy: "custom" }, records);
   assert.equal(bound.workbuddy, "custom"); assert.equal(bound.codex, defaults.codex);
   const agents = normalizeDetectedAgents([{ id: "workbuddy", detected: true }]);
-  assert.equal(agents.at(-1).label, "WorkBuddy"); assert.equal(agents.at(-1).detected, true);
+  const workbuddy = agents.find(agent => agent.id === "workbuddy");
+  assert.equal(workbuddy.label, "WorkBuddy");
+  assert.equal(workbuddy.detected, true);
 });
 test("WorkBuddy stays isolated through native USB routing and Bridge startup", () => {
   const rust = read("../src-tauri/src/lib.rs");
@@ -26,7 +46,7 @@ test("WorkBuddy stays isolated through native USB routing and Bridge startup", (
 test("WorkBuddy voice uses its own current desktop composer and never falls back to Codex", () => {
   const source = read("../src-tauri/src/lib.rs").split("fn continue_device_voice_context_start(")[1].split("fn ")[0];
   assert.doesNotMatch(source, /暂不支持按键语音输入/);
-  assert.match(source, /matches!\(startup_context.target.agent_id.as_str\(\), "workbuddy" \| "deepseek-harness"\) \{\s*Err\(/);
+  assert.match(source, /matches!\(startup_context.target.agent_id.as_str\(\), "workbuddy" \| "devin" \| "deepseek-harness"\) \{\s*Err\(/);
   const composer = read("../src-tauri/src/codex_composer.rs");
   assert.match(composer, /"workbuddy" => macos::MacosAgent::WorkBuddy/);
   assert.match(composer, /"workbuddy" => &\["workbuddy.exe"\]/);
@@ -141,7 +161,7 @@ test("Windows WorkBuddy reads Chromium only through the native UIA COM client", 
     assert.doesNotMatch(path, /Automation\.AutomationElement|Automation\.TreeWalker|Find-BoundedComposerElements|Find-PointComposerElements/);
   }
   assert.match(workbuddyPaths[3], /Test-CurrentElectronAgent \$state.Agent[\s\S]*\[WorkBuddyUia\]::FindBounded/);
-  assert.match(source, /return @\('workbuddy','deepseek-harness'\) -contains \$agent/);
+  assert.match(source, /return @\('workbuddy','devin','deepseek-harness'\) -contains \$agent/);
   const native = between("public static class WorkBuddyUia {", '"@');
   assert.match(native, /e22ad333-b25f-460c-83d0-0581107395c9/);
   assert.match(native, /GetRawViewWalker\(\)/);

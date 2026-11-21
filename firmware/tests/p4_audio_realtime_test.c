@@ -1,5 +1,6 @@
 #include "pet_p4_resources_device.h"
 #include "pet_p4_audio.h"
+#include "pet_p4_media_codec.h"
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include <assert.h>
@@ -7,6 +8,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #define ESP_OK 0
 #define ESP_FAIL -1
@@ -23,10 +25,21 @@
 #define pdTRUE 1
 #define ESP_LOGW(...) ((void)0)
 #define ESP_LOGE(...) ((void)0)
+#define MALLOC_CAP_SPIRAM 1
+#define MALLOC_CAP_8BIT 2
 typedef pthread_mutex_t *SemaphoreHandle_t;
 typedef struct { int sample_rate, channel, bits_per_sample; } esp_codec_dev_sample_info_t;
 static pthread_mutex_t stream_lock;
 static SemaphoreHandle_t g_stream_lock = &stream_lock;
+static pthread_mutex_t ingress_lock = PTHREAD_MUTEX_INITIALIZER;
+static SemaphoreHandle_t g_stream_ingress_lock = &ingress_lock;
+static _Thread_local unsigned ingress_held;
+static void xSemaphoreTake(SemaphoreHandle_t lock, int wait) {
+  (void)wait;assert(!ingress_held);assert(!pthread_mutex_lock(lock));++ingress_held;
+}
+static void xSemaphoreGive(SemaphoreHandle_t lock) {
+  assert(ingress_held==1);--ingress_held;assert(!pthread_mutex_unlock(lock));
+}
 static int g_speaker = 1, g_microphone = 2, g_audio_task = 1, g_playback_queue = 1;
 static atomic_bool g_ready = true, g_enabled = true, g_playback_ready = true;
 static atomic_bool g_capture_requested, g_capture_active, g_capture_session_queue_empty, g_playback_active;
@@ -45,6 +58,9 @@ static unsigned resets;
 static pthread_mutex_t write_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t write_changed = PTHREAD_COND_INITIALIZER;
 static bool write_blocked, write_entered, write_released, flush_done, flush_waiting;
+static bool expect_speech_write;
+static unsigned speech_writes;
+static int speech_first_sample;
 static _Thread_local bool stopping;
 static bool capture_loop_testing;
 static int64_t capture_test_time(void);
@@ -72,15 +88,25 @@ static void pet_p4_afe_reference(const int16_t *pcm, size_t count) { (void)pcm; 
 static void pet_p4_afe_reference_abort(void) {}
 static void pet_p4_afe_reset_stream(void) { resets++; }
 static void send_audio_error(const char *session, const char *error, const char *detail) { (void)session; (void)error; (void)detail; }
-void pet_p4_audio_send_status(void) {}
-void pet_p4_audio_diagnostic(const char *event, const char *session, size_t bytes, bool ok) { (void)event; (void)session; (void)bytes; (void)ok; }
+void pet_p4_audio_send_status(void) {assert(!ingress_held);}
+void pet_p4_audio_diagnostic(const char *event, const char *session, size_t bytes, bool ok) { assert(!ingress_held); (void)event; (void)session; (void)bytes; (void)ok; }
 bool pet_p4_audio_ready(void) { return atomic_load(&g_ready); }
 bool pet_p4_audio_enabled(void) { return atomic_load(&g_enabled); }
 bool pet_p4_audio_playback_ready(void) { return atomic_load(&g_playback_ready); }
 static unsigned reservations(void) { pet_resource_usage_t usage; pet_resources_device_usage(&usage); return usage.realtime_reservations; }
+static void *heap_caps_malloc(size_t bytes, unsigned flags) {
+  assert(flags == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  return malloc(bytes);
+}
 static int esp_codec_dev_write(int device, const void *data, int bytes) {
-  (void)device; (void)data; (void)bytes;
+  (void)device;
   assert(reservations() > 0);
+  if (expect_speech_write) {
+    const uint8_t *samples = data;
+    assert(bytes == PET_P4_AUDIO_FRAME_BYTES);
+    speech_first_sample = (int16_t)((unsigned)samples[0] | (unsigned)samples[1] << 8);
+    ++speech_writes;
+  }
   assert(!pthread_mutex_lock(&write_lock));
   write_entered = true; assert(!pthread_cond_broadcast(&write_changed));
   while (write_blocked && !write_released) assert(!pthread_cond_wait(&write_changed, &write_lock));
@@ -92,6 +118,7 @@ static bool pet_p4_afe_ready(void);
 #include "production_audio_resources.inc"
 #include "production_stream_buffered.inc"
 #include "production_stream_drain.inc"
+#include "production_wasm_speech.inc"
 #include "production_audio_control.inc"
 
 static void storage_denied(void) {
@@ -170,6 +197,16 @@ static void actual_write_completion(void) {
   assert(!pthread_mutex_lock(&write_lock));
   while (!write_entered) assert(!pthread_cond_wait(&write_changed, &write_lock));
   assert(!pthread_mutex_unlock(&write_lock));
+  // The real consumer is parked inside codec write while owning stream_lock.
+  // Both protocol operations must finish before we permit that write to return.
+  assert(pet_p4_audio_stream_matches("block-write"));
+  size_t old_head=atomic_load(&g_stream_head);
+  uint8_t fresh[]={1,2,3,4};
+  assert(pet_p4_audio_stream_push_session("block-write",fresh,sizeof(fresh))==ESP_OK);
+  assert(atomic_load(&g_stream_head)==old_head+sizeof(fresh));
+  assert(!memcmp(ring+old_head,fresh,sizeof(fresh)));
+  assert(pet_p4_audio_stream_push_session("stale",fresh,sizeof(fresh))==ESP_OK);
+  assert(atomic_load(&g_stream_head)==old_head+sizeof(fresh));
   assert(!pthread_create(&stopper, NULL, flush_stream, NULL));
   assert(!pthread_mutex_lock(&write_lock));
   while (!flush_waiting) assert(!pthread_cond_wait(&write_changed, &write_lock));
@@ -179,6 +216,135 @@ static void actual_write_completion(void) {
   write_released = true; assert(!pthread_cond_broadcast(&write_changed)); assert(!pthread_mutex_unlock(&write_lock));
   assert(!pthread_join(writer, NULL)); assert(!pthread_join(stopper, NULL));
   assert(flush_done && !reservations());
+  write_blocked = false;
+  assert(!pet_p4_audio_stream_matches("block-write"));
+  assert(pet_p4_audio_stream_push_session("block-write",fresh,sizeof(fresh))==ESP_OK);
+  assert(!stream_buffered());
+  assert(pet_p4_audio_stream_begin("replacement")==ESP_OK);
+  assert(pet_p4_audio_stream_push_session("block-write",fresh,sizeof(fresh))==ESP_OK);
+  assert(!stream_buffered());
+  assert(pet_p4_audio_stream_push_session("replacement",fresh,sizeof(fresh))==ESP_OK);
+  assert(stream_buffered()==sizeof(fresh)&&!memcmp(ring,fresh,sizeof(fresh)));
+  // Capacity rejection cannot alter bytes, head or counters; wrap preserves order.
+  atomic_store(&g_stream_head,PET_P4_AUDIO_STREAM_RING_BYTES-2);
+  atomic_store(&g_stream_tail,PET_P4_AUDIO_STREAM_RING_BYTES-2);
+  assert(pet_p4_audio_stream_push_session("replacement",fresh,sizeof(fresh))==ESP_OK);
+  assert(ring[PET_P4_AUDIO_STREAM_RING_BYTES-2]==1&&ring[PET_P4_AUDIO_STREAM_RING_BYTES-1]==2&&ring[0]==3&&ring[1]==4);
+  atomic_store(&g_stream_tail,4);size_t head=atomic_load(&g_stream_head);
+  unsigned received=atomic_load(&g_stream_received_bytes);
+  assert(pet_p4_audio_stream_push_session("replacement",fresh,sizeof(fresh))==ESP_ERR_NO_MEM);
+  assert(atomic_load(&g_stream_head)==head&&atomic_load(&g_stream_received_bytes)==received);
+  assert(pet_p4_audio_stream_push_session("replacement",fresh,SIZE_MAX)==ESP_ERR_NO_MEM);
+  pet_p4_audio_stream_flush();assert(!reservations());
+}
+
+static void actual_ingress_flush_boundary(void) {
+  assert(pet_p4_audio_stream_begin("admitted")==ESP_OK);
+  flush_waiting=flush_done=false;
+  // An already admitted producer owns ingress while stop obtains stream.
+  // Stop must not reset the ring until that bounded copy has finished.
+  xSemaphoreTake(g_stream_ingress_lock,0);
+  pthread_t stopper;assert(!pthread_create(&stopper,NULL,flush_stream,NULL));
+  assert(!pthread_mutex_lock(&write_lock));
+  while(!flush_waiting)assert(!pthread_cond_wait(&write_changed,&write_lock));
+  assert(!flush_done);assert(!pthread_mutex_unlock(&write_lock));
+  uint8_t pcm[]={9,8,7,6};
+  assert(audio_stream_push_locked(pcm,sizeof(pcm))==ESP_OK);
+  xSemaphoreGive(g_stream_ingress_lock);
+  assert(!pthread_join(stopper,NULL));
+  assert(flush_done&&!g_stream_active&&!stream_buffered()&&!reservations());
+  assert(pet_p4_audio_stream_begin("after-stop")==ESP_OK);
+  assert(pet_p4_audio_stream_push_session("admitted",pcm,sizeof(pcm))==ESP_OK);
+  assert(!stream_buffered()&&!g_stream_received_bytes);
+  assert(pet_p4_audio_stream_push_session("after-stop",pcm,sizeof(pcm))==ESP_OK);
+  assert(stream_buffered()==sizeof(pcm)&&!memcmp(ring,pcm,sizeof(pcm)));
+  pet_p4_audio_stream_flush();assert(!reservations());
+}
+
+static bool drain_speech(void) {
+  uint8_t pcm[PET_P4_AUDIO_FRAME_BYTES];
+  xSemaphoreTakeRecursive(g_stream_lock, portMAX_DELAY);
+  bool wrote = wasm_speech_drain_locked(pcm, wasm_speech_blocked());
+  xSemaphoreGiveRecursive(g_stream_lock);
+  return wrote;
+}
+
+static void *physical_speech_write(void *unused) {
+  (void)unused;
+  assert(drain_speech());
+  return NULL;
+}
+
+static void actual_wasm_speech(void) {
+  uint8_t first[2 * PET_P4_WASM_SPEECH_BLOCK_BYTES] = {0xe8, 3, 0, 0, 64, 1};
+  uint8_t second[PET_P4_WASM_SPEECH_BLOCK_BYTES] = {0xd0, 7, 0, 0, 64, 1};
+  memcpy(first + PET_P4_WASM_SPEECH_BLOCK_BYTES, first, sizeof(second));
+  expect_speech_write = true;
+
+  assert(!pet_p4_audio_wasm_speech_play(1, first, sizeof(first), 100));
+  pet_p4_audio_wasm_speech_session(1);
+  assert(!pet_p4_audio_wasm_speech_play(1, first, sizeof(first) - 1, 100));
+  assert(!pet_p4_audio_wasm_speech_play(1, first, PET_P4_WASM_SPEECH_MAX_BYTES + 1, 100));
+  first[sizeof(first) - 1] = 0xf0;
+  assert(!pet_p4_audio_wasm_speech_play(1, first, sizeof(first), 100));
+  first[sizeof(first) - 1] = 0;
+
+  assert(pet_p4_audio_wasm_speech_play(1, first, sizeof(first), 50));
+  first[0] = 0;
+  assert(drain_speech() && speech_first_sample == 500 && speech_writes == 1);
+  first[0] = 0xe8;
+  assert(pet_p4_audio_wasm_speech_play(1, second, sizeof(second), 100));
+  pet_p4_audio_wasm_speech_stop(2);
+  assert(drain_speech() && speech_first_sample == 2000 && speech_writes == 2);
+  assert(!drain_speech() && !atomic_load(&g_wasm_speech_active));
+
+  assert(pet_p4_audio_wasm_speech_play(1, first, sizeof(first), 100));
+  pet_p4_audio_wasm_speech_session(2);
+  assert(!drain_speech() && !pet_p4_audio_wasm_speech_play(1, first, sizeof(first), 100));
+  assert(pet_p4_audio_wasm_speech_play(2, first, sizeof(first), 100));
+  assert(pet_p4_audio_capture_start(true) == ESP_OK);
+  assert(!pet_p4_audio_wasm_speech_play(2, second, sizeof(second), 100));
+  assert(pet_p4_audio_capture_stop() == ESP_OK && !drain_speech());
+
+  assert(pet_p4_audio_wasm_speech_play(2, first, sizeof(first), 100));
+  assert(pet_p4_audio_stream_begin("speech-preempt") == ESP_OK);
+  pet_p4_audio_stream_flush();
+  assert(!drain_speech());
+
+  assert(pet_p4_audio_wasm_speech_play(2, first, sizeof(first), 100));
+  write_blocked = true; write_entered = false; write_released = false;
+  pthread_t writer;
+  assert(!pthread_create(&writer, NULL, physical_speech_write, NULL));
+  assert(!pthread_mutex_lock(&write_lock));
+  while (!write_entered) assert(!pthread_cond_wait(&write_changed, &write_lock));
+  pet_p4_audio_wasm_speech_stop(2);
+  assert(atomic_load(&g_wasm_speech_active) && reservations() == 1);
+  storage_denied();
+  write_released = true;
+  assert(!pthread_cond_broadcast(&write_changed));
+  assert(!pthread_mutex_unlock(&write_lock));
+  assert(!pthread_join(writer, NULL));
+  assert(!drain_speech() && speech_writes == 3 && !reservations());
+  write_blocked = false;
+
+  assert(pet_p4_audio_wasm_speech_play(2, second, sizeof(second), 100));
+  codec_write_fail = true;
+  assert(drain_speech() && !drain_speech() && !reservations());
+  codec_write_fail = false;
+  assert(pet_p4_audio_wasm_channel_play(2, first, sizeof(first), 30, true));
+  assert(drain_speech() && speech_first_sample == 300);
+  assert(pet_p4_audio_wasm_channel_play(2, second, sizeof(second), 70, false));
+  assert(drain_speech() && speech_first_sample == 1700);
+  assert(drain_speech() && speech_first_sample == 300);
+  pet_p4_audio_wasm_channel_stop(2, true);
+  assert(!drain_speech());
+  free(g_wasm_music.encoded);
+  g_wasm_music.encoded = NULL;
+  pet_p4_audio_wasm_speech_session(0);
+  assert(!pet_p4_audio_wasm_speech_play(2, second, sizeof(second), 100));
+  free(g_wasm_speech.encoded);
+  g_wasm_speech.encoded = NULL;
+  expect_speech_write = false;
 }
 /* Execute the actual physical capture loop. Hooks represent stop/start arriving
  * during a codec call, during a timeout check, or during a chunk enqueue; no
@@ -259,10 +425,11 @@ static void send_audio_end(const char *session,const char *reason,uint32_t chunk
   (void)hash;assert(capture_ends<2&&!strcmp(session,capture_sessions[capture_ends]));
   if(capture_ends==0){
     assert(chunks==0&&bytes==0&&atomic_load(&g_capture_requested)&&g_capture_pending.serial);
-    assert(!strcmp(reason,capture_fault==2?"timeout":capture_fault==3?"encode_error":"released"));
+    assert(!strcmp(reason,capture_fault==2?"timeout":capture_fault==3?"capture_tx_failed":"released"));
   }else assert(chunks==1&&bytes==PET_P4_AUDIO_FRAME_BYTES&&!atomic_load(&g_capture_requested));
   capture_ends++;
 }
+static atomic_uint g_usb_capture_tx_pending;
 #include "production_capture_task.inc"
 static void *run_actual_capture(void *unused){audio_task(unused);return NULL;}
 static void actual_capture_stop_start_sessions(void){
@@ -283,6 +450,7 @@ int main(void) {
   assert(!pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE));
   assert(!pthread_mutex_init(&stream_lock, &attr)); assert(!pthread_mutexattr_destroy(&attr));
   capture_aba(); overlapping_sessions(); actual_write_completion();actual_capture_stop_start_sessions();
-  puts("PASS production capture loop/begin serialization, request owner snapshot, stop/start sessions, overlap, errors, paused music and blocked codec write/flush");
+  actual_ingress_flush_boundary();actual_wasm_speech();
+  puts("PASS production capture, overlapping audio sessions, paused music, and WASM speech ownership and physical write cancellation");
   return 0;
 }

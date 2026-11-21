@@ -28,7 +28,7 @@ const LEGACY_MIGRATION_MARKER: &str = ".legacy-component-migration-v1.json";
 // Import budgets exceed the bounded widget/sprite contract while preventing ZIP bombs.
 const COMPONENT_IMPORT_MAX_FILES: usize = 256;
 const COMPONENT_IMPORT_MAX_BYTES: u64 = 16 * 1024 * 1024;
-const FORBIDDEN_COMPONENT_SUFFIXES: &[&str] = &[
+pub(crate) const FORBIDDEN_COMPONENT_SUFFIXES: &[&str] = &[
     "bat", "cmd", "com", "css", "dll", "dylib", "exe", "html", "js", "mjs", "cjs", "ps1", "py",
     "sh", "so", "svg",
 ];
@@ -47,11 +47,15 @@ pub struct ComponentLibraryEntry {
     pub mtime_ms: u64,
     pub created_at_ms: u64,
     pub dashboard: HashMap<String, String>,
+    pub device_center_title: Option<String>,
+    pub cover_data_url: Option<String>,
+    pub wasm_preview: Option<WasmPreview>,
     pub buttons: Vec<serde_json::Value>,
     pub game_type: Option<String>,
     pub runtime_engine: Option<String>,
     pub data_source: Option<String>,
     pub media_source: Option<String>,
+    pub sync_requirements: crate::clawpkg::ComponentSyncRequirements,
     pub pc_extension: Option<serde_json::Value>,
     pub media_surface: Option<serde_json::Value>,
     pub app_runtime: Option<serde_json::Value>,
@@ -65,6 +69,16 @@ pub struct ComponentLibraryEntry {
     pub kind: Option<String>,
     pub valid: bool,
     pub validation_errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WasmPreview {
+    sha256: String,
+    canvas: Option<String>,
+    host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -94,6 +108,7 @@ pub struct ComponentLibrarySnapshot {
     pub components: Vec<ComponentLibraryEntry>,
     pub library_path: String,
     pub migration: LegacyMigrationSummary,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -217,11 +232,14 @@ fn copy_dir_recursive_safe(source: &Path, destination: &Path) -> Result<(), Stri
     Ok(())
 }
 
-fn extract_zip_safe(source: &Path, destination: &Path) -> Result<(), String> {
+pub(crate) fn extract_zip_safe(source: &Path, destination: &Path) -> Result<(), String> {
     fs::create_dir_all(destination).map_err(|error| error.to_string())?;
     let bytes = crate::clawpkg::read_clawpkg_source_file(source, crate::clawpkg::CLAWPKG_MAX_ARCHIVE_BYTES as u64)?;
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
         .map_err(|error| format!("读取组件 zip 失败 {}: {}", source.display(), error))?;
+    if archive.has_duplicate_names() {
+        return Err("组件 zip 含重复路径".into());
+    }
     if archive.len() > COMPONENT_IMPORT_MAX_FILES {
         return Err("组件 zip 文件数量超过导入限制".to_string());
     }
@@ -231,18 +249,18 @@ fn extract_zip_safe(source: &Path, destination: &Path) -> Result<(), String> {
         if entry.size() > remaining {
             return Err("组件 zip 解压大小超过导入限制".to_string());
         }
-        if entry.name().contains(['\\', ':']) {
+        if entry.name().map_err(|_| "组件 zip 文件名无效")?.contains(['\\', ':']) {
             return Err("组件 zip 含不安全的平台路径".to_string());
         }
         if entry
             .unix_mode()
             .is_some_and(|mode| mode & 0o170000 == 0o120000)
         {
-            return Err(format!("组件 zip 不允许符号链接: {}", entry.name()));
+            return Err("组件 zip 不允许符号链接".into());
         }
         let relative = entry
             .enclosed_name()
-            .ok_or_else(|| format!("组件 zip 含越界路径: {}", entry.name()))?;
+            .ok_or("组件 zip 含越界路径")?;
         let output = destination.join(relative);
         if entry.is_dir() {
             fs::create_dir_all(&output).map_err(|error| error.to_string())?;
@@ -616,11 +634,37 @@ fn entry_from_directory(path: &Path) -> Result<ComponentLibraryEntry, String> {
         mtime_ms: metadata_timestamp_ms(metadata.modified().ok()),
         created_at_ms: metadata_created_at_ms(&metadata),
         dashboard,
+        device_center_title: runtime.as_ref().map(|widget| {
+            widget["dashboard"]["title"].as_str()
+                .filter(|title| !title.is_empty()).unwrap_or(&id).to_owned()
+        }),
+        cover_data_url: if validation.ok {
+            crate::clawpkg::read_clawpkg_source_file(
+                &path.join(crate::clawpkg::HACHI_COVER_PATH), crate::clawpkg::HACHI_COVER_MAX,
+            ).ok().map(|bytes| format!("data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(bytes))).or_else(||{
+                    let components=path.parent()?.parent()?.parent()?;
+                    let hash=path.file_name()?.to_str()?;
+                    let bytes=crate::clawpkg::read_clawpkg_source_file(&components.join("community/covers").join(format!("{id}-{hash}.jpg")),2*1024*1024).ok()?;
+                    Some(format!("data:image/jpeg;base64,{}",base64::engine::general_purpose::STANDARD.encode(bytes)))
+                })
+        } else { None },
+        wasm_preview: runtime.as_ref().filter(|_| validation.ok).and_then(|runtime| {
+            Some(WasmPreview {
+                sha256: runtime["hachiWasm"].as_str()?.to_owned(),
+                canvas: runtime["hachiCanvas"].as_str().map(str::to_owned),
+                host: runtime["hachiHost"].as_str().map(str::to_owned),
+                audio_sha256: runtime["hachiAudioSha256"].as_str().map(str::to_owned),
+            })
+        }),
         buttons,
         game_type,
         runtime_engine,
         data_source: runtime.as_ref().and_then(|v| v.get("data")).and_then(|v| v.get("source")).and_then(|v| v.as_str()).map(str::to_string),
         media_source: runtime.as_ref().and_then(|v| v.get("media")).and_then(|v| v.get("source")).and_then(|v| v.as_str()).map(str::to_string),
+        sync_requirements: runtime.as_ref()
+            .map(crate::clawpkg::ComponentSyncRequirements::from_runtime)
+            .unwrap_or_default(),
         pc_extension: if validation.ok {read_json_from_dir(path,"pc/extension.json")}else{None},
         media_surface: if validation.ok {runtime.as_ref().and_then(|v|v.get("surface")).cloned()}else{None},
         app_runtime: if validation.ok {runtime.as_ref().filter(|v|v["surface"]["engine"]=="p4-app-surface-v1").cloned()}else{None},
@@ -645,8 +689,39 @@ fn publish_source_with_stager(
     stage: impl FnOnce(&Path, &Path) -> Result<(), String>,
 ) -> Result<ComponentLibraryEntry, String> {
     let _guard=LIBRARY_MUTATION.lock().map_err(|_|"组件库繁忙")?;
-    publish_source_locked_with_stager(home, source, stage)
+    let entry=publish_source_locked_with_stager(home, source, stage)?;
+    let acceptance=components_root(home).join("acceptance");
+    fs::create_dir_all(&acceptance).map_err(|e|e.to_string())?;
+    atomic_write_json(&acceptance.join(format!("{}.json",entry.version_hash)),&serde_json::json!({
+        "packageHash":entry.version_hash,"clientVersion":env!("CARGO_PKG_VERSION"),"checkedAt":now_ms(),
+        "scope":if entry.wasm_preview.is_some(){"native-startup-frames-inputs-three-seeds"}else{"declarative-contract-assets"},
+        "fullGameplayVerified":false
+    }))?;
+    let selections=components_root(home).join("selected");
+    fs::create_dir_all(&selections).map_err(|e|e.to_string())?;
+    atomic_write_json(&selections.join(format!("{}.json",entry.id)),&serde_json::json!({"hash":entry.version_hash,"importedAt":now_ms()}))?;
+    Ok(entry)
 }
+pub(crate) fn import_hachiapp(home: &Path, source: &Path) -> Result<ComponentLibraryEntry, String> {
+    let extension = source.extension().and_then(|value| value.to_str()).unwrap_or("");
+    if !source.is_file() || !(extension.eq_ignore_ascii_case("hachiapp") || extension.eq_ignore_ascii_case("clawpkg")) {
+        return Err("请选择 .hachiapp 或旧 .clawpkg 文件".into());
+    }
+    publish_source_with_stager(home, source, |input, destination| {
+        stage_source_package(input, destination)?;
+        let path = destination.join("hachiapp.json");
+        if !path.exists() {
+            if extension.eq_ignore_ascii_case("hachiapp") {
+                return Err(".hachiapp 缺少包清单".into());
+            }
+            let info = read_json_from_dir(destination, "component.json")
+                .ok_or("缺少组件清单")?;
+            atomic_write_json(&path, &serde_json::json!({"format":"hachiapp/1","id":info["id"]}))?;
+        }
+        Ok(())
+    })
+}
+
 fn stage_source_package(source: &Path, destination: &Path) -> Result<(), String> {
     if source.is_dir() {
         copy_dir_recursive_safe(source, destination)
@@ -693,6 +768,11 @@ fn publish_source_locked_with_stager(
             .ok_or_else(|| "暂存组件缺少可发布 manifest".to_string())?;
         if staged_manifest.id != manifest.id {
             return Err("组件来源在导入期间发生变化，请重新选择后导入".to_string());
+        }
+        let wasm = staged_package.join("runtime/app.wasm");
+        if wasm.is_file() {
+            let bytes = crate::clawpkg::read_clawpkg_source_file(&wasm, crate::clawpkg::HACHI_MAX_MODULE_BYTES as u64)?;
+            crate::petui_authoring::validate_wasm(&bytes)?;
         }
         let version_hash = package_content_hash(&staged_package)?;
         let component_root = library_root(home).join(&manifest.id);
@@ -805,9 +885,11 @@ fn preview_entry(path:&Path)->Result<ComponentLibraryEntry,String>{
     let fingerprint=preview_fingerprint(path)?;
     let mut cache=CACHE.get_or_init(Default::default).lock().map_err(|_|"组件预览繁忙")?;
     if let Some((_,_,_,entry))=cache.iter().find(|(p,fp,at,_)|p==path&&fp==&fingerprint&&at.elapsed()<std::time::Duration::from_secs(300)){return Ok(entry.clone());}
+    drop(cache);
     let mut entry=entry_from_directory(path)?;
     if package_content_hash(path)?!=entry.version_hash {entry.valid=false;entry.validation_errors.push("组件内容已变化，请重新导入".into());}
-    cache.retain(|(p,_,_,_)|p!=path);if cache.len()>=64{cache.remove(0);}
+    let mut cache=CACHE.get().unwrap().lock().map_err(|_|"组件预览繁忙")?;
+    cache.retain(|(p,_,_,_)|p!=path);if cache.len()>=512{cache.remove(0);}
     cache.push((path.to_path_buf(),fingerprint,std::time::Instant::now(),entry.clone()));Ok(entry)
 }
 
@@ -908,6 +990,9 @@ fn compare_component_versions(left: &ComponentLibraryEntry, right: &ComponentLib
 }
 
 fn scan_latest_versions(home: &Path) -> Result<Vec<ComponentLibraryEntry>, String> {
+    scan_versions(home, &mut Vec::new())
+}
+fn scan_versions(home: &Path, warnings: &mut Vec<String>) -> Result<Vec<ComponentLibraryEntry>, String> {
     let root = library_root(home);
     let mut components = Vec::new();
     for component_dir in fs::read_dir(&root)
@@ -935,12 +1020,23 @@ fn scan_latest_versions(home: &Path) -> Result<Vec<ComponentLibraryEntry>, Strin
                             path.display(),
                             error
                         );
+                        warnings.push(format!("{}：{}",path.display(),error));
                         None
                     }
                 }
             })
             .collect();
         versions.sort_by(compare_component_versions);
+        if let Some(id)=component_path.file_name().and_then(|v|v.to_str()) {
+            let selected=read_json_from_dir(&components_root(home).join("selected"), &format!("{id}.json"));
+            if let Some(value)=selected {
+                if let Some(index)=versions.iter().position(|v|Some(v.version_hash.as_str())==value["hash"].as_str()) {
+                    let mut entry=versions.remove(index);
+                    entry.created_at_ms=entry.created_at_ms.max(value["importedAt"].as_u64().unwrap_or(0));
+                    versions.insert(0,entry);
+                }
+            }
+        }
         if let Some(latest) = versions.into_iter().next() {
             components.push(latest);
         }
@@ -958,8 +1054,11 @@ fn scan_latest_versions(home: &Path) -> Result<Vec<ComponentLibraryEntry>, Strin
 pub fn list(home: &Path) -> Result<ComponentLibrarySnapshot, String> {
     ensure_layout(home)?;
     let migration = migrate_legacy_once(home)?;
+    let mut warnings=Vec::new();
+    let components=scan_versions(home,&mut warnings)?;
     Ok(ComponentLibrarySnapshot {
-        components: scan_latest_versions(home)?,
+        components,
+        warnings,
         library_path: library_root(home).display().to_string(),
         migration,
     })
@@ -1040,6 +1139,42 @@ pub fn inspect(path: &Path) -> Result<ComponentLibraryEntry, String> {
     Ok(entry)
 }
 
+/// Read only the validated module from the selected content-addressed library entry.
+fn read_wasm_preview_resource(home: &Path, id: &str, version: &str, sha256: &str, name: &str, limit: usize) -> Result<Vec<u8>, String> {
+    use sha2::{Digest, Sha256};
+    if id.is_empty() || id.len() > 47
+        || !id.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_".contains(&byte))
+        || version.len() != 16 || !version.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("WASM 组件来源无效".into());
+    }
+    let root = library_root(home).canonicalize().map_err(|_| "组件库不可用")?;
+    let module = root.join(id).join(version).join(name);
+    if module.canonicalize().ok().as_ref() != Some(&module) {
+        return Err("WASM 模块已移除或组件来源已变化".into());
+    }
+    let bytes = crate::clawpkg::read_clawpkg_source_file(&module, limit as u64)?;
+    if format!("{:x}", Sha256::digest(&bytes)) != sha256 {
+        return Err("WASM 资源校验失败，请重新导入组件".into());
+    }
+    Ok(bytes)
+}
+
+pub fn wasm_preview_module(home: &Path, id: &str, version: &str, sha256: &str) -> Result<Vec<u8>, String> {
+    let bytes = read_wasm_preview_resource(home, id, version, sha256, "runtime/app.wasm", crate::clawpkg::HACHI_MAX_MODULE_BYTES)?;
+    if crate::clawpkg::wasm_profile(&bytes).is_none() {
+        return Err("WASM 模块校验失败，请重新导入组件".into());
+    }
+    Ok(bytes)
+}
+
+pub fn wasm_preview_audio(home: &Path, id: &str, version: &str, sha256: &str) -> Result<Vec<u8>, String> {
+    let bytes = read_wasm_preview_resource(home, id, version, sha256, crate::wasm_audio::ASSET, crate::wasm_audio::MAX_BYTES)?;
+    crate::wasm_audio::validate(&bytes)?;
+    Ok(bytes)
+}
+
 pub fn delete(
     home: &Path,
     input: DeleteLibraryComponentInput,
@@ -1112,7 +1247,7 @@ mod tests {
     #[test]
     fn ui_preview_cache_revalidates_changed_files() {
         let home=tempfile::tempdir().unwrap();
-        let source=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../builtin-clawpkgs/hachimi-weather");
+        let source=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../optional-clawpkgs/hachimi-weather");
         let published=publish_source(home.path(),&source).unwrap();
         let path=PathBuf::from(&published.path);
         assert!(preview_entry(&path).unwrap().valid);
@@ -1128,7 +1263,7 @@ mod tests {
     #[test]
     fn host_cache_reuses_art_free_metadata_but_never_hides_content_changes(){
         let home=tempfile::tempdir().unwrap();
-        let source=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../builtin-clawpkgs/hachimi-weather");
+        let source=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../optional-clawpkgs/hachimi-weather");
         let published=publish_source(home.path(),&source).unwrap();
         let first=latest(home.path(),"hachimi-weather").unwrap().unwrap();
         assert!(first.valid);assert!(first.scene_sprites.is_empty());assert!(first.pc_application.is_none());
@@ -1149,23 +1284,26 @@ mod tests {
             &fs::read(root.join("../../firmware/factory-config.json")).unwrap()
         ).unwrap();
         let ids=config["components"]["ids"].as_array().unwrap();
-        assert_eq!(ids.len(),29,"factory catalog must retain all 29 components");
-        let expected:HashMap<String,String>=ids.iter().map(|id| {
+        let firmware_only = config["components"]["firmwareOnlyIds"].as_array().unwrap();
+        assert!(firmware_only.iter().all(|id| ids.contains(id)));
+        let desktop_ids: Vec<_> = ids.iter().filter(|id| !firmware_only.contains(id)).collect();
+        assert_eq!(desktop_ids.len(),26,"desktop catalog must contain 26 components after merging ideas and todos");
+        let expected:HashMap<String,String>=desktop_ids.iter().map(|id| {
             let id=id.as_str().unwrap();
             let source=root.join(id);
             assert_eq!(read_json_from_dir(&source,"component.json").unwrap()["id"],id);
             (id.to_owned(),package_content_hash(&source).unwrap())
         }).collect();
-        assert_eq!(expected.len(),ids.len(),"factory IDs must be unique");
+        assert_eq!(expected.len(),desktop_ids.len(),"desktop package IDs must be unique");
         ensure_bundled(home.path(),&root).unwrap();
         let first=scan_latest_versions(home.path()).unwrap();
         assert_eq!(first.len(),expected.len());
         assert!(first.iter().all(|c|c.valid),"{:?}",first.iter().filter(|c|!c.valid).map(|c|(&c.id,&c.validation_errors)).collect::<Vec<_>>());
         assert!(first.iter().all(|c|c.is_bundled_copy));
-        for id in ["cloud-hop","daily-almanac","book-pocket","daily-news","decision-capsule","answer-book","hope-train"] {
+        for id in ["hachimi-notes","cloud-hop","book-pocket","daily-news","decision-capsule","answer-book","hope-train","xiangqi","wasm-2046","wasm-piano"] {
             assert!(first.iter().any(|c|c.id==id&&c.valid));
         }
-        assert!(!first.iter().any(|c|matches!(c.id.as_str(),"music-player"|"hachimi-agent"|"hachimi-desk")));
+        assert!(!first.iter().any(|c|matches!(c.id.as_str(),"music-player"|"hachimi-agent"|"hachimi-desk"|"hachimi-home"|"hachimi-weather"|"daily-almanac"|"hachimi-garden"|"hachimi-break")));
         let learn=first.iter().find(|c|c.id=="hachimi-learn").unwrap();
         assert_eq!(learn.name,"每日新知");assert!(learn.pc_application.is_some());
         assert_eq!(first.iter().find(|c|c.id=="two-key-pong").unwrap().author,"弹珠汽水");
@@ -1176,7 +1314,7 @@ mod tests {
         assert_eq!(before,after);
         // A real same-ID user revision must survive reseeding unchanged and stay selected.
         let user_source=tempfile::tempdir().unwrap();
-        copy_dir_recursive_safe(&root.join("hachimi-weather"),user_source.path()).unwrap();
+        copy_dir_recursive_safe(&root.join("daily-news"),user_source.path()).unwrap();
         let manifest_path=user_source.path().join("component.json");
         let mut manifest:serde_json::Value=serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
         manifest["version"]=serde_json::json!("999.0.0");
@@ -1190,7 +1328,7 @@ mod tests {
             assert_eq!(package_content_hash(Path::new(&user.path)).unwrap(),user_hash);
             let selected=scan_latest_versions(home.path()).unwrap();
             assert_eq!(selected.len(),expected.len());
-            let selected=selected.iter().find(|c|c.id=="hachimi-weather").unwrap();
+            let selected=selected.iter().find(|c|c.id=="daily-news").unwrap();
             assert_eq!(selected.version,"999.0.0");
             assert_eq!(selected.version_hash,user_hash);
             assert!(!selected.is_bundled_copy);
@@ -1248,7 +1386,7 @@ mod tests {
         let mut zip = zip::ZipWriter::new(fs::File::create(archive).unwrap());
         for path in paths {
             let name = path.strip_prefix(source).unwrap().to_string_lossy().replace('\\', "/");
-            zip.start_file(name, zip::write::FileOptions::default()).unwrap();
+            zip.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
             zip.write_all(&fs::read(path).unwrap()).unwrap();
         }
         zip.finish().unwrap();
@@ -1533,11 +1671,10 @@ mod tests {
     }
 
     #[test]
-    fn zip_import_rejects_oversize_duplicate_and_platform_paths() {
+    fn zip_import_rejects_oversize_and_platform_paths() {
         let temp = tempfile::tempdir().unwrap();
         for (case, names, size) in [
             ("oversize", vec!["payload"], COMPONENT_IMPORT_MAX_BYTES as usize + 1),
-            ("duplicate", vec!["payload", "payload"], 1),
             ("alternate-stream", vec!["payload:stream"], 1),
             ("backslash", vec![r"..\payload"], 1),
             ("traversal", vec!["../payload"], 1),
@@ -1545,7 +1682,7 @@ mod tests {
             let input = temp.path().join(format!("{case}.zip"));
             let mut zip = zip::ZipWriter::new(fs::File::create(&input).unwrap());
             for name in names {
-                zip.start_file(name, zip::write::FileOptions::default()
+                zip.start_file(name, zip::write::SimpleFileOptions::default()
                     .compression_method(zip::CompressionMethod::Deflated)).unwrap();
                 zip.write_all(&vec![0u8; size]).unwrap();
             }
@@ -1561,7 +1698,7 @@ mod tests {
             let input = temp.path().join(format!("{count}.zip"));
             let mut zip = zip::ZipWriter::new(fs::File::create(&input).unwrap());
             for i in 0..count {
-                zip.start_file(format!("assets/{i}.json"), zip::write::FileOptions::default()).unwrap();
+                zip.start_file(format!("assets/{i}.json"), zip::write::SimpleFileOptions::default()).unwrap();
                 zip.write_all(b"{}").unwrap();
             }
             zip.finish().unwrap();

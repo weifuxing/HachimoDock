@@ -68,17 +68,29 @@ fn frame() -> Value {json!({"boardDeviceId":"board","conversationSessionId":"rtc
     s.capture_armed.store(true,Ordering::SeqCst);s.cancelled.store(true,Ordering::SeqCst);route_session_audio(&s,"audio/chunk",&frame());assert!(rx.try_recv().is_err());
 }
 #[test] fn invalid_pcm_size_remains_dropped_and_channel_overflow_remains_fail_closed() {
-    // A malformed current, processed frame now ends this round explicitly.
-    // Later valid PCM cannot revive it or replace its first failure cause.
+    // Bad frames are never queued. A valid frame resets the failure streak.
     {
-        let(s,mut rx)=session();let mut p=frame();p["sessionId"]=json!("capture-current");
-        p["data"]=json!(BASE64.encode(vec![0;FRAME_BYTES-1]));
-        assert!(route_session_audio(&s,"audio/chunk",&p));
-        assert!(rx.try_recv().is_err());assert!(s.cancelled.load(Ordering::SeqCst));
-        assert_eq!(s.status.lock().unwrap().reason,"capture_frame_invalid");
-        assert!(route_session_audio(&s,"audio/chunk",&frame()));
+        let (s, mut rx) = session();
+        let mut invalid = frame();
+        invalid["data"] = json!(BASE64.encode(vec![0; FRAME_BYTES - 1]));
+        for _ in 0..2 {
+            assert!(route_session_audio(&s, "audio/chunk", &invalid));
+            assert!(!s.cancelled.load(Ordering::SeqCst));
+            assert!(rx.try_recv().is_err());
+        }
+        assert!(route_session_audio(&s, "audio/chunk", &frame()));
+        assert!(matches!(rx.try_recv(), Ok(Input::Pcm(_, Some(false)))));
+        for _ in 0..2 {
+            assert!(route_session_audio(&s, "audio/chunk", &invalid));
+            assert!(!s.cancelled.load(Ordering::SeqCst));
+            assert!(rx.try_recv().is_err());
+        }
+        invalid["data"] = json!("*");
+        assert!(route_session_audio(&s, "audio/chunk", &invalid));
+        assert!(s.cancelled.load(Ordering::SeqCst));
+        assert_eq!(s.status.lock().unwrap().reason, "capture_frame_invalid");
+        assert!(route_session_audio(&s, "audio/chunk", &frame()));
         assert!(rx.try_recv().is_err());
-        assert_eq!(s.status.lock().unwrap().reason,"capture_frame_invalid");
     }
     // Overflow needs a fresh round; the invalid-frame round is terminal.
     let(s,mut rx)=session();let capacity=rx.capacity();let mut p=frame();p["sessionId"]=json!("capture-current");

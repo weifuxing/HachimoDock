@@ -107,7 +107,7 @@
   "widgetProgramAggregateFuel": 4096,
   "widgetAppForm": "p4-app-form-v1",
   "debugEvidenceIdentity": "p4-evidence-identity-v1",
-  "debugBootId": "b3bc3f6b9fa1e180",
+  "debugBootId": "0123456789abcdef",
   "widgetAppFormV2": "p4-app-form-v2",
   "widgetAppFormV3": "p4-app-form-v3",
   "widgetAppShell": "p4-app-shell-v1",

@@ -46,14 +46,10 @@ static const char *compact_pet_status_label(pet_p4_view_status_t status) {
 }
 
 static bool should_compact_bubble(const pet_p4_runtime_state_t *state) {
-  if (!state) return true;
-  if (text_is_empty(state->current_title) && strlen(state->current_speech) <= 36) {
-    return true;
-  }
-  if (strcmp(state->current_state, "idle") == 0 && strlen(state->current_speech) <= 36) {
-    return true;
-  }
-  return false;
+  /* Reserve the compact treatment for status labels. Real replies keep the
+   * same body size when the next partial update extends the text. */
+  return !state || (strcmp(state->current_state, "idle") == 0
+    && strcmp(state->current_speech, compact_pet_status_label(PET_P4_VIEW_STATUS_IDLE)) == 0);
 }
 
 static bool is_dsh_state_event(const pet_p4_runtime_state_t *state) {

@@ -9,15 +9,15 @@ export const dependencyLicenseResources = Object.freeze([
   ['Espressif-ESP-SR-LICENSE.txt', '923e6274ea64b226c4f0cb9fc29bda915ae343fd6a8fc290ff5e0daaa85f8813'],
   ['sysinfo-LICENSE.txt', '666ccdb468b5fe0f408f90ebb563c95e4d453e89bd1660e93aa7463f2807ae36'],
   ['MiSans-Font-License-Agreement.pdf', '4a93a27cd2bd81b3b5ecfd0a853144a876fa26938a93a68443c67d74172fcb86'],
-  ['MiSans-Embedded-Fonts-NOTICE.txt', '5511b1367b17f089d554b138c3a08e98e36ce5e5675dd049419492d65a282b11'],
+  ['MiSans-Embedded-Fonts-NOTICE.txt', '701ae9d61bfaff4a6ff6b6db450d4f25606521d6b0eed31def1d8ec90353b7cb'],
   ['Espressif-Waveshare-BSP-LICENSE.txt', 'cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30'],
   ['unescaper-0.1.8-MIT-LICENSE.txt', '6e0bad263cbd2aa6235d78e3c26bcfa2668cf32f6b274ae21ce0dd620114c7b3'],
   ['serialport-4.9.0-LICENSE-NOTICE.txt', '00a4d69750686b8fcd2369b17176b4389d67f275fd22b9eab6c66155b72bd4d2'],
   ['MPL-2.0.txt', '3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04'],
   ['DEPENDENCY-LICENSE-NOTICE.md', '357b4e159c983730eb6fda2b312226f52b511793a223189c8e991f79396c6782'],
   ['Node-26.7.0-LICENSE.txt', 'e991d81497a85bb24fc6bffae0a3637a6accd6c6bc5ce1f2c5698bd555cf9d49'],
-  ['DESKTOP-RUNTIME-LICENSES.txt', 'b9a5b7bddeccc0525c50d44a60d2a3b48bc59195de0daff3c5070d4366f6d559'],
-  ['DESKTOP-RUNTIME-DEPENDENCIES.json', '82095ad81d0499fd40eae9526b16b8b1572721317f39b028de74da43840e6c7b'],
+  ['DESKTOP-RUNTIME-LICENSES.txt', '96112f163a22976dc821c7328b01582c74870003921c251615c67dd643971662'],
+  ['DESKTOP-RUNTIME-DEPENDENCIES.json', '91d5fbc72cb828f46e13064800cd75203466f61e338f21ceafcea02fff99ab66'],
 ].map(([name, sha256]) => Object.freeze({ name, sha256 })));
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');

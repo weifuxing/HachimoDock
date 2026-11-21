@@ -1,10 +1,11 @@
 /**
  * [Input] Provider id, optional browser storage, and user-provided API credentials.
- * [Output] Shared video provider config and user-config-first persistence; failed writes throw instead of reporting a false save. Ark models are discovered live.
+ * [Output] Shared video provider config with Kling API-key defaults and user-config-first persistence; failed writes throw instead of reporting a false save. Ark models are discovered live.
  * [Pos] config node in pc/src/lib/avatar-pipeline
  * [Sync] If this file changes, update this header and `pc/src/.folder.md`.
  */
 
+import { KLING_BASE_URL, KLING_MODELS, klingModel, klingVideoParameters } from "./kling-models.js";
 import { DEFAULT_THINKING_MODEL } from "./thinking-model.js";
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -70,8 +71,8 @@ export const VIDEO_PROVIDERS = [
     id: "kling",
     label: "可灵 AI",
     sub: "Kling 视频生成",
-    baseUrl: "https://api-beijing.klingai.com",
-    models: ["kling-v2-master", "kling-v1-6", "kling-v1-5"],
+    baseUrl: KLING_BASE_URL,
+    models: KLING_MODELS.map(model => model.id),
     thinkingModel: "",
   },
   {
@@ -137,22 +138,21 @@ export function loadProviderConfig(providerId = DEFAULT_PROVIDER_ID, storage = d
   const provider = providerById(providerId);
   const saved = parseStoredProviderConfig(provider.id, storage) || {};
   const isVolcengine = provider.id === "volcengine";
+  const isKling = provider.id === "kling";
+  const apiKey = resolveProviderApiKey(provider.id, saved.apiKey);
   const hasSavedFastGeneration = typeof saved.fastGeneration === "boolean";
   const savedModel = typeof saved.model === "string" ? saved.model : "";
+
+  const selectedKlingModel = isKling ? klingModel(savedModel) || KLING_MODELS[0] : null;
 
   return {
     providerId: provider.id,
     storageError: nativeRuntime() ? nativeReadError : "",
     provider,
-    apiKey: resolveProviderApiKey(provider.id, saved.apiKey),
-    accessKey: typeof saved.accessKey === "string" ? saved.accessKey : "",
-    secretKey: typeof saved.secretKey === "string" ? saved.secretKey : "",
-    baseUrl: isVolcengine
-      ? VOLCENGINE_BASE_URL
-      : typeof saved.baseUrl === "string"
-        ? saved.baseUrl
-        : provider.baseUrl,
-    model: savedModel && hasSavedFastGeneration ? savedModel : provider.models[0] || savedModel || "",
+    apiKey,
+    needsKlingApiKey: isKling && !apiKey && Boolean(saved.accessKey || saved.secretKey),
+    baseUrl: !isVolcengine && !isKling && typeof saved.baseUrl === "string" ? saved.baseUrl : provider.baseUrl,
+    model: selectedKlingModel?.id || (savedModel && hasSavedFastGeneration ? savedModel : provider.models[0] || savedModel || ""),
     thinkingModel: isVolcengine && (!saved.thinkingModel || saved.thinkingModel === "doubao-seed-2-0-pro-260215")
       ? VOLCENGINE_THINKING_MODEL
       : typeof saved.thinkingModel === "string"
@@ -162,9 +162,17 @@ export function loadProviderConfig(providerId = DEFAULT_PROVIDER_ID, storage = d
       ? saved.imageModel.trim()
       : provider.imageModel || "",
     fastGeneration: saved.fastGeneration !== false,
-    videoParameters: pickVideoParameters(saved.videoParameters),
+    videoParameters: selectedKlingModel
+      ? klingVideoParameters(selectedKlingModel, saved.videoParameters || {})
+      : pickVideoParameters(saved.videoParameters),
     advanced: { ...DEFAULT_ADVANCED, ...(saved.advanced || {}) },
   };
+}
+
+export function defaultGenerationProvider(storage = defaultStorage()) {
+  return !loadProviderConfig(DEFAULT_PROVIDER_ID, storage).apiKey && loadProviderConfig("kling", storage).apiKey
+    ? "kling"
+    : DEFAULT_PROVIDER_ID;
 }
 
 export function loadArkImageConfig(storage = defaultStorage()) {

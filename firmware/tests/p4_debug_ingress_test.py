@@ -61,6 +61,6 @@ int main(void){
     subprocess.run([str(exe)],check=True,timeout=10)
 
 def test_screenshot_parser_consumes_the_entire_envelope():
-    source=(ROOT/'main/pet_p4_main.c').read_text().split('static bool maybe_handle_debug_line(',1)[1].split('/* Only protocol_worker_task owns these scratch buffers.',1)[0]
+    source=(ROOT/'main/pet_p4_main.c').read_text().replace('__attribute__((optimize("Os"))) ', '').split('static bool maybe_handle_debug_line(',1)[1].split('/* Only protocol_worker_task owns these scratch buffers.',1)[0]
     assert 'cJSON_ParseWithOpts(line,NULL,true)' in source
     assert 'cJSON_Parse(line)' not in source

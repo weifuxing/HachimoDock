@@ -1,0 +1,17 @@
+{
+  "board": {
+    "source": "437d18b8fadad6f686004261f5e4956e03d0a47eeb1695f09f9a711c0af85ccc",
+    "spec": "5b9366ffc202e56d383283fb48fd952293207debab448a610d92c96a3bc1428e",
+    "encoded": "49fb4219094c201e75b9a060456155404cfb8278c53fe68492192a8f63720a0d"
+  },
+  "type0": {
+    "source": "2a0a2ad79dfdfb533159e576a70c76f0dcb575a8da254728a27a1c8f1555f5bc",
+    "spec": "330edcf6bd59d1b15c3532d2ba62896e35d447293201dfaf32d4936e13932eff",
+    "encoded": "0e851f1200a61979777d5a139bc44905ded04e75c4b96661a49fefec17f12c20"
+  },
+  "type1": {
+    "source": "34bf2b6fa3eaf7a5cf05b1de2127ab7b09ba86bdfc97b8785fa0dbf0169efb26",
+    "spec": "f8acd7dc1c9189fda2c8879fbe511599acdb0554ca5e69bffaedc3aeadb7063d",
+    "encoded": "02a2718ea222bd1cdf4596854726e7cd227d8b93ac882a1079a744dccb1875c8"
+  }
+}

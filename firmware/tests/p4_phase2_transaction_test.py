@@ -52,6 +52,8 @@ def begin_binary(tmp_path_factory,request):
 #endif
 static struct {bool active,repair_resources,preserve_unchanged;char transfer_id[64],widget_id[48],widget_json[200];unsigned char sprites[128];}g_staging;
 static unsigned g_image_used,g_image_next;static char g_image_id[32];
+static bool g_lan_bundle_owned;
+static void reap_lan_bundle(void) {}
 static bool g_builtin_sync_in_progress,g_install_unchanged,busy,g_catalog_recovery_blocked;static unsigned audio,media_resets;
 static unsigned char media[256];
 static bool pet_p4_miniapp_storage_busy(void){return busy;}
@@ -62,7 +64,7 @@ static bool pet_p4_audio_music_active(void){return audio==4;}
 static void pet_cmedia_stage_reset(void){memset(media,0,sizeof(media));media_resets++;}
 """
     fixture=fixture.replace('EXT_VALUE',str(request.param))
-    fixture+='\n'.join(function(code,n) for n in ['json_string','set_error','copy_utf8','safe_id','safe_widget_id','transfer_matches','pet_p4_miniapp_install_begin'])
+    fixture+='\n'.join(function(code,n) for n in ['json_string','set_error','copy_utf8','safe_id','safe_widget_id','transfer_matches','widget_install_stage_reset','pet_p4_miniapp_install_begin'])
     fixture+=r"""
 int main(int argc,char **argv){
  assert(argc==2);int mode=atoi(argv[1]);char error[200]={0};

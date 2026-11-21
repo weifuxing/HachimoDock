@@ -315,6 +315,7 @@ fn validate_motion_runtime(r:&Value)->Result<(),String>{
 }
 
 pub fn validate_app_runtime(runtime:&Value)->Result<(),String>{
+    crate::component_news::validate_device_headlines(runtime)?;
     crate::app_graphics::validate_runtime(runtime)?;
     cells_shape(runtime)?;
     crate::app_shell::validate(runtime)?;

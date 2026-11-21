@@ -57,6 +57,87 @@ static bool geometry(spiffs *fs,uint16_t block,uint16_t entry){
     return fs && SPIFFS_CFG_LOG_PAGE_SZ(fs)>0 && SPIFFS_CFG_LOG_BLOCK_SZ(fs)>=SPIFFS_CFG_LOG_PAGE_SZ(fs)
         && block<fs->block_count && entry<SPIFFS_OBJ_LOOKUP_MAX_ENTRIES(fs);
 }
+/* Caller holds hint_mux. */
+static void remember_hint(hint_t learned) {
+    unsigned set = learned.hash & (SETS - 1);
+    unsigned slot = WAYS;
+    for (unsigned way = 0; way < WAYS; way++) {
+        hint_t *h = &hints[set][way];
+        if (h->valid && h->fs == learned.fs && h->hash == learned.hash && h->length == learned.length) {
+            slot = way;
+            break;
+        }
+        if (!h->valid) slot = way;
+    }
+    if (slot == WAYS) {
+        slot = replace[set];
+        replace[set] = (uint8_t)((slot + 1) % WAYS);
+    }
+    hints[set][slot] = learned;
+}
+
+#if PET_P4_SPIFFS_HINT_APPLY
+typedef struct {
+    int64_t deadline_us;
+    unsigned visited;
+} catalog_hint_scan_t;
+static bool catalog_hints_attempted;
+
+/* The SDK lookup caller already holds the filesystem lock. Inspect only
+ * finalized index headers and keep only search coordinates. The subsequent
+ * ordinary lookup still checks the full filename and returns its own result. */
+static s32_t catalog_hint_visitor(spiffs *fs, spiffs_obj_id id, spiffs_block_ix block,
+    int entry, const void *unused, void *context) {
+    (void)unused;
+    catalog_hint_scan_t *scan = context;
+    if ((scan->visited++ & 63U) == 0 && esp_timer_get_time() >= scan->deadline_us)
+        return SPIFFS_VIS_END;
+    if (id == SPIFFS_OBJ_ID_FREE || id == SPIFFS_OBJ_ID_DELETED || !(id & SPIFFS_OBJ_ID_IX_FLAG))
+        return SPIFFS_VIS_COUNTINUE;
+
+    const spiffs_page_ix page = SPIFFS_OBJ_LOOKUP_ENTRY_TO_PIX(fs, block, entry);
+    spiffs_page_object_ix_header header;
+    s32_t result = _spiffs_rd(fs, SPIFFS_OP_T_OBJ_LU2 | SPIFFS_OP_C_READ,
+        0, SPIFFS_PAGE_TO_PADDR(fs, page), sizeof(header), (u8_t *)&header);
+    if (result != SPIFFS_OK) return result;
+    const unsigned flags = SPIFFS_PH_FLAG_DELET | SPIFFS_PH_FLAG_FINAL | SPIFFS_PH_FLAG_IXDELE;
+    if (header.p_hdr.span_ix != 0
+        || (header.p_hdr.flags & flags) != (SPIFFS_PH_FLAG_DELET | SPIFFS_PH_FLAG_IXDELE))
+        return SPIFFS_VIS_COUNTINUE;
+
+    uint32_t hash;
+    uint8_t length;
+    if (memcmp(header.name, "/p4", 3) == 0 && key(header.name, &hash, &length)) {
+        portENTER_CRITICAL(&hint_mux);
+        remember_hint((hint_t){.fs=fs, .hash=hash, .length=length, .valid=1,
+            .block=block, .entry=(uint16_t)entry});
+        portEXIT_CRITICAL(&hint_mux);
+    }
+    return SPIFFS_VIS_COUNTINUE;
+}
+
+static void prime_catalog_hints(spiffs *fs, const u8_t *name, uint8_t length) {
+    static const char first_catalog[] = "/p4-miniapps-0.json";
+    if (!fs || length != sizeof(first_catalog) - 1 || memcmp(name, first_catalog, sizeof(first_catalog)))
+        return;
+
+    portENTER_CRITICAL(&hint_mux);
+    bool prime = !catalog_hints_attempted;
+    catalog_hints_attempted = true;
+    portEXIT_CRITICAL(&hint_mux);
+    if (!prime) return;
+
+    const int64_t started = esp_timer_get_time();
+    catalog_hint_scan_t scan = {.deadline_us = started + 850000};
+    (void)spiffs_obj_lu_find_entry_visitor(fs, 0, 0, SPIFFS_VIS_NO_WRAP, 0,
+        catalog_hint_visitor, NULL, &scan, NULL, NULL);
+    const int64_t ended = esp_timer_get_time();
+    portENTER_CRITICAL(&hint_mux);
+    if (ended >= started) stats.catalog_prime_us = (uint32_t)(ended - started);
+    portEXIT_CRITICAL(&hint_mux);
+}
+#endif
+
 s32_t __real_spiffs_object_find_object_index_header_by_name(spiffs*,const u8_t[SPIFFS_OBJ_NAME_LEN],spiffs_page_ix*);
 s32_t __wrap_spiffs_object_find_object_index_header_by_name(spiffs *fs,const u8_t name[SPIFFS_OBJ_NAME_LEN],spiffs_page_ix *pix){
     int entry_errno=errno;
@@ -64,6 +145,9 @@ s32_t __wrap_spiffs_object_find_object_index_header_by_name(spiffs *fs,const u8_
     bool keyed=key(name,&hash,&length),found=false;
     unsigned set=hash&(SETS-1);hint_t candidate={0};
     if(keyed){
+#if PET_P4_SPIFFS_HINT_APPLY
+        prime_catalog_hints(fs, name, length);
+#endif
         portENTER_CRITICAL(&hint_mux);
         for(unsigned way=0;way<WAYS;way++){
             const hint_t *h=&hints[set][way];
@@ -99,16 +183,7 @@ s32_t __wrap_spiffs_object_find_object_index_header_by_name(spiffs *fs,const u8_
     if(result==SPIFFS_OK){increment(&stats.positives);stats.positive_us+=elapsed;}
     else if(result==SPIFFS_ERR_NOT_FOUND){increment(&stats.negatives);stats.negative_us+=elapsed;}
     else{increment(&stats.errors);stats.error_us+=elapsed;}
-    if(learned.valid){
-        unsigned slot=WAYS;
-        for(unsigned way=0;way<WAYS;way++){
-            hint_t *h=&hints[set][way];
-            if(h->valid && h->fs==fs && h->hash==hash && h->length==length){slot=way;break;}
-            if(!h->valid)slot=way;
-        }
-        if(slot==WAYS){slot=replace[set];replace[set]=(uint8_t)((slot+1)%WAYS);}
-        hints[set][slot]=learned;
-    }
+    if (learned.valid) remember_hint(learned);
     portEXIT_CRITICAL(&hint_mux);
     errno=result_errno;
     return result;

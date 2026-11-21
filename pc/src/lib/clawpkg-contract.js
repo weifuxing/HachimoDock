@@ -95,6 +95,9 @@ export const COMPONENT_BUTTON_EVENTS = [
   "button.sw1.short_press",
   "button.sw2.short_press",
   "button.sw3.short_press",
+  "button.sw1.double_press",
+  "button.sw2.double_press",
+  "button.sw3.double_press",
   "button.encoder.short_press",
   "button.encoder.long_press",
   "knob.rotate_cw",
@@ -542,7 +545,7 @@ export function validateWidgetData(widget, errors) {
   if (widget?.data === undefined) {try{validateDataRows(widget);}catch(error){errors.push(error.message);}return;}
   try{validateDataRows(widget);}catch(error){errors.push(error.message);}
   const data = widget.data;
-  if (!isObject(data) || Object.keys(data).some((key) => !["source", "page_var", "select_var", "filters", "refresh_action"].includes(key))
+  if (!isObject(data)
       || !/^[a-z0-9_.-]{1,47}$/.test(data.source || "")
       || widget.vars?.[data.page_var]?.type !== "int"
       || widget.engine !== "p4-bounded-runtime-v4" || "scene" in widget || "game" in widget) {

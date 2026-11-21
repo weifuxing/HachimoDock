@@ -1,16 +1,14 @@
 {
   "dashboard": {
-    "title": "灵感胶囊",
+    "title": "想法与待办",
+    "eyebrow": "笔记与待办保存在本机",
+    "headline": "先记下来，慢慢完成",
+    "metricValue": "等待电脑连接",
+    "note": "连接 Pet Manager 后，记录想法、整理待办。",
     "visualStyle": "clean",
-    "visualPalette": "candy",
+    "visualPalette": "mint",
     "visualLayout": "tool",
-    "visualSprite": "star",
-    "eyebrow": "PC 通用服务 · 连接后即可使用",
-    "headline": "接住一个想法",
-    "metricValue": "",
-    "note": "录音转写后，由你确认保存或转为待办。",
-    "footer": "默认：主键操作  副键管理  全局键退出",
-    "metricLabel": "开始录制",
-    "metricUnit": "保存笔记"
+    "visualSprite": "target",
+    "footer": "连接电脑后，录下想法或整理待办"
   }
 }

@@ -11,6 +11,92 @@ def compile_run(tmp_path,code,name):
       *([str(ROOT/'main/pet_p4_resources.c')] if name=='adapter' else []),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True,timeout=35)
 
+def test_automatic_video_switch_waits_for_the_last_displayed_frame(tmp_path):
+    assets = (ROOT / 'main/pet_p4_assets.c').read_text()
+    catalog = '\n'.join(function(assets, name) for name in (
+        'pet_p4_asset_catalog_find_exact', 'pet_p4_asset_catalog_count_prefix',
+        'pet_p4_asset_catalog_nth_prefix',
+    ))
+    compile_run(tmp_path, r'''
+#include <assert.h>
+#include "pet_p4_behavior.c"
+''' + catalog + r'''
+static pet_p4_asset_catalog_t catalog = {.count = 6, .entries = {
+    {.family = "idle.wandering", .frames = 75, .duration_ms = 5000},
+    {.family = "idle.default", .frames = 75, .duration_ms = 5000},
+    {.family = "touch.what", .frames = 75, .duration_ms = 5000},
+    {.family = "working", .frames = 75, .duration_ms = 5000},
+    {.family = "working.thinking", .frames = 75, .duration_ms = 5000},
+    {.family = "welcome", .frames = 150, .duration_ms = 10000},
+}};
+
+int main(void) {
+    pet_p4_behavior_t view;
+    pet_p4_behavior_init(&view);
+    catalog.count = 5;
+    assert(pet_p4_behavior_select_video(&view, &catalog, "idle", 2, 100, true) == 0);
+    assert(view.play_video_once);
+    pet_p4_behavior_presented_video_frame(&view, 0, 250);
+    pet_p4_behavior_presented_video_frame(&view, 47, 5050);
+    assert(pet_p4_behavior_select_video(&view, &catalog, "idle", 2, 5100, true) == 0);
+    assert(pet_p4_behavior_video_target_frame(&view, 75, 5000, 5100) == 48);
+    pet_p4_behavior_presented_video_frame(&view, 73, 6500);
+    assert(pet_p4_behavior_select_video(&view, &catalog, "idle", 2, 6600, true) == 0);
+    pet_p4_behavior_presented_video_frame(&view, 74, 6650);
+    assert(pet_p4_behavior_select_video(&view, &catalog, "idle", 2, 6700, true) == 1);
+    assert(view.selected_since_ms == 6700 && view.presented_video_frame == -1);
+
+    /* A stalled decoder or a repeated restart cannot keep a clip selected. */
+    pet_p4_behavior_presented_video_frame(&view, 0, 6750);
+    pet_p4_behavior_presented_video_frame(&view, 1, 6850);
+    pet_p4_behavior_presented_video_frame(&view, 0, 11650);
+    pet_p4_behavior_presented_video_frame(&view, 1, 11700);
+    assert(pet_p4_behavior_select_video(&view, &catalog, "idle", 2, 11700, true) == 0);
+    assert(pet_p4_behavior_select_video(&view, &catalog, "touch.what", 2, 11800, true) == 2);
+    pet_p4_behavior_presented_video_frame(&view, 0, 12000);
+    pet_p4_behavior_presented_video_frame(&view, 59, 16800);
+    assert(pet_p4_behavior_select_video(&view, &catalog, "idle", 2, 16800, true) == 2);
+    assert(pet_p4_behavior_select_video(&view, &catalog, "working", 2, 16850, true) == 3);
+    assert(view.play_video_once);
+
+    assert(pet_p4_behavior_select_video(&view, &catalog, "touch.what", 2, 16900, true) == 2);
+    assert(pet_p4_behavior_select_video(&view, &catalog, "idle", 2, 16950, false) == 0);
+
+    catalog.count = 6;
+    assert(pet_p4_behavior_select_video(&view, &catalog, "idle", 4, 17000, true) == 5);
+    pet_p4_behavior_presented_video_frame(&view, 0, 17200);
+    pet_p4_behavior_presented_video_frame(&view, 149, 26950);
+    assert(pet_p4_behavior_select_video(&view, &catalog, "idle", 4, 27000, true) == 5);
+    assert(pet_p4_behavior_select_video(&view, &catalog, "idle", 4, 27200, true) == 0);
+    assert(pet_p4_behavior_select_video(&view, &catalog, "welcome", 4, 27250, false) == 5);
+    assert(!view.play_video_once);
+
+    /* The existing cue selector still observes elapsed lifecycle time. */
+    pet_p4_behavior_t cues;
+    pet_p4_behavior_init(&cues);
+    catalog.count = 5;
+    assert(pet_p4_behavior_select(&cues, &catalog, "idle", 2, 100) == 0);
+    assert(pet_p4_behavior_select(&cues, &catalog, "idle", 2, 5100) == 1);
+
+    /* A single looping clip also reaches the tail before restarting. */
+    pet_p4_behavior_init(&view);
+    catalog.count = 1;
+    assert(pet_p4_behavior_select_video(&view, &catalog, "idle", 2, 100, true) == 0);
+    assert(!view.play_video_once);
+    assert(pet_p4_behavior_video_target_frame(&view, 75, 5000, 250) == 0);
+    pet_p4_behavior_presented_video_frame(&view, 0, 250);
+    assert(pet_p4_behavior_video_target_frame(&view, 75, 5000, 5200) == 1);
+    pet_p4_behavior_presented_video_frame(&view, 73, 6550);
+    assert(pet_p4_behavior_video_target_frame(&view, 75, 5000, 6600) == 74);
+    pet_p4_behavior_presented_video_frame(&view, 74, 6610);
+    assert(pet_p4_behavior_video_target_frame(&view, 75, 5000, 6650) == 0);
+    pet_p4_behavior_presented_video_frame(&view, 0, 6660);
+    assert(view.first_video_frame_ms == 6660);
+    assert(pet_p4_behavior_video_target_frame(&view, 75, 5000, 6710) == 0);
+    return 0;
+}
+''', 'video_sequence')
+
 def test_exact_prefetch_lifetime_cannot_retire_active_workers_consumers_or_newer_jobs(tmp_path):
     compile_run(tmp_path,r'''
 #include "pet_p4_prefetch_lifetime.h"

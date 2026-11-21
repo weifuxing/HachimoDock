@@ -1,11 +1,16 @@
 "use strict";
 
 const { spawn } = require("child_process");
+const { mkdtemp, rm } = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
 
 const { BaseAdapter } = require("./base");
-const { findExecutable, readVersion } = require("../util/binary-resolver");
+const { findExecutable } = require("../util/binary-resolver");
 
 const LIST_TIMEOUT_MS = 12000;
+const LIST_CACHE_MS = 30000;
+const MAX_SESSIONS = 200;
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 
 class MiMoCodeAdapter extends BaseAdapter {
@@ -21,9 +26,7 @@ class MiMoCodeAdapter extends BaseAdapter {
     this._cwd = cwd || process.cwd();
     this._fallbackPathsOverride = Array.isArray(fallbackPaths) ? fallbackPaths : null;
     this._extraPathDirsOverride = Array.isArray(extraPathDirs) ? extraPathDirs : null;
-    this._cachedBin = null;
-    this._cachedAvailability = null;
-    this._cachedAt = 0;
+    this._sessionList = null;
   }
 
   _defaultFallbackPaths() {
@@ -44,8 +47,7 @@ class MiMoCodeAdapter extends BaseAdapter {
   }
 
   _resolveBinary() {
-    if (this._cachedBin) return this._cachedBin;
-    this._cachedBin = findExecutable({
+    return findExecutable({
       binName: "mimo",
       envVar: "MIMOCODE_CLI_PATH",
       env: this._env,
@@ -56,60 +58,57 @@ class MiMoCodeAdapter extends BaseAdapter {
         ? this._extraPathDirsOverride
         : this._defaultExtraPathDirs(),
     });
-    return this._cachedBin;
   }
 
   async isAvailable() {
-    const now = Date.now();
-    if (this._cachedAvailability && now - this._cachedAt < 5000) {
-      return this._cachedAvailability;
-    }
-
-    const bin = this._resolveBinary();
-    let value;
-    if (!bin) {
-      value = {
-        ready: false,
-        reason: "MiMoCode CLI 未找到（请安装 MiMoCode 或设置 MIMOCODE_CLI_PATH）",
-      };
-    } else {
-      const version = readVersion(bin, { env: this._env });
-      value = version
-        ? { ready: true, reason: null, version }
-        : { ready: false, reason: `mimo --version 调用失败 (${bin})` };
-    }
-    this._cachedAvailability = value;
-    this._cachedAt = now;
-    return value;
+    // Even --version loads MiMoCode's native libraries. Status checks only
+    // need to know whether the executable is installed.
+    return this._resolveBinary()
+      ? { ready: true, reason: null }
+      : { ready: false, reason: "MiMoCode CLI 未找到（请安装 MiMoCode 或设置 MIMOCODE_CLI_PATH）" };
   }
 
   async listSessions({ limit = 20 } = {}) {
-    const probe = await this.isAvailable();
-    if (!probe.ready) return [];
     const bin = this._resolveBinary();
-    if (!bin) return [];
+    if (!bin) {
+      this._sessionList = null;
+      return [];
+    }
+    const safeLimit = Math.max(1, Math.min(MAX_SESSIONS, Number.parseInt(limit, 10) || 20));
+    let query = this._sessionList;
+    if (!query || query.bin !== bin || Date.now() >= query.expiresAt) {
+      query = { bin, expiresAt: Infinity };
+      this._sessionList = query;
+      query.result = this._querySessions(bin).finally(() => {
+        query.expiresAt = Date.now() + LIST_CACHE_MS;
+      });
+    }
+    return (await query.result).slice(0, safeLimit);
+  }
 
-    const safeLimit = Math.max(1, Math.min(200, Number.parseInt(limit, 10) || 20));
-    const output = await collectProcessOutput(bin, [
-      "session",
-      "list",
-      "--format",
-      "json",
-      "--max-count",
-      String(safeLimit),
-    ], {
-      cwd: this._cwd,
-      env: this._env,
-      timeoutMs: LIST_TIMEOUT_MS,
-    });
-    if (!output.stdout.trim()) return [];
-
-    const rows = parseSessionList(output.stdout);
-    return rows
-      .map(normalizeSession)
-      .filter(Boolean)
-      .sort((a, b) => b.lastModified - a.lastModified)
-      .slice(0, safeLimit);
+  async _querySessions(bin) {
+    // Bun extracts OpenTUI into the child temp directory and leaves it behind.
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "hachimi-mimocode-"));
+    try {
+      const stdout = await collectProcessOutput(bin, [
+        "session", "list", "--format", "json", "--max-count", String(MAX_SESSIONS),
+      ], {
+        cwd: this._cwd,
+        env: {
+          ...this._env,
+          TMPDIR: tempDir,
+          TMP: tempDir,
+          TEMP: tempDir,
+        },
+      });
+      if (!stdout.trim()) return [];
+      return parseSessionList(stdout)
+        .map(normalizeSession)
+        .filter(Boolean)
+        .sort((a, b) => b.lastModified - a.lastModified);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    }
   }
 
   async openNew({ cwd } = {}) {
@@ -178,45 +177,43 @@ function collectProcessOutput(bin, args, options = {}) {
       shell: useShell,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    let stdout = "";
-    let stderr = "";
+    const stdout = [];
+    const stderr = [];
     let outputBytes = 0;
-    let settled = false;
-    let timer = null;
-
-    const finish = (error, value) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (error) reject(error);
-      else resolve(value);
+    let failure;
+    const stop = (message) => {
+      if (failure) return;
+      failure = new Error(message);
+      child.kill("SIGKILL");
+      child.stdout.destroy();
+      child.stderr.destroy();
     };
     const append = (target, chunk) => {
+      if (failure) return;
       outputBytes += chunk.length;
       if (outputBytes > MAX_OUTPUT_BYTES) {
-        child.kill();
-        finish(new Error("MiMoCode session list 输出过大"));
-        return target;
-      }
-      return target + chunk.toString("utf8");
-    };
-    child.stdout.on("data", (chunk) => { stdout = append(stdout, chunk); });
-    child.stderr.on("data", (chunk) => { stderr = append(stderr, chunk); });
-    child.once("error", (error) => finish(error));
-    child.once("close", (code, signal) => {
-      if (code === 0) {
-        finish(null, { stdout, stderr });
+        stop("MiMoCode session list 输出过大");
         return;
       }
-      finish(new Error(
-        `mimo session list exited code=${code} signal=${signal || ""}: ${stderr.trim().slice(0, 500)}`,
-      ));
+      target.push(chunk);
+    };
+    child.stdout.on("data", (chunk) => append(stdout, chunk));
+    child.stderr.on("data", (chunk) => append(stderr, chunk));
+    child.once("error", (error) => { failure ||= error; });
+    child.once("close", (code, signal) => {
+      clearTimeout(timer);
+      if (failure) {
+        reject(failure);
+      } else if (code === 0) {
+        resolve(Buffer.concat(stdout).toString("utf8"));
+      } else {
+        reject(new Error(
+          `mimo session list exited code=${code} signal=${signal || ""}: ${Buffer.concat(stderr).toString("utf8").trim().slice(0, 500)}`,
+        ));
+      }
     });
 
-    timer = setTimeout(() => {
-      child.kill();
-      finish(new Error("mimo session list timed out"));
-    }, options.timeoutMs || LIST_TIMEOUT_MS);
+    const timer = setTimeout(() => stop("mimo session list timed out"), LIST_TIMEOUT_MS);
     timer.unref?.();
   });
 }

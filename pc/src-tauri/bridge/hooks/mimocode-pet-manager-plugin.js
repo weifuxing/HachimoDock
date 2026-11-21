@@ -1,3 +1,5 @@
+import { createRequire } from "node:module";
+const CAPABILITY_MODULE = "__HACHIMO_CAPABILITY_MODULE__";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -144,7 +146,7 @@ async function postState(payload) {
   try {
     const response = await fetch(`http://127.0.0.1:${port}/state`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...createRequire(CAPABILITY_MODULE)(CAPABILITY_MODULE).headersFor("hook", port) },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(POST_TIMEOUT_MS),
     });

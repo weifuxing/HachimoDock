@@ -1,0 +1,11 @@
+{
+  "component": "espressif/esp_h264",
+  "version": "1.5.0",
+  "componentHash": "c32e94b137aef712b5a347bf0c29d59eecfbcdbf62a0b6848810c8ecbe363261",
+  "overrideSha256": "b8ea372e28de3434717e2b8f0091da7601dbf2234ca9baac67d0e89797911980",
+  "reason": "Select the pre-v3 P4 decoder library with CONFIG_ESP32P4_SELECTS_REV_LESS_V3; the minimum revision number can be unavailable as a CMake variable.",
+  "acceptedInputCmakeSha256": [
+    "b8ea372e28de3434717e2b8f0091da7601dbf2234ca9baac67d0e89797911980"
+  ],
+  "source": "Retained R278 managed component; hashes bind the inspected local build input, not an independent upstream download verification."
+}

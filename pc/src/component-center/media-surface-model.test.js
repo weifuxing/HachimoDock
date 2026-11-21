@@ -50,11 +50,10 @@ test("media worker inherits macOS audio scheduling protection and bounded buffer
   assert.match(code,/AudioActivity::begin_on_player_thread/);
   assert.match(code,/sync_channel::<Result<Vec<u8>, String>>\(RADIO_QUEUE_FRAMES\)/);
   assert.match(code,/pending.len\(\) < RADIO_PREBUFFER_FRAMES/);
-  assert.match(code,/RADIO_PCM_FRAME_BYTES: usize = if cfg!\(target_os = "macos"\) \{ 3840 \} else \{ 7680 \}/);
+  const frameBytes=Number(code.match(/RADIO_PCM_FRAME_BYTES: usize = (\d+)/)?.[1]);
+  assert.equal(frameBytes/(48000*2),0.080,'each ACK must replenish 80ms of 48kHz mono PCM');
   assert.match(code,/RADIO_QUEUE_FRAMES: usize = \(32 \* 7680\) \/ RADIO_PCM_FRAME_BYTES/);
   assert.match(code,/RADIO_PREBUFFER_FRAMES: usize = \(16 \* 7680\) \/ RADIO_PCM_FRAME_BYTES/);
-  for(const frameBytes of [3840,7680]){
-    assert.equal(((32*7680)/frameBytes)*frameBytes,245760);
-    assert.equal(((16*7680)/frameBytes)*frameBytes,122880);
-  }
+  assert.equal(((32*7680)/frameBytes)*frameBytes,245760);
+  assert.equal(((16*7680)/frameBytes)*frameBytes,122880);
 });

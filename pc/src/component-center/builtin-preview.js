@@ -10,13 +10,22 @@ const bindings=import.meta.glob('../../builtin-clawpkgs/*/buttons.json',{eager:t
 const previews=import.meta.glob('../../builtin-clawpkgs/*/negative-screen.json',{eager:true,import:'default'});
 const applications=import.meta.glob('../../builtin-clawpkgs/*/pc/application.json',{eager:true,query:'?component-ui',import:'default'});
 const extensions=import.meta.glob('../../builtin-clawpkgs/*/pc/extension.json',{eager:true,import:'default'});
+const wasmModules=import.meta.glob('../../builtin-clawpkgs/*/runtime/app.wasm',{query:'?url&no-inline',import:'default'});
+const wasmAudio=import.meta.glob('../../builtin-clawpkgs/*/assets/speech.hab',{query:'?url&no-inline',import:'default'});
+const covers=import.meta.glob('../../builtin-clawpkgs/*/pc/cover.png',{eager:true,query:'?url',import:'default'});
 const images=import.meta.glob('../../builtin-clawpkgs/*/assets/*.png',{eager:true,query:'?url',import:'default'});
 export function latestBuiltinPreview(component){
   const root=`../../builtin-clawpkgs/${component.id}`,manifest=manifests[`${root}/component.json`],runtime=runtimes[`${root}/runtime/widget.json`];
   if(!manifest||!runtime)return component;
   const declarations=runtime.surface?.images||runtime.scene?.sprites||[];
   return {...component,
-    builtin:true,author:COMPONENT_AUTHORS[component.id]||'哈基米',
+    builtin:true,author:COMPONENT_AUTHORS[component.id]||manifest.author||'哈基米',
+    wasmPreview:runtime.hachiWasm?{
+      sha256:runtime.hachiWasm,canvas:runtime.hachiCanvas,host:runtime.hachiHost,
+      resolveUrl:wasmModules[`${root}/runtime/app.wasm`],
+      audioSha256:runtime.hachiAudioSha256,resolveAudioUrl:wasmAudio[`${root}/assets/speech.hab`],
+    }:null,
+    coverDataUrl:covers[`${root}/pc/cover.png`]||null,
     pcApplication:applications[`${root}/pc/application.json`]||null,
     pcExtension:extensions[`${root}/pc/extension.json`]||null,
     name:manifest.name,version:manifest.version,kind:manifest.kind,goal:manifest.description,

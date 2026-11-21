@@ -37,7 +37,7 @@ test("asynchronous session updates retain the frontend ordering queue", () => {
 
 test("asynchronous microphone signals retain start and stop ordering", () => {
   const dashboard = readFileSync(new URL("../DeviceDashboard.jsx", import.meta.url), "utf8");
-  assert.match(dashboard, /audioSignalQueueRef.current[\s\S]*?\.then\(\(\) => invoke\("audio_bridge_signal", input\)\)/);
+  assert.match(dashboard, /audioSignalQueueRef.current[\s\S]*?\.then\(\(\) => wifiTarget\s*\? wifiDeviceControl\(invoke, wifiTarget, input\.action === "start" \? "enableMicrophone" : "disableMicrophone"\)\s*: invoke\("audio_bridge_signal", input\)\)/);
   assert.equal((dashboard.match(/invoke\("audio_bridge_signal"/g) || []).length, 1);
   assert.equal((dashboard.match(/await sendAudioBridgeSignal\(/g) || []).length, 4);
 });

@@ -94,6 +94,16 @@ fn ensure_composer_admission(busy: &AtomicBool) -> Result<(), String> {
     } else { Ok(()) }
 }
 
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) fn with_current_deepseek_writer(
+    confirm: impl FnOnce(&crate::codex_composer::CodexComposerBridge) -> Result<(), String>,
+) -> Result<(), String> {
+    use crate::codex_composer::CodexComposerBridge;
+    let mut writer = ComposerWriterLease::<CodexComposerBridge>::claim(&COMPOSER_BUSY)?;
+    writer.attach(CodexComposerBridge::start_current_task_for("deepseek-harness")?);
+    confirm(&writer)
+}
+
 #[derive(Clone)]
 pub struct Context {
     agent: Agent,
@@ -622,16 +632,20 @@ async fn bus(
     route: &str,
     params: &[(&str, String)],
 ) -> Result<Value, State> {
-    bus_at(client, "http://127.0.0.1:8181", route, params).await
+    let cap = tokio::task::spawn_blocking(|| crate::bridge_capability::load("read")).await
+        .map_err(|_| State::Unknown)?.map_err(|_| State::Unknown)?;
+    bus_at(client, &cap.base_url, route, params, &cap.token).await
 }
 async fn bus_at(
     client: &reqwest::Client,
     origin: &str,
     route: &str,
     params: &[(&str, String)],
+    token: &str,
 ) -> Result<Value, State> {
     let mut response = client
         .get(format!("{origin}/agent/{route}"))
+        .bearer_auth(token)
         .query(params)
         .send()
         .await
@@ -1929,6 +1943,7 @@ mod tests {
                 &origin,
                 "session-events",
                 &[("agentId", "codex".into())],
+                "unit-test-capability",
             )
             .await;
             server.join().unwrap();

@@ -9,6 +9,7 @@
 
 export function formatBindingControl(binding = {}) {
   const event = String(binding.event || "").trim();
+  if (/^button\.sw[123]\.double_press$/.test(event)) return `SW${event[9]} · 双击`;
   if (event === "button.sw1.short_press") return "SW1 · 短按";
   if (event === "button.sw1.long_press") return "SW1 · 长按";
   if (event === "button.sw2.short_press") return "SW2 · 短按";
@@ -78,6 +79,9 @@ const ROUTED_WIDGET_EVENTS = new Set([
   "button.sw1.short_press",
   "button.sw2.short_press",
   "button.sw3.short_press",
+  "button.sw1.double_press",
+  "button.sw2.double_press",
+  "button.sw3.double_press",
   "button.encoder.short_press",
   "button.encoder.long_press",
   "knob.rotate_cw",

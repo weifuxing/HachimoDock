@@ -7,7 +7,7 @@ import {defaultAudioCueSrcForFamily} from './lib/builtin-appearances.js';
 import {GLOBAL_AUDIO_STATES,globalAudioDirty,globalAudioRevision,markGlobalAudioDirty,migrateBuiltinGlobalAudioCues,readGlobalAudioCue,saveGlobalAudioCue,removeGlobalAudioCue} from './lib/global-audio-cues.js';
 import {useExitProtection} from './lib/exit-protection.js';
 const labels={idle:'休息',working:'工作',done:'任务完成',waiting_user:'等待操作',error:'出错',welcome:'欢迎',permission_request:'请求审批',permission_approved:'审批通过',permission_denied:'审批拒绝',permission_expired:'审批超时',session_terminated:'会话停止'};
-export default function GlobalAudioCuesPanel({boardDeviceId,currentFamily}){
+export default function GlobalAudioCuesPanel({boardDeviceId,currentFamily,wifiConnected=false}){
  const [family,setFamily]=useState(()=>GLOBAL_AUDIO_STATES.includes(currentFamily)?currentFamily:'done'),[busy,setBusy]=useState(false),[error,setError]=useState(''),[message,setMessage]=useState(''),[url,setUrl]=useState(''),[custom,setCustom]=useState(false),[revision,setRevision]=useState(0),[dirty,setDirty]=useState(globalAudioDirty);
  const id=useId();useExitProtection(busy?'提示音操作尚未完成':'');
  useEffect(()=>{if(GLOBAL_AUDIO_STATES.includes(currentFamily))setFamily(currentFamily);},[currentFamily]);
@@ -39,6 +39,7 @@ export default function GlobalAudioCuesPanel({boardDeviceId,currentFamily}){
    <label className={`btn-ghost${busy?' is-disabled':''}`} htmlFor={busy?undefined:id}><Upload size={14}/>上传 WAV</label>
    {custom&&<button type="button" className="btn-ghost danger" disabled={busy} onClick={()=>change(()=>removeGlobalAudioCue(family))}><Trash2 size={14}/>恢复默认</button>}
    <button type="button" className="btn-primary" disabled={busy||!boardDeviceId} onClick={sync}><UploadCloud size={14}/>{busy?'处理中…':'下发音效'}</button>
+   {wifiConnected&&!boardDeviceId&&<span className="muted small">下发提示音需要 USB。</span>}
   </div>{(error||message||dirty)&&<div role={error?'alert':'status'} className={`message-banner ${error?'message-banner--error':''}`}>{error||message||'提示音尚未下发'}</div>}
  </div></section>;
 }

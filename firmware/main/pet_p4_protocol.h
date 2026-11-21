@@ -61,6 +61,7 @@ typedef struct {
   char text[PET_P4_SPEECH_MAX];
 } pet_p4_conversation_cue_t;
 
+struct cJSON;
 typedef void (*pet_p4_send_line_fn)(const char *line, void *ctx);
 /* Boot-configured paired callbacks. begin admits only the current locked
  * protocol command; on success the slot-query owns an unlocked read/TX window
@@ -98,6 +99,9 @@ typedef struct {
   pet_p4_session_queue_item_t session_queue_staging[PET_P4_SESSION_QUEUE_MAX];
   unsigned int session_queue_count;
   bool session_voice_active;
+#if PET_P4_SYSTEM_WIFI
+  uint8_t session_voice_lan_button;
+#endif
   unsigned long long session_snapshot_last_seen_ms;
   char screen_page[PET_P4_PAGE_MAX];
   /* DSH 审批上屏（R5）：PC bridge 下发的单条 pending approval。active 时渲染
@@ -141,7 +145,9 @@ typedef struct {
   unsigned long long touch_feedback_until_ms;
   unsigned long long done_until_ms;
   unsigned long long host_last_seen_ms;
+  unsigned long long usb_client_last_seen_ms;
   bool native_usb_mounted;
+  bool lan_client_connected;
   int local_touch_x;
   int local_touch_y;
   unsigned long long last_update_ms;
@@ -149,6 +155,9 @@ typedef struct {
 
 void pet_p4_state_init(pet_p4_runtime_state_t *state, const char *board_device_id);
 /* Trusted single-thread startup only. Repeated starts cannot replace a boot ID. */
+bool pet_p4_load_board_identity(const char *board_id);
+void pet_p4_finish_board_probe(bool wifi6);
+bool pet_p4_is_wifi6_hardware(void);
 void pet_p4_boot_identity_start(uint32_t first,uint32_t second);
 const char *pet_p4_boot_identity(void);
 bool pet_p4_protocol_asset_query_pending_configure(bool (*pending)(void *), void *context);
@@ -203,6 +212,7 @@ void pet_p4_state_set_native_usb_mounted(
   bool mounted,
   unsigned long long now_ms
 );
+bool pet_p4_state_usb_client_connected(const pet_p4_runtime_state_t *state, unsigned long long now_ms);
 bool pet_p4_state_host_connected(
   const pet_p4_runtime_state_t *state,
   unsigned long long now_ms
@@ -307,6 +317,8 @@ bool pet_p4_handle_storage_query(pet_p4_runtime_state_t *state,
 /* Dispatcher-owned slot for the current locked dispatch; see pet_p4_query_reply.h. */
 void pet_p4_protocol_set_deferred_reply(pet_p4_query_reply_t *reply);
 #endif
+
+struct cJSON *pet_p4_widget_inventory(const pet_p4_runtime_state_t *state, const char *request_id);
 
 #ifdef __cplusplus
 }

@@ -87,7 +87,7 @@ def test_actual_custom_video_header_proof_and_existing_cache_races(tmp_path):
     raw = (ROOT / "main/pet_p4_raw_assets.c").read_text()
     for include in ('#include "esp_partition.h"', '#include "freertos/FreeRTOS.h"', '#include "freertos/task.h"'):
         raw = raw.replace(include, "")
-    protocol = (ROOT / "main/pet_p4_protocol.c").read_text()
+    protocol = (ROOT / "main/pet_p4_protocol.c").read_text().replace('__attribute__((optimize("Os"))) ', '')
     start = protocol.index("typedef struct {char path[PET_P4_ASSET_PATH_MAX];uint32_t size;} asset_query_video_t;")
     end = protocol.index("static void send_asset_slot_query_ack(", start)
     helpers = '#include "pet_p4_assets.h"\n#include "cJSON.h"\n#define EXT_RAM_BSS_ATTR\n'

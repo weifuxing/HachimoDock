@@ -71,6 +71,177 @@ pub(super) fn build_widget_chunk_payload(
     })
 }
 
+pub(super) const WIDGET_FILE_TRANSFER: &str = "p4-widget-files-v2";
+pub(super) const WIDGET_FILE_CHUNK_BYTES: usize = 4096;
+const P4_WIDGET_LINE_MAX: usize = 32767;
+
+// R203 accepts the sorted v2 wire manifest but persists images and sprites
+// by declaration index. Use the ordered legacy path when sorting would move them.
+pub(super) fn supports_sorted_widget_transfer(caps: &Value, entries: &[(String, Vec<u8>)]) -> bool {
+    if caps["widgetTransfer"] != WIDGET_FILE_TRANSFER {
+        return false;
+    }
+    if caps["widgetResourceOrder"] == "p4-widget-resource-id-v1" {
+        return true;
+    }
+    let mut prior = "";
+    for (path, _) in entries {
+        if path.starts_with("runtime/images/") || path.starts_with("runtime/sprites/") {
+            if path.as_str() <= prior {
+                return false;
+            }
+            prior = path;
+        }
+    }
+    true
+}
+
+#[test]
+fn r203_keeps_nonlexical_image_and_keyframe_order_without_changing_the_package() {
+    let entries = ["runtime/images/bg.p4i", "runtime/images/gold.p4i", "runtime/images/pink.p4i",
+        "runtime/images/envelope.p4i"].map(|path| (path.to_owned(), vec![0; 40000]));
+    let old = serde_json::json!({"widgetTransfer": WIDGET_FILE_TRANSFER});
+    assert!(!supports_sorted_widget_transfer(&old, &entries));
+    assert!(check_legacy_widget_frames("widget-install-12345678-1234-1234-1234-123456789abc", &entries).is_ok());
+    assert!(supports_sorted_widget_transfer(&old, &entries[..3]));
+    let new = serde_json::json!({"widgetTransfer": WIDGET_FILE_TRANSFER,
+        "widgetResourceOrder": "p4-widget-resource-id-v1"});
+    assert!(supports_sorted_widget_transfer(&new, &entries));
+    let keyframes = ["runtime/images/bg.p4i", "runtime/images/gold.p4i", "runtime/images/bg.2.p4i"]
+        .map(|path| (path.to_owned(), vec![0; 1]));
+    assert!(!supports_sorted_widget_transfer(&old, &keyframes));
+}
+
+pub(super) fn check_wasm_device_budget(bytes: &[u8], capabilities: &Value) -> Result<(), String> {
+    let (_, _, pages, _, audio) = crate::clawpkg::wasm_profile_details(bytes)
+        .ok_or("WASM 文件或固定内存无效")?;
+    if audio && (capabilities["widgetWasmAudio"] != crate::wasm_audio::PROFILE
+        || capabilities["widgetTransfer"] != WIDGET_FILE_TRANSFER
+        || capabilities["widgetResourceOrder"] != "p4-widget-resource-id-v1")
+    {
+        return Err("该组件需要支持 PetUI 离线语音的固件，请先更新固件".into());
+    }
+    let max_bytes = capabilities["widgetWasmMaxBytes"].as_u64().unwrap_or(64 * 1024);
+    let max_pages = capabilities["widgetWasmMemoryPages"].as_u64().unwrap_or(2);
+    if bytes.len() as u64 > max_bytes || u64::from(pages) > max_pages {
+        return Err(format!(
+            "此组件需要 {} KiB 的 WASM 文件空间和 {} KiB 的固定内存，设备目前支持 {} KiB 和 {} KiB。请先更新固件。",
+            bytes.len().div_ceil(1024), u64::from(pages) * 64,
+            max_bytes / 1024, max_pages.saturating_mul(64)
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn expanded_wasm_requires_both_advertised_device_budgets() {
+    let mut module = b"\0asm\x01\0\0\0\x05\x04\x01\x01\x02\x02".to_vec();
+    let legacy = serde_json::json!({});
+    let expanded = serde_json::json!({"widgetWasmMaxBytes": 192 * 1024, "widgetWasmMemoryPages": 4});
+    assert!(check_wasm_device_budget(&module, &legacy).is_ok());
+    module[12..14].copy_from_slice(&[4, 4]);
+    assert!(check_wasm_device_budget(&module, &legacy).is_err());
+    assert!(check_wasm_device_budget(&module, &expanded).is_ok());
+    module[12..14].copy_from_slice(&[2, 2]);
+    // Custom section of 65,536 bytes, including an empty section name.
+    module.extend([0, 0x80, 0x80, 0x04]);
+    module.resize(module.len() + 65536, 0);
+    assert!(check_wasm_device_budget(&module, &legacy).is_err());
+    assert!(check_wasm_device_budget(&module, &expanded).is_ok());
+}
+
+#[test]
+fn speech_module_requires_audio_and_the_file_transaction() {
+    let module = b"\0asm\x01\0\0\0\x02\x10\x01\x05hachi\x06sample\0\0\x05\x04\x01\x01\x02\x02";
+    let mut capabilities = serde_json::json!({"widgetWasmAudio": crate::wasm_audio::PROFILE});
+    assert!(check_wasm_device_budget(module, &capabilities).is_err());
+    capabilities["widgetTransfer"] = serde_json::json!(WIDGET_FILE_TRANSFER);
+    assert!(check_wasm_device_budget(module, &capabilities).is_err());
+    capabilities["widgetResourceOrder"] = serde_json::json!("p4-widget-resource-id-v1");
+    assert!(check_wasm_device_budget(module, &capabilities).is_ok());
+    capabilities["widgetWasmAudio"] = serde_json::json!("other");
+    assert!(check_wasm_device_budget(module, &capabilities).is_err());
+}
+
+pub(super) fn legacy_chunk_bytes(path: &str, size: usize) -> usize {
+    if matches!(path, "runtime/app.wasm" | "runtime/center-title.rle") {
+        2046
+    } else if ["runtime/images/", "runtime/samples/", "runtime/clips/", "runtime/big/"]
+        .iter().any(|prefix| path.starts_with(prefix))
+    {
+        WIDGET_FILE_CHUNK_BYTES
+    } else {
+        size.max(1)
+    }
+}
+
+pub(super) fn check_widget_wire_frame(path: &str, payload: &Value, encoded_bytes: usize) -> Result<(), String> {
+    let line = serde_json::to_vec(&serde_json::json!({"topic":"widget/chunk","payload":payload}))
+        .map_err(|e| e.to_string())?;
+    if line.len() + encoded_bytes > P4_WIDGET_LINE_MAX {
+        return Err(format!(
+            "组件资源 {path} 的 USB 消息需要 {} 字节，超过当前协议允许的 {} 字节。请升级支持分块的设备固件，或减小该资源。",
+            line.len() + encoded_bytes, P4_WIDGET_LINE_MAX
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn check_legacy_widget_frames(transfer_id: &str, entries: &[(String, Vec<u8>)]) -> Result<(), String> {
+    for (path, bytes) in entries {
+        if bytes.is_empty() {
+            continue;
+        }
+        let limit = legacy_chunk_bytes(path, bytes.len());
+        let size = bytes.len().min(limit);
+        let index = (bytes.len().div_ceil(limit) - 1) as u32;
+        let payload = build_widget_chunk_payload(transfer_id, path, "", index, size, "0000000000000000");
+        check_widget_wire_frame(path, &payload, size.div_ceil(3) * 4)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn widget_package_digest(entries: &[(String, Vec<u8>)]) -> Result<(String, usize), String> {
+    use sha2::{Digest, Sha256};
+
+    let total: usize = entries.iter().map(|(_, bytes)| bytes.len()).sum();
+    if entries.is_empty() || entries.len() > 128 || total > 16 * 1024 * 1024 {
+        return Err("组件下发清单超过设备支持的文件数或总大小".into());
+    }
+    let mut previous = "";
+    let mut hash = Sha256::new();
+    for (path, bytes) in entries {
+        if path.as_str() <= previous || path.len() >= 96 || bytes.is_empty() {
+            return Err(format!("组件下发清单含无效或重复资源 {path}"));
+        }
+        previous = path;
+        hash.update(path.as_bytes());
+        hash.update([0]);
+        hash.update((bytes.len() as u32).to_le_bytes());
+        hash.update(bytes);
+    }
+    Ok((format!("{:x}", hash.finalize()), total))
+}
+
+#[test]
+fn widget_wire_preflight_rejects_large_legacy_sprites_but_accepts_chunked_images() {
+    let data = vec![0; 8 + 64 * 64 * 2 * 3];
+    let id = "widget-install-12345678-1234-1234-1234-123456789abc";
+    let entries = vec![("runtime/sprites/letter.p4s".to_owned(), data.clone())];
+    let error = check_legacy_widget_frames(id, &entries).unwrap_err();
+    assert!(error.contains("runtime/sprites/letter.p4s") && error.contains("32767"));
+    assert!(check_legacy_widget_frames(id, &[("runtime/images/letter.p4i".to_owned(), data)]).is_ok());
+}
+
+#[test]
+fn widget_package_digest_matches_the_wire_manifest_and_rejects_duplicate_paths() {
+    let entries = vec![("a".to_owned(), vec![1, 2]), ("b".to_owned(), vec![3])];
+    let (digest, size) = widget_package_digest(&entries).unwrap();
+    assert_eq!(size, 3);
+    assert_eq!(digest, "e0ee70a90bd0b67a166f761a28b65568e7a7492970f8061a5dd12ad15c91259d");
+    assert!(widget_package_digest(&[entries[0].clone(), entries[0].clone()]).is_err());
+}
+
 pub(super) fn format_widget_ack_timeout(transfer_id: &str, phase: &str) -> String {
     format!(
         "未收到板端组件 OTA 确认: transferId={} phase={}",
@@ -138,7 +309,7 @@ pub(super) fn widget_ota_relative_path(root: &Path, path: &Path) -> Result<Strin
 
 pub(super) fn widget_ota_should_skip_path(path: &str) -> bool {
     path.starts_with("pc/") || path.starts_with("licenses/")
-        || matches!(path, "LICENSE.txt" | "THIRD_PARTY_NOTICES.txt")
+        || matches!(path, "LICENSE.txt" | "THIRD_PARTY_NOTICES.txt" | "hachiapp.json")
         || path.split('/').next_back() == Some(".keep")
 }
 
@@ -283,7 +454,7 @@ pub(super) fn prepare_p4_widget_sprite_files(
     Ok(compiled)
 }
 
-pub(super) fn prepare_p4_widget_file(
+pub(crate) fn prepare_p4_widget_file(
     widget_id: &str,
     path: &str,
     bytes: &[u8],
@@ -309,19 +480,9 @@ pub(super) fn prepare_p4_widget_file(
             .as_object_mut()
             .ok_or_else(|| "runtime/widget.json 必须是 JSON 对象，无法下发到 P4".to_string())?;
 
-        // Missing vars and an empty legacy array both mean no variables.
-        let legacy_empty_vars = match object.get("vars") {
-            None => true,
-            Some(vars) if vars.is_object() => false,
-            Some(vars) => vars.as_array().is_some_and(Vec::is_empty),
-        };
-        if legacy_empty_vars {
-            object.insert("vars".to_string(), serde_json::json!({}));
-        } else if !object.get("vars").is_some_and(Value::is_object) {
-            return Err(
-                "runtime/widget.json 的 vars 必须是以变量名为键的 JSON 对象；无变量时请使用 {}"
-                    .to_string(),
-            );
+        crate::clawpkg::complete_p4_runtime_containers(object);
+        if !object["vars"].is_object() {
+            return Err("runtime/widget.json 的 vars 必须是以变量名为键的 JSON 对象；无变量时请使用 {}".into());
         }
         let quota_v3 = object.get("quota").is_some_and(|q| q == "p4-quota-v3");
         let quota_v2 = object.get("quota").is_some_and(|q| q == "p4-quota-v2");
@@ -392,14 +553,71 @@ pub(super) fn prepare_p4_widget_file(
             max_bytes
         ));
     }
+    if path == "runtime/widget.json" {
+        crate::clawpkg::validate_p4_runtime_shell(&value)?;
+    }
     Ok(compact)
+}
+
+#[test]
+fn widget_delivery_rejects_missing_and_unknown_transition_sources() {
+    let mut widget = serde_json::json!({
+        "schema_version": 1, "states": ["garden"], "initial_state": "garden", "dashboard": {},
+        "transitions": [{"on": "move", "from": "*"}, {"on": "dig", "to": "garden"}]
+    });
+    let prepare = |widget: &Value| {
+        prepare_p4_widget_file("garden", "runtime/widget.json", &serde_json::to_vec(widget).unwrap())
+    };
+    for source in [None, Some(Value::Null), Some(serde_json::json!("outside"))] {
+        let rule = widget["transitions"][1].as_object_mut().unwrap();
+        if let Some(source) = source {
+            rule.insert("from".into(), source);
+        } else {
+            rule.remove("from");
+        }
+        let error = prepare(&widget).unwrap_err();
+        assert!(error.contains("runtime/widget.json.transitions[1].from"), "{error}");
+    }
+    widget["transitions"][1]["from"] = serde_json::json!("garden");
+    let sent: Value = serde_json::from_slice(&prepare(&widget).unwrap()).unwrap();
+    assert_eq!(sent["transitions"], widget["transitions"]);
+}
+
+#[test]
+fn widget_delivery_completes_absent_containers_and_rejects_bad_runtime_shapes() {
+    let source = serde_json::json!({
+        "schema_version": 1, "engine": "p4-bounded-runtime-v4",
+        "states": ["ready"], "initial_state": "ready", "dashboard": {},
+        "hachiWasm": "a".repeat(64)
+    });
+    let prepare = |value: &Value| {
+        prepare_p4_widget_file("postcard-puzzle", "runtime/widget.json", &serde_json::to_vec(value).unwrap())
+    };
+    let sent: Value = serde_json::from_slice(&prepare(&source).unwrap()).unwrap();
+    assert_eq!(sent["vars"], serde_json::json!({}));
+    assert_eq!(sent["transitions"], serde_json::json!([]));
+    assert_eq!(sent["tick"], serde_json::json!([]));
+    assert_eq!(sent["hachiWasm"], source["hachiWasm"]);
+    for (field, value) in [
+        ("transitions", Value::Null), ("tick", serde_json::json!({})),
+        ("states", serde_json::json!(["ready", "ready"])),
+        ("initial_state", serde_json::json!("missing")),
+        ("schema_version", serde_json::json!("1")), ("dashboard", Value::Null),
+        ("pages", serde_json::json!([])),
+    ] {
+        let mut bad = source.clone();
+        bad[field] = value;
+        let error = prepare(&bad).unwrap_err();
+        assert!(error.contains(&format!("runtime/widget.json.{field}")), "{error}");
+    }
 }
 
 #[test]
 fn quota_v3_transaction_keeps_32_vars_127_utf8_bytes_and_exact_json_ceiling(){
     let mut vars=serde_json::Map::new();
     for i in 0..32{vars.insert(format!("v{i}"),serde_json::json!({"type":"string","init":"a".repeat(127)}));}
-    let mut w=serde_json::json!({"engine":"p4-bounded-runtime-v4","quota":"p4-quota-v3","vars":vars});
+    let mut w=serde_json::json!({"engine":"p4-bounded-runtime-v4","quota":"p4-quota-v3","vars":vars,
+        "schema_version":1,"states":["ready"],"initial_state":"ready","dashboard":{}});
     let send=|w:&Value|prepare_p4_widget_file("quota-probe","runtime/widget.json",&serde_json::to_vec(w).unwrap());
     let got:Value=serde_json::from_slice(&send(&w).unwrap()).unwrap();
     assert_eq!(got["vars"],w["vars"]);
@@ -410,6 +628,7 @@ fn quota_v3_transaction_keeps_32_vars_127_utf8_bytes_and_exact_json_ceiling(){
     w["vars"].as_object_mut().unwrap().remove("extra");
     w["quota"]="p4-quota-v2".into();assert!(send(&w).is_err());
     w["quota"]="p4-quota-v3".into();w["padding"]="".into();
+    crate::clawpkg::complete_p4_runtime_containers(w.as_object_mut().unwrap());
     let base=serde_json::to_vec(&w).unwrap().len();w["padding"]=Value::String("x".repeat(12287-base));
     assert_eq!(send(&w).unwrap().len(),12287);
     w["padding"].as_str().map(str::to_owned).map(|s|w["padding"]=Value::String(s+"x"));

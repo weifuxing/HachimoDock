@@ -74,9 +74,11 @@ impl Snapshot {
         queue
     }
 }
-// Bound Mac USB/WCH audio bursts to 40 ms; other platforms keep 80 ms.
-// Keep the reservoir and initial buffering duration identical in PCM bytes.
-const RADIO_PCM_FRAME_BYTES: usize = if cfg!(target_os = "macos") { 3840 } else { 7680 };
+// Each chunk waits for a device ACK. WiFi6/WCH takes about 40–60 ms per
+// request, so 40 ms of PCM cannot reliably replenish the playback buffer.
+// Use the codec's bounded 80 ms block on every platform; macOS still sends
+// it in paced 64-byte USB slices (see usb_serial/live_audio_pacing.rs).
+const RADIO_PCM_FRAME_BYTES: usize = 7680;
 const RADIO_QUEUE_FRAMES: usize = (32 * 7680) / RADIO_PCM_FRAME_BYTES;
 const RADIO_PREBUFFER_FRAMES: usize = (16 * 7680) / RADIO_PCM_FRAME_BYTES;
 
@@ -186,6 +188,7 @@ struct Service {
     discovery_at: Mutex<Instant>,
     visibility: Mutex<(u64, u64, bool, Instant)>,
     pending_auto: AtomicBool,
+    auto_station: Mutex<Option<String>>,
 }
 struct Host {
     owner: Arc<owner::Guard>,
@@ -307,7 +310,9 @@ impl Service {
             let ack=self.usb.media_status_for_connection(board,generation,topic,payload.clone())?;
             if self.owner_scope()? != (scope.clone(),connection.clone()) {return Err("电台连接已变化".into());}
             if owner::stopped_rejection(operation,ack["ok"].as_bool(),ack["bufferedMs"].as_u64(),ack["state"].as_str(),ack["sessionId"].as_str()) {
-                crate::realtime_chat_log::record("", "radio_device_stopped", json!({"stage":"correlated_terminal_rejection"}));
+                crate::realtime_chat_log::record("", "radio_device_stopped", json!({"stage":"correlated_terminal_rejection",
+                    "state":ack["state"],"bufferedMs":ack["bufferedMs"],"seq":payload["seq"],
+                    "reason":if operation==owner::Op::Chunk {"chunk"}else{"query"}}));
                 return Ok(owner::Reply::DeviceStopped(ack));
             }
             if owner::rejected_active(operation,session,ack["ok"].as_bool(),ack["bufferedMs"].as_u64(),
@@ -368,7 +373,7 @@ impl Service {
         }
         *self.session.lock().map_err(|_|"电台会话状态不可用")?=active.unwrap_or_default();
         self.device_state.unknown.store(false,Ordering::Release);
-        crate::realtime_chat_log::record("", "radio_manual_reconciled",json!({"stage":"read_only_current_scope"}));
+        crate::realtime_chat_log::record("", "radio_manual_reconciled",json!({"stage":"read_only_current_scope","reason":if self.session.lock().unwrap().is_empty(){"idle"}else{"active"}}));
         Ok(())
     }
     fn confirm_idle_for_retry(&self, board: &str) -> Result<(), RadioPlaybackError> {
@@ -520,15 +525,30 @@ impl Service {
     }
     /// Only a current device visibility epoch can authorize delayed automatic playback.
     fn maybe_auto(self:&Arc<Self>) {
-        if self.device_state.ensure_known().is_err(){self.pending_auto.store(false,Ordering::SeqCst);return;}
         if !self.pending_auto.load(Ordering::SeqCst){return;}
+        if self.device_state.ensure_known().is_err(){
+            self.pending_auto.store(false,Ordering::SeqCst);
+            crate::realtime_chat_log::record("","radio_lifecycle",json!({"stage":"blocked","reason":"device_unknown"}));
+            return;
+        }
         let visible=self.visibility.lock().unwrap();
         if !visible.2 || visible.3.elapsed()>Duration::from_secs(6) || !self.usb.status().connected {return;}
         drop(visible);
         let data=self.data.lock().unwrap().clone();
         if matches!(data.state.as_str(),"playing"|"buffering") {self.pending_auto.store(false,Ordering::SeqCst);return;}
         let queue=data.queue();
-        let selected=data.current.and_then(|old|queue.iter().find(|s|s.id==old.id).cloned()).or_else(||queue.first().cloned());
+        let fallback=self.auto_station.lock().unwrap().clone();
+        // A device format handoff names the exact selected row. Wait for its
+        // verified catalog entry; never silently substitute a stale PC current.
+        let selected=match fallback {
+            Some(id)=>queue.iter().find(|s|s.id==id).cloned().or_else(|| {
+                // Firmware presets may be outside the city's short list. Only
+                // the already verified package catalog may resolve such a key.
+                self.extension.catalog_rows.iter().find_map(|row|
+                    self.extension.map_results(&json!([row]), "").into_iter().find(|s|s.id==id))
+            }),
+            None=>data.current.and_then(|old|queue.iter().find(|s|s.id==old.id).cloned()).or_else(||queue.first().cloned()),
+        };
         if let Some(station)=selected {
             crate::realtime_chat_log::record("","radio_auto_play",json!({"stage":"start","count":queue.len()}));
             self.pending_auto.store(false,Ordering::SeqCst);
@@ -893,6 +913,7 @@ fn create_service_with_owner(
         discovery_at: Mutex::new(Instant::now() - Duration::from_secs(60)),
         visibility: Mutex::new((0,0,false,Instant::now())),
         pending_auto: AtomicBool::new(false),
+        auto_station: Mutex::new(None),
     });
     s
 }
@@ -1021,7 +1042,19 @@ pub fn device_event(p: &Value) {
         return;
     }
     // Preserve wire order: an old enter must not overtake a newer physical stop.
-    let Some(event_binding) = HOST.get().and_then(|host| radio_connection_binding(&host.usb.status()).ok()) else { return; };
+    let Some(event_binding) = HOST.get().and_then(|host| radio_connection_binding(&host.usb.status()).ok()) else {
+        // Bounded evidence even if visibility heartbeats keep arriving before
+        // boot identity is available. Never log device IDs or payload text.
+        static LAST:AtomicU64=AtomicU64::new(0);
+        let now=unix_now();let prior=LAST.load(Ordering::Relaxed);
+        if now.saturating_sub(prior)>=15 && LAST.compare_exchange(prior,now,Ordering::Relaxed,Ordering::Relaxed).is_ok(){
+            crate::realtime_chat_log::record("","radio_lifecycle",json!({"stage":"admission","reason":"binding_unavailable"}));
+        }
+        return;
+    };
+    if p["operation"]!="visibility" {
+        crate::realtime_chat_log::record("","radio_lifecycle",json!({"stage":"control","reason":p["operation"]}));
+    }
     static EVENTS: OnceLock<mpsc::SyncSender<(String,Value,RadioConnectionBinding)>>=OnceLock::new();
     let sender=EVENTS.get_or_init(|| {
         let (tx,rx)=mpsc::sync_channel::<(String,Value,RadioConnectionBinding)>(128);
@@ -1037,6 +1070,8 @@ pub fn device_event(p: &Value) {
                 value["message"].as_str().unwrap_or("打开列表加载电台"),
             ),
             Err(error) => {
+                crate::realtime_chat_log::record("","radio_lifecycle",json!({"stage":"request","reason":"rejected",
+                    "errorKind":crate::realtime_chat_log::error_kind(&error)}));
                 if let Ok(s) = service(&id) {
                     let mut data = s.data.lock().unwrap();
                     // A failed selection/volume command must not mark an existing
@@ -1118,12 +1153,24 @@ fn execute_for_binding(id: &str, input: Value, expected: Option<&RadioConnection
         let boot=input["boot"].as_u64().ok_or("无效媒体生命周期")?;
         let epoch=input["epoch"].as_u64().ok_or("无效媒体生命周期")?;
         let visible=input["visible"].as_bool().ok_or("无效媒体生命周期")?;
+        let fallback=if id=="city-radio" && input["fallback"]=="format_unsupported" {
+            Some(input["key"].as_str().filter(|key|!key.is_empty()&&key.len()<=80)
+                .ok_or("无效设备电台选择")?.to_owned())
+        } else {None};
         let mut prior=s.visibility.lock().unwrap();
         if boot==prior.0 && epoch<prior.1 {return Ok(s.snapshot());}
         let entered=visible && (boot!=prior.0 || epoch!=prior.1 || !prior.2);
         *prior=(boot,epoch,visible,Instant::now());drop(prior);
-        if !visible {s.pending_auto.store(false,Ordering::SeqCst);}
+        let device_direct = id == "city-radio" && input["deviceDirect"].as_bool() == Some(true);
+        if entered || !visible {
+            crate::realtime_chat_log::record("","radio_lifecycle",json!({"stage":"visibility",
+                "reason":if !visible {"hidden"}else if fallback.is_some(){"format_fallback"}else if device_direct {"device_direct"}else{"pc_enter"},"seq":epoch}));
+        }
+        // The device deliberately keeps deviceDirect=true so older PCs
+        // cannot autoplay a stale current station when ignoring fallback/key.
+        if !visible || (device_direct && fallback.is_none()) {s.pending_auto.store(false,Ordering::SeqCst);}
         else if entered && s.extension.discovery.as_ref().is_some_and(|d|d.auto_play_on_enter) {
+            *s.auto_station.lock().unwrap()=fallback;
             s.pending_auto.store(true,Ordering::SeqCst);
             crate::realtime_chat_log::record("","radio_auto_play",json!({"stage":"enter","count":s.data.lock().unwrap().queue().len()}));
         }
@@ -1580,140 +1627,247 @@ mod tests {
             assert!(state["message"].as_str().unwrap().contains("暂无电台"));
         }
     }
+    // Test-only protocol classification: visibility is firmware-generated, while
+    // unknown events/visibility loss cannot be proved non-physical. Never dispatch
+    // device_event here: it may auto-play or modify the user's library.
+    fn radio_hil_interrupt(topic: &str, p: &Value) -> bool {
+        match topic {
+            "input/event" | "touch/event" | "audio/begin" => true,
+            "media/event" => !(p["operation"] == "visibility"
+                && p["source"] == "pc.city-radio"
+                && p["visible"] == true
+                && p["boot"].as_u64().is_some_and(|n| n > 0)
+                && p["epoch"].as_u64().is_some_and(|n| n > 0)
+                && p.get("global").is_none()
+                && p.get("deviceDirect").is_none()
+                && p.as_object().is_some_and(|o| o.keys().all(|k|
+                    matches!(k.as_str(), "operation" | "source" | "visible" | "boot" | "epoch")))),
+            _ => false,
+        }
+    }
+
+    fn radio_hil_metrics(d: &Value, baseline: &Value) -> Value {
+        // Numeric allowlist only; never serialize full diagnostics (conversation,
+        // network configuration, identifiers, or lifetime peak labels).
+        fn numbers(v: &Value, keys: &[&str]) -> Value {
+            let mut out = serde_json::Map::new();
+            for key in keys {
+                if v[*key].is_number() { out.insert((*key).into(), v[*key].clone()); }
+            }
+            Value::Object(out)
+        }
+        fn delta(now: &Value, old: &Value) -> Value {
+            now.as_u64().zip(old.as_u64()).and_then(|(n,o)|n.checked_sub(o))
+                .map(Value::from).unwrap_or(Value::Null)
+        }
+        let r = &d["runtime"];
+        let l = &r["renderLifetime"];
+        let base = &baseline["runtime"]["renderLifetime"];
+        let same_boot = d["bootCount"].as_u64().is_some()
+            && d["bootCount"] == baseline["bootCount"];
+        let base_us = baseline["runtime"]["uptimeMs"].as_u64().and_then(|v|v.checked_add(1)).and_then(|v|v.checked_mul(1000));
+        let fresh_time = |v: &Value| same_boot && v.as_u64().zip(base_us).is_some_and(|(n,b)|n > b);
+        // A completed window may straddle test start. Require two completed
+        // windows after baseline, so the latest window is wholly post-baseline.
+        let fresh_window = same_boot && l["completedWindows"].as_u64()
+            .zip(base["completedWindows"].as_u64())
+            .is_some_and(|(now,old)| now.checked_sub(old).is_some_and(|n| n >= 2));
+        let gap = if fresh_time(&l["gapPeak"]["atUs"])
+            && l["gapPeak"]["frame"] == l["gapPeakFrame"]
+            && l["gapPeakFrame"] != base["gapPeakFrame"] {
+            numbers(&l["gapPeak"], &["gapUs","frame","waitMaxUs","heldMaxUs","miniappMaxUs","heldTotalUs","iterations"])
+        } else { Value::Null };
+        json!({
+            "renderP95Us": if fresh_window { r["renderP95Us"].clone() } else { Value::Null },
+            "renderP95Scope":"latest completed wholly post-baseline window; not whole-run P95",
+            "renderFramesDelta": if same_boot {delta(&l["samples"], &base["samples"])} else {Value::Null},
+            "gapOverBudgetDelta": if same_boot {delta(&l["gapOverBudget"], &base["gapOverBudget"])} else {Value::Null},
+            "newGapPeak":gap,
+            "newRenderPeakUs":if fresh_time(&l["peakStartUs"]) && l["peakFrame"] != base["peakFrame"] {l["maxUs"].clone()} else {Value::Null},
+            "workerLocked":if fresh_time(&r["workerLocked"]["atUs"]) {numbers(&r["workerLocked"], &["maxUs","atUs","spans","overBudgetSpans"])} else {Value::Null},
+            "previousDiagnosticQuery":if fresh_time(&r["previousDiagnosticQuery"]["beginUs"]) {numbers(&r["previousDiagnosticQuery"], &["sequence","lockWaitUs","stateHeldUs","postUnlockTxUs"])} else {Value::Null},
+            "memory":numbers(&d["memory"], &["freeHeapBytes","freePsramBytes","freeInternalBytes","largestInternalBlockBytes","freeDmaBytes","largestDmaBlockBytes","largestPsramBlockBytes"]),
+            "historicalPeaksExcluded":true
+        })
+    }
+
     #[test]
-    #[ignore = "Requires explicit permission, exclusive USB and RADIO_TEST_PORT; plays real radio for 25–120 seconds"]
+    fn radio_hil_protocol_and_history_filter() {
+        let heartbeat = json!({"operation":"visibility","source":"pc.city-radio","visible":true,"boot":1,"epoch":2});
+        assert!(!radio_hil_interrupt("media/event", &heartbeat));
+        for p in [json!({}), json!({"operation":"stop","global":true}),
+                  json!({"operation":"visibility","visible":true}),
+                  {let mut p=heartbeat.clone();p["visible"]=json!(false);p},
+                  {let mut p=heartbeat.clone();p["key"]=json!("physical");p}] {
+            assert!(radio_hil_interrupt("media/event", &p));
+        }
+        assert!(radio_hil_interrupt("input/event", &heartbeat));
+        let before=json!({"bootCount":1,"runtime":{"uptimeMs":1000,"renderLifetime":{"samples":100,"completedWindows":1,"gapOverBudget":2}}});
+        let mut after=json!({"bootCount":1,"runtime":{"renderP95Us":50,"renderWindowSamples":100,
+            "renderLifetime":{"samples":250,"completedWindows":2,"windowEndFrame":199,"peakFrame":99,"maxUs":999999,"gapPeakFrame":99,"gapOverBudget":3,"gapPeak":{"frame":99,"gapUs":999999}}}});
+        let old=radio_hil_metrics(&after,&before);
+        assert!(old["renderP95Us"].is_null());assert!(old["newGapPeak"].is_null());assert!(old["newRenderPeakUs"].is_null());
+        assert_eq!(old["gapOverBudgetDelta"],1);
+        after["runtime"]["renderLifetime"]["completedWindows"]=json!(3);
+        assert_eq!(radio_hil_metrics(&after,&before)["renderP95Us"],50);
+        after["bootCount"]=json!(2);
+        assert!(radio_hil_metrics(&after,&before)["renderP95Us"].is_null());
+    }
+
+    #[test]
+    #[ignore = "Explicit exclusive USB, board/version, report path required; real radio for 25–600 seconds"]
     fn live_usb_radio() {
+        use std::io::Write;
         let port = std::env::var("RADIO_TEST_PORT").expect("explicit test port");
+        let expected_board = std::env::var("P4_EXPECTED_BOARD_ID").expect("explicit expected board ID");
+        let expected_version = std::env::var("P4_EXPECTED_VERSION").expect("explicit expected firmware version");
+        assert!(!expected_board.is_empty() && !expected_version.is_empty(), "nonempty board/version guards required");
         let test_seconds = std::env::var("RADIO_TEST_SECONDS")
-            .map(|v| v.parse::<u64>().expect("integer test duration"))
-            .unwrap_or(25);
-        assert!((25..=120).contains(&test_seconds), "test duration must be 25–120 seconds");
-        let play_duration = Duration::from_secs(test_seconds);
+            .map(|v| v.parse::<u64>().expect("integer test duration")).unwrap_or(25);
+        assert!((25..=600).contains(&test_seconds), "test duration must be 25–600 seconds");
+        let report_path = PathBuf::from(std::env::var("RADIO_TEST_REPORT").expect("explicit JSON report path"));
+        assert!(report_path.is_absolute(), "report path must be absolute");
+        // Fail before USB if the destination is unavailable; never overwrite evidence.
+        let report_file = std::fs::OpenOptions::new().write(true).create_new(true).open(report_path)
+            .unwrap_or_else(|_|panic!("cannot create exclusive report file"));
         let usb = UsbSerialManager::new();
         usb.set_desktop_device_id("radio-playback-hil");
-        let input_seen = Arc::new(AtomicBool::new(false));
-        let input_flag = input_seen.clone();
-        usb.connect(&port, move |topic, _| {
-            if matches!(topic.as_str(), "input/event" | "touch/event" | "media/event") {
-                eprintln!("radio test interrupted by device input: {topic}");
-                input_flag.store(true, Ordering::SeqCst);
-                // A physical stop must never be treated as a failed stream and
-                // automatically restarted by this unattended test harness.
-                stop_all();
-            }
-        })
-            .expect("exclusive USB connection");
-        let board = usb.status().board_device_id;
-        if let Ok(expected) = std::env::var("P4_EXPECTED_BOARD_ID") {
-            assert_eq!(board, expected, "refusing playback on a different board");
+        struct Cleanup {
+            usb: UsbSerialManager, board: String, service: Option<Arc<Service>>,
+            prior: Option<(u64,String)>, library: Option<tempfile::TempDir>, file: std::fs::File, report: Value, finished: bool,
         }
-        let diagnostics_before = usb.query_diagnostics(&board).unwrap();
-        if let Ok(expected) = std::env::var("P4_EXPECTED_VERSION") {
-            assert_eq!(diagnostics_before["runtime"]["firmware"], expected, "unexpected firmware");
-        }
-        let inventory = usb.query_widget_inventory(&board).unwrap();
-        assert_eq!(inventory["activeWidgetId"], "city-radio", "playback test must exercise the authorized component");
-        let prior = usb
-            .media_request(&usb.status().board_device_id, "media/query", json!({}))
-            .unwrap();
-        assert!(
-            !matches!(
-                prior["state"].as_str(),
-                Some("playing" | "buffering" | "paused")
-            ),
-            "do not interrupt existing playback"
-        );
-        let prior_volume = prior["volume"].as_u64().expect("device volume");
-        usb.send_to_board(&board, "control/screen-page", &json!({"page":"app"}))
-            .expect("show the authorized radio component for observation");
-        let root = tempfile::tempdir().unwrap();
-        let extension = crate::component_extension::parse(include_bytes!(
-            "../../builtin-clawpkgs/city-radio/pc/extension.json"
-        ))
-        .unwrap();
-        let station = network::search(&extension, "北京")
-            .expect("live directory")
-            .into_iter()
-            .find(|s| s.hls && s.url.contains("rbc.cn"))
-            .expect("public broadcaster");
-        let s = create_service(
-            "city-radio".into(),
-            "explicit-live-test".into(),
-            extension,
-            root.path().join("city-radio"),
-            usb.clone(),
-        );
-        assert!(HOST
-            .set(Host {
-            owner:s.owner.clone(),
-                root: root.path().into(),
-                usb: usb.clone(),
-                services: Mutex::new(HashMap::from([("city-radio".into(), s.clone())])),
-                operation: Mutex::new(()),
-                requests: Mutex::new(())
-            })
-            .is_ok());
-        struct Cleanup(Arc<Service>, u64);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                self.0.stop("idle", "测试结束");
-                let _ = self.0.usb.media_request(
-                    &self.0.usb.status().board_device_id,
-                    "media/control",
-                    json!({"operation":"volume", "volume":self.1}),
-                );
-                self.0.usb.disconnect();
+        impl Cleanup {
+            fn finish(&mut self) -> bool {
+                if self.finished {return true;}
+                self.finished=true;
+                let stop_ok=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Some(s)=&self.service {s.stop("idle", "测试结束");}
+                })).is_ok();
+                let mut restored=stop_ok;
+                if let Some((volume,page))=&self.prior {
+                    // Attempt both restorations even when the first fails.
+                    let volume_ok=self.usb.media_request(&self.board,"media/control",json!({"operation":"volume","volume":volume})).is_ok();
+                    let page_ok=self.usb.send_to_board(&self.board,"control/screen-page",&json!({"page":page})).is_ok();
+                    let confirmed=self.usb.media_request(&self.board,"media/query",json!({})).ok()
+                        .is_some_and(|v|v["volume"].as_u64()==Some(*volume) && v["state"]=="idle");
+                    let screen_ok=self.usb.query_diagnostics(&self.board).ok()
+                        .is_some_and(|v|v["runtime"]["screenPage"].as_str()==Some(page.as_str()));
+                    restored &= volume_ok && page_ok && confirmed && screen_ok;
+                }
+                self.report["restored"]=json!(restored);
+                if std::thread::panicking() || !restored {self.report["status"]=json!("failed");}
+                self.usb.disconnect();
+                let written=serde_json::to_writer(&mut self.file,&self.report).is_ok()
+                    && self.file.write_all(b"\n").is_ok() && self.file.flush().is_ok();
+                eprintln!("radio HIL finished: restored={restored}, reportWritten={written}");
+                restored && written
             }
         }
-        let _cleanup = Cleanup(s.clone(), prior_volume);
-        s.start(station.clone()).expect("start playback");
-        let test_started = Instant::now();
-        let deadline = test_started + play_duration + Duration::from_secs(25);
-        let mut first = None;
-        let mut samples = 0;
-        let mut last_state = String::new();
-        let mut rebuffer_samples = 0;
-        while Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(500));
-            assert!(!input_seen.load(Ordering::SeqCst), "manual input interrupted the unattended playback test; not a continuous-playback result");
-            let snapshot = s.snapshot();
-            if snapshot["state"].as_str().unwrap_or("") != last_state {
-                last_state = snapshot["state"].as_str().unwrap_or("").into();
-                eprintln!(
-                    "radio state at {} ms: {last_state}",
-                    test_started.elapsed().as_millis()
-                );
-            }
-            assert_ne!(snapshot["state"], "error", "{}", snapshot["message"]);
-            if first.is_some() && snapshot["state"] != "playing" {
-                rebuffer_samples += 1;
-            }
-            if snapshot["state"] == "playing" {
-                samples += 1;
-                let started = first.get_or_insert_with(Instant::now);
-                if started.elapsed() >= play_duration {
-                    break;
+        impl Drop for Cleanup {fn drop(&mut self) {self.finish();}}
+        let mut cleanup=Cleanup {usb:usb.clone(),board:String::new(),service:None,prior:None,library:None,file:report_file,
+            report:json!({"status":"failed","phase":"connect","seconds":test_seconds,"samples":[],
+                "underrunDelta":null,"underrunSampling":"unavailable: audio/status has no stream identity and counter resets; diagnostic notifications are throttled, not a count"}),finished:false};
+        let input_seen=Arc::new(AtomicBool::new(false));
+        let input_flag=input_seen.clone();
+        let service_slot: Arc<OnceLock<std::sync::Weak<Service>>>=Arc::new(OnceLock::new());
+        let callback_service=service_slot.clone();
+        usb.connect(&port,move |topic,p| {
+            if radio_hil_interrupt(&topic,&p) {
+                input_flag.store(true,Ordering::SeqCst);
+                // No synchronous USB requests on the reader callback (ACK deadlock).
+                // Invalidate the worker immediately, including any reconnect loop.
+                if let Some(s)=callback_service.get().and_then(|s|s.upgrade()) {
+                    s.pending_auto.store(false,Ordering::SeqCst);
+                    s.generation.fetch_add(1,Ordering::SeqCst);
                 }
             }
+        }).unwrap_or_else(|_|panic!("exclusive USB connection failed"));
+        cleanup.report["phase"]=json!("identity_and_idle_guards");
+        let board=usb.status().board_device_id;
+        assert!(board==expected_board,"refusing playback on a different board");
+        cleanup.board=board.clone();
+        let before=usb.query_diagnostics(&board).unwrap_or_else(|_|panic!("baseline diagnostics failed"));
+        assert!(before["runtime"]["firmware"].as_str()==Some(expected_version.as_str()),"unexpected firmware");
+        let inventory=usb.query_widget_inventory(&board).unwrap_or_else(|_|panic!("widget query failed"));
+        assert!(inventory["activeWidgetId"]=="city-radio","authorized component must already be active; never install");
+        let prior=usb.media_request(&board,"media/query",json!({})).unwrap_or_else(|_|panic!("media query failed"));
+        assert!(prior["state"]=="idle","do not interrupt existing or uncertain playback");
+        let volume=prior["volume"].as_u64().expect("device volume");
+        let page=before["runtime"]["screenPage"].as_str().expect("original screen page").to_owned();
+        assert!(!page.is_empty(),"original page required");
+        cleanup.report["phase"]=json!("isolated_station_setup");
+        cleanup.library=Some(tempfile::tempdir().expect("temporary isolated library"));
+        let root=cleanup.library.as_ref().unwrap();
+        let mut extension=crate::component_extension::parse(include_bytes!("../../builtin-clawpkgs/city-radio/pc/extension.json")).expect("builtin extension");
+        extension.catalog_rows=crate::component_extension::Extension::validate_catalog_bytes(include_bytes!("../../builtin-clawpkgs/city-radio/pc/catalog.json")).expect("builtin catalog");
+        let station=match std::env::var("RADIO_TEST_URL") {
+            Ok(url)=>{
+                let parsed=network::valid_url(&url).unwrap_or_else(|_|panic!("invalid explicit station URL"));
+                let name=std::env::var("RADIO_TEST_NAME").unwrap_or_else(|_|"HIL radio".into());
+                assert!(name.chars().count()<=80 && !name.chars().any(char::is_control),"invalid station display name");
+                // Test-local catalog only: authorize this exact explicit input;
+                // never rewrite the installed component or personal favorites.
+                let row=json!({"id":"explicit-hil","name":name,"url":url,"hls":parsed.path().ends_with(".m3u8"),"available":true});
+                extension.catalog_rows=vec![row.clone()];
+                extension.map_results(&json!([row]),"").into_iter().next().expect("explicit test station")
+            }
+            Err(std::env::VarError::NotPresent)=>network::search(&extension,"北京")
+                .unwrap_or_else(|_|panic!("station search failed")).into_iter().find(|s|s.hls)
+                .expect("search returned no HLS station"),
+            Err(_)=>panic!("invalid station URL environment"),
+        };
+        assert!(extension.allows_station(&station),"station rejected by existing component policy");
+        let s=create_service("city-radio".into(),"explicit-live-test".into(),extension,root.path().join("city-radio"),usb.clone());
+        cleanup.service=Some(s.clone());
+        assert!(service_slot.set(Arc::downgrade(&s)).is_ok());
+        assert!(HOST.set(Host {owner:s.owner.clone(),root:root.path().into(),usb:usb.clone(),
+            services:Mutex::new(HashMap::from([("city-radio".into(),s.clone())])),operation:Mutex::new(()),requests:Mutex::new(())}).is_ok(),"run ignored HIL alone in a fresh process");
+        // Arm restoration before the first mutation, including screen command failure.
+        cleanup.prior=Some((volume,page));
+        assert!(!input_seen.load(Ordering::SeqCst),"input before playback; no retry");
+        usb.send_to_board(&board,"control/screen-page",&json!({"page":"app"})).unwrap_or_else(|_|panic!("screen selection failed"));
+        assert!(!input_seen.load(Ordering::SeqCst),"input before playback; no retry");
+        cleanup.report["phase"]=json!("playback");
+        s.start(station).unwrap_or_else(|_|panic!("playback startup failed"));
+        assert!(!input_seen.load(Ordering::SeqCst),"input during startup; no retry");
+        let started=Instant::now();
+        let deadline=started+Duration::from_secs(test_seconds+25);
+        let mut first=None;
+        let mut samples=0u64;
+        let mut rebuffer_samples=0u64;
+        let mut next_diagnostic=Duration::from_secs(10);
+        while Instant::now()<deadline {
+            std::thread::sleep(Duration::from_millis(500));
+            if input_seen.load(Ordering::SeqCst) {cleanup.report["interrupted"]=json!(true);panic!("input/uncertain event interrupted test; no retry");}
+            let snapshot=s.snapshot();
+            assert!(snapshot["state"]!="error","playback failed (details omitted)");
+            if first.is_some() && snapshot["state"]!="playing" {rebuffer_samples+=1;}
+            if snapshot["state"]=="playing" {samples+=1;first.get_or_insert_with(Instant::now);}
+            cleanup.report["playingSamples"]=json!(samples);
+            cleanup.report["rebufferSamples"]=json!(rebuffer_samples);
+            if started.elapsed()>=next_diagnostic {
+                let d=usb.query_diagnostics(&board).unwrap_or_else(|_|panic!("periodic diagnostics failed"));
+                let mut sample=radio_hil_metrics(&d,&before);
+                sample["elapsedMs"]=json!(started.elapsed().as_millis() as u64);
+                eprintln!("radio diagnostic at {}s",started.elapsed().as_secs());
+                cleanup.report["samples"].as_array_mut().unwrap().push(sample);
+                assert!(d["bootCount"]==before["bootCount"] && d["faultResetCount"]==before["faultResetCount"],"device restarted or faulted");
+                assert!(d["runtime"]["screenPage"]=="app","left test page; no retry");
+                next_diagnostic=started.elapsed()+Duration::from_secs(10);
+            }
+            if first.is_some_and(|t:Instant|t.elapsed()>=Duration::from_secs(test_seconds)) {break;}
         }
-        assert!(
-            first.is_some_and(|t| t.elapsed() >= play_duration) && samples >= test_seconds * 8 / 5,
-            "insufficient sustained playback samples: {samples}"
-        );
-        s.stop("idle", "测试结束");
-        let ack = usb
-            .media_request(&usb.status().board_device_id, "media/query", json!({}))
-            .unwrap();
-        assert_eq!(ack["state"], "idle");
-        let diagnostics_after = usb.query_diagnostics(&board).unwrap();
-        assert_eq!(diagnostics_after["bootCount"], diagnostics_before["bootCount"]);
-        assert_eq!(diagnostics_after["faultResetCount"], diagnostics_before["faultResetCount"]);
-        assert_eq!(diagnostics_after["runtime"]["screenPage"], "app");
-        assert_eq!(rebuffer_samples, 0, "playback stalled after startup");
-        eprintln!(
-            "LIVE USB PASS: station={}, playingSeconds={}, playingSamples={}, rebufferSamples=0, stopped=true, display=app, noReboot=true",
-            station.name, test_seconds, samples
-        );
+        assert!(!input_seen.load(Ordering::SeqCst),"input at test completion; no retry");
+        assert!(first.is_some_and(|t|t.elapsed()>=Duration::from_secs(test_seconds)) && samples>=test_seconds*8/5,"insufficient playback samples");
+        assert_eq!(rebuffer_samples,0,"playback stalled after startup");
+        let after=usb.query_diagnostics(&board).unwrap_or_else(|_|panic!("final diagnostics failed"));
+        cleanup.report["final"]=radio_hil_metrics(&after,&before);
+        assert!(after["bootCount"]==before["bootCount"] && after["faultResetCount"]==before["faultResetCount"],"device restarted or faulted");
+        assert!(after["runtime"]["screenPage"]=="app","left test page");
+        assert!(!input_seen.load(Ordering::SeqCst),"input during final diagnostics; no retry");
+        cleanup.report["phase"]=json!("restore");
+        cleanup.report["status"]=json!("passed");
+        assert!(cleanup.finish(),"cleanup/report failed");
     }
     #[test]
     fn component_storage_survives_update_without_cross_component_data() {

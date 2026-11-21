@@ -8,6 +8,7 @@
 
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 // Protocol-schema-6 firmware fixes the OTA idle-clock race and advertises a
@@ -27,10 +28,9 @@ pub(super) const P4_FIRMWARE_CORRUPTION_RETRIES_BEFORE_FALLBACK: usize = 3;
 pub(super) const P4_FIRMWARE_RECOVERY_SUCCESS_STREAK: usize = 32;
 pub(super) const P4_FIRMWARE_MAX_IMAGE_SIZE: usize = 0x300000;
 pub(super) const P4_FIRMWARE_ACK_TIMEOUT: Duration = Duration::from_secs(5);
-// A healthy 4 Mbaud board ACK arrives within a few milliseconds. A longer
-// timeout only lets a lost/corrupted ACK consume the old firmware's bounded
-// whole-transfer window before the duplicate chunk can be retried.
-pub(super) const P4_FIRMWARE_CHUNK_ACK_TIMEOUT: Duration = Duration::from_millis(150);
+// Leave room for a slow flash write or delayed USB delivery. Healthy chunks
+// still advance as soon as their acknowledgement arrives.
+pub(super) const P4_FIRMWARE_CHUNK_ACK_TIMEOUT: Duration = Duration::from_millis(750);
 pub(super) const P4_FIRMWARE_COMMIT_ACK_TIMEOUT: Duration = Duration::from_secs(3);
 pub(super) const P4_FIRMWARE_RECONNECT_TIMEOUT: Duration = Duration::from_secs(90);
 pub(super) const P4_FIRMWARE_CHUNK_MAX_ATTEMPTS: usize = 20;
@@ -49,6 +49,7 @@ pub struct FirmwareUpdateResult {
     pub target_partition: String,
     pub version: String,
     pub project_name: String,
+    pub connection_id: String,
     pub image_state: String,
     pub pending_reboot: bool,
 }
@@ -59,6 +60,8 @@ pub struct FirmwareImageInfo {
     pub version: String,
     pub project_name: String,
     pub bytes: u64,
+    #[serde(skip)]
+    pub sha256: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +176,38 @@ pub(super) fn initial_firmware_chunk_size(protocol_schema: u32, preferred_size: 
         preferred_size.min(P4_FIRMWARE_SAFE_CHUNK_SIZE)
     } else {
         preferred_size
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum FirmwareChunkProgress {
+    Applied,
+    Unchanged,
+    Unknown,
+}
+
+pub(super) fn firmware_chunk_progress(
+    status: &Value,
+    transfer_id: &str,
+    total_bytes: u64,
+    sequence: u64,
+    before_bytes: u64,
+    after_bytes: u64,
+) -> FirmwareChunkProgress {
+    use FirmwareChunkProgress::*;
+    if status["active"].as_bool() != Some(true)
+        || status["transferId"].as_str() != Some(transfer_id)
+        || status["expectedBytes"].as_u64() != Some(total_bytes) {
+        return Unknown;
+    }
+    let reported_sequence = status["nextSequence"].as_u64();
+    let reported_bytes = status["receivedBytes"].as_u64();
+    if reported_sequence == sequence.checked_add(1) && reported_bytes == Some(after_bytes) {
+        Applied
+    } else if reported_sequence == Some(sequence) && reported_bytes == Some(before_bytes) {
+        Unchanged
+    } else {
+        Unknown
     }
 }
 
@@ -293,7 +328,10 @@ pub(super) fn parse_esp_idf_app_descriptor(firmware: &[u8]) -> Result<EspIdfAppD
     })
 }
 
-pub fn inspect_firmware_image(path: &std::path::Path) -> Result<FirmwareImageInfo, String> {
+pub(crate) fn inspect_firmware_image(
+    path: &std::path::Path,
+    target: super::firmware_chip::P4ChipTarget,
+) -> Result<FirmwareImageInfo, String> {
     let firmware = std::fs::read(path)
         .map_err(|error| format!("read firmware {}: {error}", path.display()))?;
     if firmware.is_empty() || firmware.len() > P4_FIRMWARE_MAX_IMAGE_SIZE {
@@ -303,11 +341,14 @@ pub fn inspect_firmware_image(path: &std::path::Path) -> Result<FirmwareImageInf
             firmware.len()
         ));
     }
+    let range = super::firmware_chip::firmware_chip_range(&firmware)?;
+    super::firmware_chip::validate_firmware_chip(range, target)?;
     let descriptor = parse_esp_idf_app_descriptor(&firmware)?;
     Ok(FirmwareImageInfo {
         version: descriptor.version,
         project_name: descriptor.project_name,
         bytes: firmware.len() as u64,
+        sha256: Sha256::digest(&firmware).into(),
     })
 }
 
@@ -318,11 +359,11 @@ pub(super) fn evaluate_firmware_validation(
     original_version: &str,
     original_partition: &str,
     baseline_boot_count: u64,
-) -> Result<Option<VerifiedFirmware>, String> {
+) -> Result<Option<VerifiedFirmware>, &'static str> {
     let boot_count = diagnostics
         .get("bootCount")
         .and_then(Value::as_u64)
-        .ok_or("reconnected diagnostics did not include bootCount")?;
+        .ok_or("ota_boot_count_missing")?;
     if boot_count <= baseline_boot_count {
         return Ok(None);
     }
@@ -330,7 +371,7 @@ pub(super) fn evaluate_firmware_validation(
     let runtime = diagnostics
         .get("runtime")
         .and_then(Value::as_object)
-        .ok_or("reconnected diagnostics did not include runtime")?;
+        .ok_or("ota_runtime_missing")?;
     let version = runtime
         .get("firmware")
         .and_then(Value::as_str)
@@ -344,25 +385,19 @@ pub(super) fn evaluate_firmware_validation(
         .and_then(Value::as_str)
         .unwrap_or_default();
 
+    if !original_version.is_empty()
+        && !original_partition.is_empty()
+        && original_partition != expected_partition
+        && version == original_version
+        && partition == original_partition
+    {
+        return Err(crate::firmware_rollback::ROLLED_BACK);
+    }
     if version != expected_version {
-        if version == original_version {
-            return Err(format!(
-                "firmware update rolled back: expected version {expected_version}, device restarted on old version {version}"
-            ));
-        }
-        return Err(format!(
-            "firmware update restarted into unexpected version {version}; expected {expected_version}"
-        ));
+        return Err("ota_version_mismatch");
     }
     if partition != expected_partition {
-        if partition == original_partition {
-            return Err(format!(
-                "firmware update rolled back: expected partition {expected_partition}, device restarted on previous partition {partition}"
-            ));
-        }
-        return Err(format!(
-            "firmware update restarted into unexpected partition {partition}; expected {expected_partition}"
-        ));
+        return Err("ota_partition_mismatch");
     }
 
     match image_state {
@@ -371,10 +406,8 @@ pub(super) fn evaluate_firmware_validation(
             image_state: image_state.to_string(),
         })),
         "pending_verify" | "new" => Ok(None),
-        "" => Err("reconnected diagnostics did not include runtime.imageState".to_string()),
-        other => Err(format!(
-            "firmware {expected_version} restarted with invalid imageState={other}"
-        )),
+        "" => Err("ota_image_state_missing"),
+        _ => Err("ota_image_state_invalid"),
     }
 }
 
@@ -382,6 +415,42 @@ pub(super) fn evaluate_firmware_validation(
 mod ack_rejection_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn rollback_requires_a_new_boot_of_the_prior_version_and_partition() {
+        let mut diagnostics = json!({
+            "bootCount": 4,
+            "runtime": {"firmware": "1.0.0", "runningPartition": "ota_0", "imageState": "valid"}
+        });
+        let evaluate = |data: &Value| {
+            evaluate_firmware_validation(data, "2.0.0", "ota_1", "1.0.0", "ota_0", 4)
+        };
+        assert!(matches!(evaluate(&diagnostics), Ok(None)));
+        diagnostics["bootCount"] = json!(6);
+        assert_eq!(evaluate(&diagnostics).unwrap_err(), crate::firmware_rollback::ROLLED_BACK);
+        diagnostics["runtime"]["runningPartition"] = json!("ota_1");
+        assert_eq!(evaluate(&diagnostics).unwrap_err(), "ota_version_mismatch");
+    }
+
+    #[test]
+    fn chunk_timeout_progress_must_prove_exact_transfer_and_boundary() {
+        let before = json!({"active":true,"transferId":"tx","expectedBytes":512,
+            "nextSequence":2,"receivedBytes":32});
+        let classify = |status: &Value| firmware_chunk_progress(status, "tx", 512, 2, 32, 48);
+        assert_eq!(classify(&before), FirmwareChunkProgress::Unchanged);
+        let mut after = before.clone();
+        after["nextSequence"] = 3.into();
+        assert_eq!(classify(&after), FirmwareChunkProgress::Unknown);
+        after["receivedBytes"] = 48.into();
+        assert_eq!(classify(&after), FirmwareChunkProgress::Applied);
+        for (key, bad) in [("transferId", json!("other")), ("active", json!(false)),
+            ("expectedBytes", json!(1024)), ("receivedBytes", json!(49)), ("nextSequence", json!(null))] {
+            let mut status = after.clone();
+            status[key] = bad;
+            assert_eq!(classify(&status), FirmwareChunkProgress::Unknown);
+        }
+    }
+
     #[test]
     fn only_complete_unadvanced_base64_rejection_proves_not_applied() {
         let request=json!({"transferId":"tx","seq":2,"decodedSize":16});

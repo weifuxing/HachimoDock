@@ -16,7 +16,7 @@ def function(s,name):
  return s[m.start():i]
 @pytest.fixture(scope="module")
 def query_binary(tmp_path_factory):
- b=tmp_path_factory.mktemp("appearance-query-c");s=(MAIN/"pet_p4_protocol.c").read_text()
+ b=tmp_path_factory.mktemp("appearance-query-c");s=(MAIN/"pet_p4_protocol.c").read_text().replace('__attribute__((optimize("Os"))) ', '')
  code=(FIX/"appearance_query_prefix.inc").read_text()
  a=s.index("typedef struct {\n  bool asset_transfer,raw_receiving");z=s.index("static appearance_io_observation_t appearance_io_observe",a)
  code+=s[a:z]

@@ -13,8 +13,8 @@ use std::path::PathBuf;
 
 const FNV1A64_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV1A64_PRIME: u64 = 0x00000100000001b3;
-pub(super) const P4_BUILTIN_APPEARANCE_SLOT: u32 = 0;
-pub(super) const P4_RAW_APPEARANCE_SLOT: u32 = 1;
+pub(crate) const P4_BUILTIN_APPEARANCE_SLOT: u32 = 0;
+pub(crate) const P4_RAW_APPEARANCE_SLOT: u32 = 1;
 
 #[derive(Debug, Clone)]
 pub(super) struct AppearanceAssetEntry {
@@ -39,15 +39,15 @@ pub(super) struct AssetRemoteStat {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct P4AppearanceSlot {
-    pub(super) slot: u32,
-    pub(super) pack_id: String,
+pub(crate) struct P4AppearanceSlot {
+    pub(crate) slot: u32,
+    pub(crate) pack_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct P4AppearanceSlotState {
-    pub(super) active_slot: Option<u32>,
-    pub(super) slots: Vec<P4AppearanceSlot>,
+pub(crate) struct P4AppearanceSlotState {
+    pub(crate) active_slot: Option<u32>,
+    pub(crate) slots: Vec<P4AppearanceSlot>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +79,7 @@ pub(super) enum AppearanceAssetAckPhase {
     Commit,
 }
 
-pub(super) fn asset_checksum_hex(bytes: &[u8]) -> String {
+pub(crate) fn asset_checksum_hex(bytes: &[u8]) -> String {
     let checksum = fnv1a64_update(FNV1A64_OFFSET, bytes);
     format!("{checksum:016x}")
 }
@@ -159,7 +159,7 @@ pub(super) fn plan_appearance_sync_from_digests(
     }
 }
 
-pub(super) fn build_asset_file_commit_payload(
+pub(crate) fn build_asset_file_commit_payload(
     transfer_id: &str,
     path: &str,
     size: u64,
@@ -175,7 +175,7 @@ pub(super) fn build_asset_file_commit_payload(
     })
 }
 
-pub(super) fn parse_p4_appearance_slot_state(
+pub(crate) fn parse_p4_appearance_slot_state(
     payload: &Value,
 ) -> Result<P4AppearanceSlotState, String> {
     let active_slot = payload
@@ -220,7 +220,7 @@ pub(super) fn p4_raw_transfer_fallback_slot(
 
 // A protected factory appearance is addressed by its slot identity, not the
 // desktop bundle hash (which may differ after audio-only product updates).
-pub(super) fn p4_builtin_slot(state: &P4AppearanceSlotState) -> Result<&P4AppearanceSlot, String> {
+pub(crate) fn p4_builtin_slot(state: &P4AppearanceSlotState) -> Result<&P4AppearanceSlot, String> {
     state.slots.iter().find(|slot| slot.slot == P4_BUILTIN_APPEARANCE_SLOT)
         .ok_or_else(|| "设备内置形象不可用；请修复出厂素材。未覆盖自定义形象，也未自动重传。".to_string())
 }
@@ -258,20 +258,67 @@ pub(super) fn should_retry_appearance_with_legacy_full_sync(error: &str) -> bool
     )
 }
 
+fn p4_pack_digest(manifest_identity: &[u8]) -> Sha256 {
+    let mut digest = Sha256::new();
+    digest.update(b"pet-manager-p4-pack-v1\0");
+    digest.update((manifest_identity.len() as u64).to_le_bytes());
+    digest.update(manifest_identity);
+    digest
+}
+
+fn p4_pack_digest_file(digest: &mut Sha256, path: &str, size: u64) {
+    digest.update((path.len() as u64).to_le_bytes());
+    digest.update(path.as_bytes());
+    digest.update(size.to_le_bytes());
+}
+
+pub(crate) fn verified_p4_payload_snapshot(payloads: &[(String, Vec<u8>)], pack_id: &str) -> bool {
+    let mut assets = payloads.iter();
+    let Some((path, manifest)) = assets.next() else { return false; };
+    if path != "p4/manifest.json" { return false; }
+    let Ok(mut manifest) = serde_json::from_slice::<Value>(manifest) else { return false; };
+    if manifest["packId"] != pack_id { return false; }
+    manifest["packId"] = Value::String(String::new());
+    let Ok(identity) = crate::json_canonical::canonical_vec(&manifest) else { return false; };
+
+    let mut ordered: Vec<_> = assets.collect();
+    ordered.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut digest = p4_pack_digest(&identity);
+    for (path, bytes) in ordered {
+        p4_pack_digest_file(&mut digest, path, bytes.len() as u64);
+        digest.update(bytes);
+    }
+    format!("{:x}", digest.finalize()) == pack_id
+}
+
+#[cfg(test)]
+#[test]
+fn p4_payload_snapshot_verifies_the_bytes_that_will_be_transferred() {
+    let manifest = serde_json::json!({ "packId": "", "format": "p4-h264-v1" });
+    let identity = crate::json_canonical::canonical_vec(&manifest).unwrap();
+    let mut digest = p4_pack_digest(&identity);
+    p4_pack_digest_file(&mut digest, "p4/idle.h264", 3);
+    digest.update([1, 2, 3]);
+    let pack_id = format!("{:x}", digest.finalize());
+    let mut manifest = manifest;
+    manifest["packId"] = Value::String(pack_id.clone());
+    let mut snapshot = vec![
+        ("p4/manifest.json".into(), serde_json::to_vec(&manifest).unwrap()),
+        ("p4/idle.h264".into(), vec![1, 2, 3]),
+    ];
+    assert!(verified_p4_payload_snapshot(&snapshot, &pack_id));
+    snapshot[1].1[1] = 9;
+    assert!(!verified_p4_payload_snapshot(&snapshot, &pack_id));
+}
+
 pub(super) fn compute_p4_pack_id(
     assets: &[AppearanceAssetEntry],
     manifest_identity: &[u8],
 ) -> Result<String, String> {
     let mut ordered = assets.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| left.device_path.cmp(&right.device_path));
-    let mut digest = Sha256::new();
-    digest.update(b"pet-manager-p4-pack-v1\0");
-    digest.update((manifest_identity.len() as u64).to_le_bytes());
-    digest.update(manifest_identity);
+    let mut digest = p4_pack_digest(manifest_identity);
     for asset in ordered {
-        let path = asset.device_path.as_bytes();
-        digest.update((path.len() as u64).to_le_bytes());
-        digest.update(path);
         let mut file = std::fs::File::open(&asset.source_path).map_err(|error| {
             format!(
                 "open P4 pack asset failed {}: {}",
@@ -289,7 +336,7 @@ pub(super) fn compute_p4_pack_id(
                 )
             })?
             .len();
-        digest.update(size.to_le_bytes());
+        p4_pack_digest_file(&mut digest, &asset.device_path, size);
         let mut buffer = [0u8; 64 * 1024];
         loop {
             let read = file.read(&mut buffer).map_err(|error| {

@@ -14,7 +14,7 @@ HachimoDock's non-commercial license applies only to its own materials. It does 
 
 ## MiSans font
 
-`firmware/main/pet_p4_font_cn.c` (16px/1bpp) and `firmware/main/pet_p4_font_cn_32.c` (32px/2bpp, 199 glyphs) embed glyph data rendered from MiSans Medium. MiSans is provided by Xiaomi under the [MiSans Font Intellectual Property License Agreement](https://hyperos.mi.com/font-download/MiSans%E5%AD%97%E4%BD%93%E7%9F%A5%E8%AF%86%E4%BA%A7%E6%9D%83%E8%AE%B8%E5%8F%AF%E5%8D%8F%E8%AE%AE.pdf), not the HachimoDock license. Original font files are not distributed here. See the [official embedding FAQ](https://hyperos.mi.com/font/zh/faq/). Do not extract and redistribute the font as a standalone font product. The unchanged [official Agreement](licenses/MiSans-Font-License-Agreement.pdf) and [embedded-font notice for both sizes](licenses/MiSans-Embedded-Fonts-NOTICE.txt) accompany distributions.
+`firmware/main/pet_p4_font_cn.c` (16px/1bpp) and `firmware/main/pet_p4_font_cn_32.c` (32px/2bpp, 199 glyphs) embed glyph data rendered from MiSans Medium. MiSans is provided by Xiaomi under the [MiSans Font Intellectual Property License Agreement](https://hyperos.mi.com/font-download/MiSans%E5%AD%97%E4%BD%93%E7%9F%A5%E8%AF%86%E4%BA%A7%E6%9D%83%E8%AE%B8%E5%8F%AF%E5%8D%8F%E8%AE%AE.pdf), not the HachimoDock license. The desktop application also bundles the unmodified official `MiSans-Medium.woff2` for rendering device text bitmaps. This desktop font file is covered by the same accompanying Agreement. See the [official embedding FAQ](https://hyperos.mi.com/font/zh/faq/). Do not extract and redistribute the font as a standalone font product. The unchanged [official Agreement](licenses/MiSans-Font-License-Agreement.pdf) and [embedded-font notice for both sizes](licenses/MiSans-Embedded-Fonts-NOTICE.txt) accompany distributions.
 
 ## ESP32-P4 board drivers and build dependencies
 
@@ -29,18 +29,20 @@ The board support code in `firmware/components/esp32_p4_wifi6_touch_lcd_4_3/` is
 
 Desktop npm and Rust dependency versions are recorded in package lockfiles and `pc/src-tauri/Cargo.lock`. Their licenses accompany the upstream packages and remain independent of HachimoDock's first-party license.
 
+The WiFi6 firmware includes [minimp3](https://github.com/lieff/minimp3) to decode supported internet radio streams. The upstream CC0 dedication and version are retained in [the vendored source directory](firmware/main/radio_vendor).
+
 The local computer-status provider uses [sysinfo](https://github.com/GuillaumeGomez/sysinfo), Copyright (c) 2015 Guillaume Gomez, under the MIT License. The license is retained in [sysinfo MIT License](licenses/sysinfo-LICENSE.txt). Only system and network metrics are enabled; this integration does not enumerate processes or collect host names.
 
 This file records third-party notices for source code incorporated into
 HachimoDock. It does not replace the license selected for HachimoDock's own
 code, firmware, documentation, or media assets.
 
-## FFmpeg 8.1.2 — LGPL-2.1-or-later
+## FFmpeg 8.1.3 — LGPL-2.1-or-later
 
 - Project: <https://ffmpeg.org/>
-- Source release: <https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz>
+- Source: signed upstream tag [n8.1.3](https://github.com/FFmpeg/FFmpeg/releases/tag/n8.1.3). The bundled archive preserves the upstream snapshot in XZ format.
 - Source SHA-256:
-  `464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c`
+  `99b393871f64a2d860587bcf0f9bdbf68b28693100b51c9dfdf3f37b604896a9`
 - License: GNU Lesser General Public License, version 2.1 or later
 
 Pet Manager desktop packages include a separately invoked FFmpeg executable.
@@ -108,3 +110,10 @@ Corresponding source for the unchanged covered library is available at
 (SHA256 a4d91116f97173694f1642263b2ff837f80d933aa837e2314969f6728f661df3).
 See [source availability and license provenance](licenses/DEPENDENCY-LICENSE-NOTICE.md).
 First-party application terms do not restrict recipients' MPL source rights.
+
+## WebAssembly Micro Runtime
+
+ESP32-P4 的 WASM 组件运行时使用 WAMR。上游许可与归属说明随包提供。
+
+- licenses/WAMR-LICENSE.txt
+- licenses/WAMR-ATTRIBUTIONS.md

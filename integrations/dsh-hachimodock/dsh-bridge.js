@@ -219,7 +219,7 @@ function summarizeSession(bridge, session) {
     epoch: snapshot.epoch,
     sourceSeq: snapshot.sourceSeq,
     stateContract: 'live-session-seq-turn-call-v1',
-    displayContent: bridge.sessionText.get(String(session.id)) || '',
+    displayContent: bridge.sessionText.get(session)?.text || '',
     transitionRevision: snapshot.revision,
     agentId: AGENT_ID,
   }
@@ -269,12 +269,12 @@ function assistantMessageText(message) {
   return boundString(parts.join('\n'), 383) ?? ''
 }
 
-function rememberSessionText(bridge, sessionId, text) {
+function rememberSessionText(bridge, session, text) {
   if (!text) return
-  bridge.sessionText.set(sessionId, text)
+  bridge.sessionText.delete(session)
+  bridge.sessionText.set(session, { text })
   if (bridge.sessionText.size > CACHE_LIMIT) {
-    const oldest = bridge.sessionText.keys().next()
-    if (!oldest.done) bridge.sessionText.delete(oldest.value)
+    bridge.sessionText.delete(bridge.sessionText.keys().next().value)
   }
 }
 
@@ -287,6 +287,7 @@ function forwardSessionEvent(bridge, session, event) {
     if (normalized.changed) publishSessionSummary(bridge, session)
     return
   }
+  if (event.type === 'turn/start') bridge.sessionText.delete(session)
   const sessionId = session.id
   const time = Number.isSafeInteger(event.time) ? event.time : bridge.server.now()
   remember(bridge.lastModified, sessionId, time)
@@ -317,7 +318,7 @@ function forwardSessionEvent(bridge, session, event) {
       break
     case 'assistant/message': {
       const text = assistantMessageText(data.message)
-      if (text) rememberSessionText(bridge, sessionId, text)
+      if (text) rememberSessionText(bridge, session, text)
       publishSessionSummary(bridge, session)
       return
     }
@@ -536,6 +537,7 @@ function createBridge(ctx, config = {}) {
       if (session && typeof session.id === 'string') {
         const current = getLiveSession(bridge.ctx, session.id)
         if (current && current !== session) return
+        bridge.sessionText.delete(session)
         bridge.stateContract.forget(session)
         bridge.server.retireSession(session.id)
         bridge.server.publish('session', { session: { id: session.id, removed: true } })

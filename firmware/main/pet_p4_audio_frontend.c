@@ -1,4 +1,5 @@
 #include "pet_p4_audio_frontend.h"
+#include "pet_p4_latency_window.h"
 #include <stdatomic.h>
 #include <math.h>
 #include <string.h>
@@ -55,11 +56,15 @@ static unsigned measured_frames;
 static uint64_t processing_us, maximum_us;
 static uint64_t aec_us, ns_us, vad_us;
 static pet_p4_afe_metrics_t metrics;
+static pet_latency_window_t latency;
 pet_p4_afe_metrics_t pet_p4_afe_metrics(void) {
   portENTER_CRITICAL(&ref_lock);
   pet_p4_afe_metrics_t copy = metrics;
   copy.reference_samples = ref_count;
+  pet_latency_window_t snapshot = latency;
   portEXIT_CRITICAL(&ref_lock);
+  copy.window_samples = snapshot.count;
+  pet_latency_percentiles(&snapshot, &copy.p95_us, &copy.p99_us);
   return copy;
 }
 /* Opt-in bench calibration: no recorded audio leaves the device. */
@@ -165,6 +170,7 @@ bool pet_p4_afe_prepare(void) {
     processing_us = maximum_us = aec_us = ns_us = vad_us = 0;
     portENTER_CRITICAL(&ref_lock);
     memset(&metrics, 0, sizeof(metrics));
+    memset(&latency, 0, sizeof(latency));
     portEXIT_CRITICAL(&ref_lock);
     pet_p4_afe_reference_abort();
 #ifdef PET_P4_AUDIO_ALIGNMENT_DIAGNOSTICS
@@ -259,6 +265,8 @@ bool pet_p4_afe_feed(const int16_t *mic) {
   uint64_t elapsed = (uint64_t)esp_timer_get_time() - started;
   portENTER_CRITICAL(&ref_lock);
   ++metrics.frames;
+  pet_latency_record(&latency, elapsed);
+  if (elapsed > 20000 && metrics.over_20ms_frames != UINT32_MAX) ++metrics.over_20ms_frames;
   metrics.last_us = elapsed;
   if (elapsed > metrics.max_us) metrics.max_us = elapsed;
   metrics.aec_us = aec_us - aec_before;

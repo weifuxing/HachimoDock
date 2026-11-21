@@ -171,40 +171,11 @@ function registerCodeBuddyHooks(options = {}) {
     changed = true;
   }
 
-  // Register PermissionRequest HTTP hook (blocking, for permission bubble)
-  const hookPort = readRuntimePort() || DEFAULT_SERVER_PORT;
-  const permissionUrl = buildPermissionUrl(hookPort);
-  const permEvent = "PermissionRequest";
-  if (!Array.isArray(settings.hooks[permEvent])) {
-    settings.hooks[permEvent] = [];
+  if (require("./permission-install").syncPermissionHook(settings, nodeBin, MARKER)) {
+    updated++;
     changed = true;
-  }
-  let permFound = false;
-  for (const entry of settings.hooks[permEvent]) {
-    if (!entry || typeof entry !== "object") continue;
-    const innerHooks = entry.hooks;
-    if (Array.isArray(innerHooks)) {
-      for (const h of innerHooks) {
-        if (!h || h.type !== "http" || typeof h.url !== "string") continue;
-        if (!h.url.includes(HTTP_MARKER)) continue;
-        permFound = true;
-        if (h.url !== permissionUrl) { h.url = permissionUrl; updated++; changed = true; }
-        break;
-      }
-    }
-    if (!permFound && entry.type === "http" && typeof entry.url === "string" && entry.url.includes(HTTP_MARKER)) {
-      permFound = true;
-      if (entry.url !== permissionUrl) { entry.url = permissionUrl; updated++; changed = true; }
-    }
-    if (permFound) break;
-  }
-  if (!permFound) {
-    settings.hooks[permEvent].push({
-      matcher: "",
-      hooks: [{ type: "http", url: permissionUrl, timeout: 600 }],
-    });
-    added++;
-    changed = true;
+  } else {
+    skipped++;
   }
 
   if (added > 0 || changed) {

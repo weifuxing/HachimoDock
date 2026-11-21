@@ -1,4 +1,7 @@
-"""Losslessly pack the existing RGB565+alpha assets; never resample pixels."""
+"""Losslessly pack existing RGB565+alpha assets using zopfli 0.2.3.post1.
+
+Verification needs only the Python standard library.
+"""
 import argparse
 from pathlib import Path
 import struct
@@ -15,13 +18,15 @@ def main():
         width, height = struct.unpack("<HH", raw[:4])
         if (width, height) != expected or len(raw) != 4 + width * height * 3:
             raise ValueError(f"Invalid bounded instrument layer: {name}")
-        packed = zlib.compress(raw, 9)
-        assert zlib.decompress(packed) == raw
         output = source.with_suffix(".deflate")
         if args.check:
-            if not output.exists() or output.read_bytes() != packed:
-                raise ValueError(f"Stale compressed instrument layer: {name}")
+            packed = output.read_bytes()
         else:
+            from zopfli.zlib import compress
+            packed = compress(raw, numiterations=15)
+        if zlib.decompress(packed) != raw:
+            raise ValueError(f"Stale compressed instrument layer: {name}")
+        if not args.check:
             output.write_bytes(packed)
         print(f"{name}: {len(raw)} -> {len(packed)} bytes; lossless")
 

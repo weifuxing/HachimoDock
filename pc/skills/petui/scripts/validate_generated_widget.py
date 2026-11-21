@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -42,6 +43,9 @@ ALLOWED_EVENTS = {
     "button.sw1.short_press",
     "button.sw2.short_press",
     "button.sw3.short_press",
+    "button.sw1.double_press",
+    "button.sw2.double_press",
+    "button.sw3.double_press",
     "button.encoder.short_press",
     "button.encoder.long_press",
     "knob.rotate_cw",
@@ -136,6 +140,54 @@ PROGRAM_ENGINE_V2 = "p4-component-program-v2"
 PROGRAM_ENGINES = (PROGRAM_ENGINE, PROGRAM_ENGINE_V2)
 CELLS_ENGINE = "p4-cells-v1"
 TEXTS_ENGINE = "p4-texts-v1"
+
+
+def valid_wifi_endpoint(url):
+    if not isinstance(url, str) or not url.startswith("https://"):
+        return False
+    authority, _, target = url[8:].partition("/")
+    host, mark, query = authority.partition("?")
+    if mark and target:
+        path = "/?" + query + "/" + target
+    elif mark:
+        path = "/?" + query
+    else:
+        path = "/" + target
+    return (len(host) <= 127 and "." in host and re.search(r"[a-zA-Z]", host.rsplit(".", 1)[-1])
+            and all(re.fullmatch(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?", label)
+                    for label in host.split("."))
+            and len(path) <= 255 and not path.startswith("//")
+            and all(33 <= ord(char) <= 126 and char not in ("#", chr(92)) for char in path))
+
+
+def valid_private_feed(data):
+    connection = data.get("connection")
+    url = data.get("url")
+    if (data.get("source") != "wifi.feed" or "http" in data or
+            not isinstance(connection, dict) or not isinstance(url, str)):
+        return False
+    if connection == {"type": "bearer"}:
+        return "?" not in url and valid_wifi_endpoint(url)
+    if set(connection) != {"type", "topic"} or connection["type"] not in ("mqtt", "mqtt-public"):
+        return False
+    if not url.startswith("mqtts://") or any(c in url[8:] for c in "/?#@"):
+        return False
+    host, colon, port = url[8:].partition(":")
+    topic = connection["topic"]
+    return (valid_wifi_endpoint("https://" + host)
+            and (not colon or bool(re.fullmatch(r"[0-9]{1,5}", port)) and 1 <= int(port) <= 65535)
+            and isinstance(topic, str) and 1 <= len(topic) <= 127 and not topic.startswith("$")
+            and all(33 <= ord(c) <= 126 and c not in "+#" for c in topic))
+
+
+def valid_wifi_feed_map(mapping):
+    required = {"rows", "id", "label"}
+    return (isinstance(mapping, dict) and required <= mapping.keys()
+            and mapping.keys() <= required | {"value", "detail", "meta", "tone"}
+            and all(isinstance(path, str) and len(path) <= 63
+                    and (key == "rows" and path == "$"
+                         or re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){0,3}", path))
+                    for key, path in mapping.items()))
 
 
 def string_var_max_bytes(runtime: Any) -> int:
@@ -613,7 +665,7 @@ def normalize_preview_value(slot: str, value: Any) -> Any:
     return {"value": number, "label": str(value.get("label", ""))}
 
 
-def validate_package_files(widget_dir: Path, errors: list[str]) -> None:
+def validate_package_files(widget_dir: Path, errors: list[str], *, allow_wasm_audio: bool = False) -> None:
     if not widget_dir.is_dir():
         errors.append(f"组件目录不存在: {widget_dir}")
         return
@@ -642,6 +694,8 @@ def validate_package_files(widget_dir: Path, errors: list[str]) -> None:
         if path.suffix.lower() in FORBIDDEN_SUFFIXES:
             errors.append(f"组件包不允许可执行或脚本文件: {relative_name}")
         if relative.parts and relative.parts[0] == "assets":
+            if allow_wasm_audio and relative_name == "assets/speech.hab":
+                continue  # The verified WASM path below validates the bank and digest.
             if len(relative.parts) != 2 or (path.name != ".keep" and path.suffix not in (".png", ".wav", ".mp4")):
                 errors.append(f"assets/ 只允许根目录下的 .keep、最终 PNG 以及声明过的 .wav/.mp4: {relative_name}")
     if expanded_bytes > CLAWPKG_MAX_EXPANDED_BYTES:
@@ -725,6 +779,8 @@ def validate_dashboard(
     runtime_dashboard: bool,
     errors: list[str],
     native_surface: bool = False,
+    wasm_canvas: bool = False,
+    optional_visuals: bool = False,
     variables: dict[str, Any] | None = None,
     state_ids: list[str] | None = None,
     page_ids: list[str] | None = None,
@@ -775,7 +831,11 @@ def validate_dashboard(
                     f"{location}.{slot} 的值超出 {DASHBOARD_LIMITS[slot]} UTF-8 字节: {leaf!r}"
                 )
     style_values = string_leaves(dashboard.get("visualStyle"))
-    if not style_values or any(value not in ALLOWED_STYLES for value in style_values):
+    optional_visuals = optional_visuals or wasm_canvas
+    allowed_styles = ALLOWED_STYLES | {"classic"} if optional_visuals else ALLOWED_STYLES
+    if (not optional_visuals or "visualStyle" in dashboard) and (
+        not style_values or any(value not in allowed_styles for value in style_values)
+    ):
         errors.append(
             f"{location}.visualStyle 必须使用 pixel 或 clean；classic 仅供旧包兼容"
         )
@@ -786,6 +846,8 @@ def validate_dashboard(
     }
     for field, allowed in visual_sets.items():
         values = string_leaves(dashboard.get(field))
+        if optional_visuals and field not in dashboard:
+            continue
         if native_surface and field in {"visualPalette", "visualSprite"} and not values:
             continue
         if not values:
@@ -805,6 +867,7 @@ def validate_initial_preview(
     negative: Any,
     runtime: Any,
     errors: list[str],
+    *, optional_visuals: bool = False,
 ) -> None:
     if not isinstance(negative, dict) or not isinstance(runtime, dict):
         return
@@ -816,6 +879,8 @@ def validate_initial_preview(
     page = runtime.get("initial_page", "")
     variables = initial_var_values(runtime)
     for slot, preview_value in preview.items():
+        if optional_visuals and slot in {"visualStyle", "visualPalette", "visualLayout", "visualSprite"}:
+            continue
         if slot not in dashboard:
             errors.append(f"runtime 初始 dashboard 缺少 negative-screen 槽位: {slot}")
             continue
@@ -1422,6 +1487,9 @@ def validate_runtime(
     widget_dir: Path,
     capabilities: dict[str, Any],
     errors: list[str],
+    *,
+    wasm_canvas: bool = False,
+    optional_visuals: bool = False,
 ) -> set[str]:
     transition_actions: set[str] = set()
     if not strings_valid_text(runtime):
@@ -1441,6 +1509,23 @@ def validate_runtime(
     elif not capability_supports(capabilities, "widgetRuntime", "widgetRuntimes", runtime_engine):
         errors.append(f"目标能力不支持统一组件运行时: {runtime_engine}")
     variables = runtime.get("vars")
+    if isinstance(variables, dict) and "petui.wifi_data" in variables:
+        surface = runtime.get("surface")
+        inputs = runtime.get("input")
+        transitions = runtime.get("transitions")
+        if (
+            variables["petui.wifi_data"] != {"type": "string", "init": "news.hn"}
+            or kind != "tool" or runtime_engine != RUNTIME_ENGINE or runtime.get("host") is not True
+            or "ownership" in runtime or not isinstance(surface, dict)
+            or surface.get("engine") != "p4-app-surface-v1"
+            or surface.get("bindings") != "p4-variable-bindings-v1"
+            or not isinstance(inputs, dict) or inputs.get("engine") != "p4-input-v1"
+            or not isinstance(transitions, list)
+            or any({"on": action, "from": "*"} not in transitions
+                   or (isinstance(inputs.get("confirm"), dict) and action in inputs["confirm"])
+                   for action in ("host.refresh", "host.previous", "host.next"))
+        ):
+            errors.append("petui.wifi_data 仅支持有界 news.hn 资讯宿主")
     data = runtime.get("data")
     from app_surface import app_runtime_errors
     from capability_ext import strip as strip_capability_ext, validate_capability_ext
@@ -1469,7 +1554,7 @@ def validate_runtime(
     # Track D app-shell capabilities: each is refused unless the device advertises its exact string.
     from app_shell import errors as shell_errors
     errors.extend(shell_errors(runtime))
-    from data_rows import errors as data_rows_errors
+    from data_rows import errors as data_rows_errors, valid_wifi_feed_http
     errors.extend(data_rows_errors(runtime))
     from notify_policy import errors as notify_errors
     errors.extend(notify_errors(runtime))
@@ -1557,9 +1642,22 @@ def validate_runtime(
             errors.append("media 不使用自定义变量、tick 或 pages，状态来自真实媒体服务")
         media = runtime.get("media")
         radio = isinstance(media,dict) and set(media)=={"source","mode"} and media.get("mode")=="live" and re.fullmatch(r"pc\.[a-z][a-z0-9_-]{0,43}",str(media.get("source",""))) is not None
-        if not (media == {"source":"audio.player"} or radio) or runtime_engine != RUNTIME_ENGINE or kind != "tool" or any(k in runtime for k in ("scene", "game", "data")):
+        wifi_audio = isinstance(media, dict) and media.get("source") == "wifi.audio"
+        if wifi_audio:
+            playlist = media.get("playlist")
+            if set(media) != {"source", "playlist"} or not isinstance(playlist, list) or not 1 <= len(playlist) <= 16 or len(json.dumps(playlist, ensure_ascii=False, separators=(",", ":")).encode()) > 7163:
+                errors.append("wifi.audio 需要 1–16 条 playlist")
+            elif any(not isinstance(track, dict) or not {"title", "url"} <= set(track) <= {"title", "url", "live"}
+                     or not isinstance(track["title"], str) or not 1 <= len(track["title"].encode()) <= 90
+                     or any(ord(char) < 32 or ord(char) == 127 for char in track["title"])
+                     or not valid_wifi_endpoint(track["url"])
+                     or ("live" in track and not isinstance(track["live"], bool)) for track in playlist):
+                errors.append("wifi.audio 曲目需要标题、公开 HTTPS URL 和可选 live 布尔值")
+            if capabilities.get("widgetWifiAudio") != "p4-wifi-audio-v1":
+                errors.append("目标固件不支持设备网络音频 p4-wifi-audio-v1")
+        if not (media == {"source":"audio.player"} or radio or wifi_audio) or runtime_engine != RUNTIME_ENGINE or kind != "tool" or any(k in runtime for k in ("scene", "game", "data")):
             errors.append("media 需要 v4 tool 的受控 PC 扩展或兼容播放器，不能混用 scene/game/data")
-        if radio:
+        if radio or wifi_audio:
             from pc_extension import surface_errors
             errors.extend(surface_errors(runtime.get("surface")))
             if capabilities.get("widgetMediaSurface") != "p4-media-surface-v1":
@@ -1568,15 +1666,19 @@ def validate_runtime(
         if capabilities.get("widgetMedia") != "p4-media-v1":
             errors.append("目标固件不支持 p4-media-v1，请先升级固件")
         media_actions = {"media.toggle", "media.queue", "media.previous", "media.next", "media.up", "media.down", "media.select", "media.lyrics"}
-        if radio:
+        if radio or wifi_audio:
             media_actions.remove("media.lyrics")
         for rule in runtime.get("transitions", []):
             if not isinstance(rule, dict) or set(rule) != {"on", "from"} or rule.get("from") != "*" or rule.get("on") not in media_actions:
                 errors.append("media transition 仅接受受控 on 动作，不接受额外效果")
     if "data" in runtime:
         if (
-            not only_keys(data, {"source", "page_var", "select_var", "filters", "refresh_action"})
+            not only_keys(data, {"source", "page_var", "select_var", "filters", "refresh_action", "url", "response_map", "http", "connection"})
+            or ("connection" in data and not valid_private_feed(data))
+            or (data.get("source") == "wifi.feed" and "connection" not in data and not valid_wifi_endpoint(data.get("url")))
+            or (data.get("source") != "wifi.feed" and "url" in data)
             or not isinstance(data.get("source"), str)
+            or data["source"].startswith("wifi.feed.")
             or re.fullmatch(r"[a-z0-9_.-]{1,47}", data.get("source", "")) is None
             or not isinstance(data.get("page_var"), str)
             or not isinstance(variables, dict)
@@ -1587,6 +1689,23 @@ def validate_runtime(
             or kind != "tool"
         ):
             errors.append("runtime/widget.json.data 需要受控 source 和整数 page_var，只用于 v4 列表工具")
+        if isinstance(data, dict) and data.get("source") == "wifi.feed" and capabilities.get("widgetWifiFeed") != "p4-wifi-feed-v1":
+            errors.append("目标固件不支持设备 HTTPS 数据源 p4-wifi-feed-v1")
+        if isinstance(data, dict) and isinstance(data.get("connection"), dict) and data["connection"].get("type") == "mqtt-public":
+            if capabilities.get("widgetPublicMqtt") != "p4-public-mqtt-v1":
+                errors.append("目标固件缺少公开 MQTT 订阅能力")
+        elif isinstance(data, dict) and "connection" in data and capabilities.get("widgetPrivateFeed") != "p4-private-feed-v1":
+            errors.append("目标固件不支持设备私有数据源 p4-private-feed-v1")
+        if isinstance(data, dict) and "response_map" in data:
+            if data.get("source") != "wifi.feed" or not valid_wifi_feed_map(data["response_map"]):
+                errors.append("data.response_map 需要 wifi.feed 和有界字段路径")
+            elif capabilities.get("widgetWifiFeedMap") != "p4-wifi-feed-map-v1":
+                errors.append("目标固件不支持设备 HTTPS 字段映射 p4-wifi-feed-map-v1")
+        if isinstance(data, dict) and "http" in data:
+            if data.get("source") != "wifi.feed" or not valid_wifi_feed_http(data["http"]):
+                errors.append("data.http 仅用于 wifi.feed，包含受控 accept、revalidate 或 cache")
+            elif capabilities.get("widgetWifiFeedHttp") != "p4-wifi-feed-http-v1":
+                errors.append("目标固件不支持自定义数据源 HTTP 扩展 p4-wifi-feed-http-v1")
         if capabilities.get("widgetData") != "p4-data-list-v1":
             errors.append("目标固件不支持 p4-data-list-v1，请先升级固件")
         if isinstance(data, dict) and isinstance(data.get("source"), str) and data["source"].startswith("fetch.") and capabilities.get("widgetPcFetch") != "pc-fetch-v1":
@@ -1734,6 +1853,8 @@ def validate_runtime(
         runtime_dashboard=True,
         errors=errors,
         native_surface=isinstance(runtime.get("instrument"), dict),
+        wasm_canvas=wasm_canvas,
+        optional_visuals=optional_visuals,
         variables=variables,
         state_ids=state_ids,
         page_ids=page_ids,
@@ -1827,6 +1948,8 @@ def validate_buttons(
     capabilities: dict[str, Any],
     runtime: Any,
     errors: list[str],
+    *,
+    wasm_actions: frozenset[str] = frozenset(),
 ) -> None:
     if not strings_valid_text(buttons):
         errors.append("buttons.json 的设备字符串不能包含 NUL 或未配对 Unicode 代理项")
@@ -1881,7 +2004,7 @@ def validate_buttons(
     if len(actions) != len(set(actions)):
         errors.append("buttons.json.action 必须唯一")
     normal_actions = set(actions)
-    missing_transitions = sorted(normal_actions - transition_actions)
+    missing_transitions = sorted(normal_actions - transition_actions - wasm_actions)
     if missing_transitions:
         errors.append(f"按钮 action 未出现在 transitions: {', '.join(missing_transitions)}")
     touch_actions=set()
@@ -1926,13 +2049,19 @@ def load_capabilities(path: Optional[Path]) -> dict[str, Any]:
 def validate_widget(
     widget_dir: Path,
     capabilities: dict[str, Any] | None = None,
+    *,
+    verified_wasm_gameplay: bool = False,
+    community_publication: bool = False,
 ) -> list[str]:
     widget_dir = widget_dir.expanduser().resolve()
     # An explicitly empty device report grants no capabilities. Only omission
     # selects the offline authoring defaults; never silently upgrade an old board.
     capabilities = load_capabilities(None) if capabilities is None else capabilities
+    if community_publication:
+        # Review checks declared contracts, never the uploader's attached board.
+        capabilities = {**DEFAULT_CAPABILITIES, **capabilities}
     errors: list[str] = []
-    validate_package_files(widget_dir, errors)
+    validate_package_files(widget_dir, errors, allow_wasm_audio=verified_wasm_gameplay)
     if not widget_dir.is_dir():
         return errors
     manifest = load_json(widget_dir / "component.json", errors)
@@ -1941,6 +2070,42 @@ def validate_widget(
     buttons = load_json(widget_dir / "buttons.json", errors)
     share = load_json(widget_dir / "share.json", errors)
     kind = validate_manifest(manifest, errors)
+    # This flag is supplied by the publication verifier after verifying the
+    # archive's WASM module. Hybrid packages still use declaration validation.
+    wasm_owns_gameplay = (
+        verified_wasm_gameplay
+        and isinstance(runtime, dict)
+        and bool(runtime.get("hachiWasm"))
+        and "scene" not in runtime
+        and "game" not in runtime
+    )
+    wasm_canvas = False
+    if verified_wasm_gameplay and isinstance(runtime, dict) and runtime.get("hachiWasm"):
+        from pack_hachiapp import MAX_WASM_BYTES, AUDIO_ASSET, wasm_profile, validate_audio
+        try:
+            with (widget_dir / "runtime/app.wasm").open("rb") as file:
+                module = file.read(MAX_WASM_BYTES + 1)
+            canvas, host, audio = wasm_profile(module)
+            if (hashlib.sha256(module).hexdigest() != runtime["hachiWasm"]
+                    or canvas != runtime.get("hachiCanvas") or host != runtime.get("hachiHost")
+                    or audio != runtime.get("hachiAudio")):
+                raise ValueError("WASM 摘要、画布或宿主声明与模块不匹配")
+            if audio:
+                with (widget_dir / AUDIO_ASSET).open("rb") as file:
+                    bank = file.read(512 * 1024 + 1)
+                validate_audio(bank)
+                if hashlib.sha256(bank).hexdigest() != runtime.get("hachiAudioSha256"):
+                    raise ValueError("WASM 语音资源 SHA-256 不匹配")
+            elif (widget_dir / AUDIO_ASSET).exists() or "hachiAudioSha256" in runtime:
+                raise ValueError("WASM 模块未使用包内语音资源")
+            wasm_canvas = canvas == "640x480-v1"
+        except (OSError, ValueError) as error:
+            errors.append(f"WASM 发布校验失败：{error}")
+            wasm_owns_gameplay = False
+    elif (widget_dir / "assets/speech.hab").exists():
+        errors.append("WASM 语音资源缺少已验证的模块声明")
+    wasm_actions = frozenset({"lab.a", "lab.b", "lab.up", "lab.down", "lab.left", "lab.right"}) if wasm_owns_gameplay else frozenset()
+    from capability_ext import media_files
     application_file=widget_dir/'pc/application.json'
     if application_file.exists() or isinstance(runtime,dict) and 'host' in runtime:
         from app_services import application_errors
@@ -1951,7 +2116,7 @@ def validate_widget(
         for f in widget_dir.rglob('*'):
             relative=f.relative_to(widget_dir).as_posix()
             notice=relative in {'LICENSE.txt','THIRD_PARTY_NOTICES.txt'} or bool(re.fullmatch(r'licenses/[A-Za-z0-9_.-]+\.(?:txt|md)',relative))
-            if f.is_file() and not notice and relative not in REQUIRED_FILES|{'pc/application.json','assets/.keep'}|{i.get('asset') for i in runtime.get('surface',{}).get('images',[]) if isinstance(i,dict)}:errors.append('PC 应用包含额外文件')
+            if f.is_file() and not notice and relative not in REQUIRED_FILES|{'hachiapp.json','pc/application.json','pc/cover.png','assets/.keep'}|set(media_files(runtime))|{i.get('asset') for i in runtime.get('surface',{}).get('images',[]) if isinstance(i,dict)}:errors.append('PC 应用包含额外文件')
     pc_file=widget_dir / "pc" / "extension.json"
     source=runtime.get("media",{}).get("source","") if isinstance(runtime,dict) else ""
     if pc_file.exists() or source.startswith("pc."):
@@ -1970,7 +2135,7 @@ def validate_widget(
         for f in widget_dir.rglob("*"):
             relative = f.relative_to(widget_dir).as_posix()
             legal_notice = relative in {"LICENSE.txt", "THIRD_PARTY_NOTICES.txt"} or bool(re.fullmatch(r"licenses/[A-Za-z0-9_.-]+\.(?:txt|md)", relative))
-            if f.is_file() and not legal_notice and relative not in REQUIRED_FILES | {"pc/extension.json", "pc/catalog.json", "assets/.keep"} | {im.get("asset") for im in runtime.get("surface",{}).get("images",[]) if isinstance(im,dict)}:
+            if f.is_file() and not legal_notice and relative not in REQUIRED_FILES | {"hachiapp.json", "pc/extension.json", "pc/catalog.json", "pc/cover.png", "assets/.keep"} | set(media_files(runtime)) | {im.get("asset") for im in runtime.get("surface",{}).get("images",[]) if isinstance(im,dict)}:
                 errors.append("声明式媒体包不能携带用户数据、凭据或额外文件")
     validate_png_asset_inventory(widget_dir, runtime, errors)
     from capability_ext import media_files, validate_media_files
@@ -1988,9 +2153,11 @@ def validate_widget(
             runtime_dashboard=False,
             errors=errors,
             native_surface=isinstance(runtime, dict) and isinstance(runtime.get("instrument"), dict),
+            optional_visuals=community_publication or wasm_canvas,
         )
-    transition_actions = validate_runtime(runtime, kind, widget_dir, capabilities, errors)
-    validate_buttons(buttons, transition_actions, capabilities, runtime, errors)
+    transition_actions = validate_runtime(runtime, kind, widget_dir, capabilities, errors,
+                                          wasm_canvas=wasm_canvas, optional_visuals=community_publication)
+    validate_buttons(buttons, transition_actions, capabilities, runtime, errors, wasm_actions=wasm_actions)
     if isinstance(runtime, dict) and isinstance(buttons, list):
         from app_form import errors as form_errors
         errors.extend(form_errors(runtime,buttons))
@@ -1999,12 +2166,14 @@ def validate_widget(
         if isinstance(runtime.get('scene'),dict) and runtime['scene'].get('engine')=='p4-side-scene-v1':
             from side_scene import side_scene_errors
             errors.extend(side_scene_errors(runtime,capabilities,buttons))
-    validate_initial_preview(negative, runtime, errors)
-    validate_claimed_mechanics(manifest, negative, runtime, share, errors)
+    if not wasm_canvas:
+        validate_initial_preview(negative, runtime, errors, optional_visuals=community_publication)
+    if not wasm_owns_gameplay:
+        validate_claimed_mechanics(manifest, negative, runtime, share, errors)
     if not isinstance(share, dict):
         if share is not None:
             errors.append("share.json 必须是对象")
-    elif not isinstance(share.get("title"), str) or not share["title"].strip():
+    elif not community_publication and (not isinstance(share.get("title"), str) or not share["title"].strip()):
         errors.append("share.json.title 必须是非空字符串")
     return list(dict.fromkeys(errors))
 
@@ -2014,11 +2183,14 @@ def main() -> int:
     parser.add_argument("widget_dir", type=Path, help="待校验组件目录")
     parser.add_argument("--capabilities", type=Path, help="可选的设备能力 JSON")
     parser.add_argument("--json", action="store_true", help="以 JSON 输出结果")
+    parser.add_argument("--verified-wasm-gameplay", action="store_true", help="组件中的 WASM 已由发布端校验")
+    parser.add_argument("--community-publication", action="store_true", help="社区发布仅检查影响使用的约束")
     args = parser.parse_args()
     try:
         capabilities = load_capabilities(args.capabilities)
         widget_dir = args.widget_dir.expanduser().resolve()
-        errors = validate_widget(widget_dir, capabilities)
+        errors = validate_widget(widget_dir, capabilities, verified_wasm_gameplay=args.verified_wasm_gameplay,
+                                 community_publication=args.community_publication)
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
         errors = [f"能力或路径读取失败: {error}"]
         widget_dir = args.widget_dir.expanduser()

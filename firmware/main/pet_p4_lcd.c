@@ -13,11 +13,10 @@
 
 #include <stdio.h>
 #include <stdint.h>
-#include <stdlib.h>
+#include <stdatomic.h>
 
 #include "esp_check.h"
 #include "esp_err.h"
-#include "esp_heap_caps.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
@@ -25,6 +24,7 @@
 #include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "bsp/esp32_p4_wifi6_touch_lcd_4_3.h"
 #include "bsp/esp-bsp.h"
 #include "bsp/display.h"
@@ -40,12 +40,40 @@ static esp_err_t g_backlight_status = ESP_ERR_INVALID_STATE;
 static bool g_backlight_revealed;
 static bool g_forced_backlight_logged;
 static bool g_refresh_callback_logged;
-static uint16_t *g_test_row_buffer;
-static size_t g_test_row_pixels;
 
-static uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
-  return (uint16_t) (((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
+#if PET_P4_SYSTEM_WIFI
+static DRAM_ATTR _Atomic uint32_t lcd_phase, lcd_worker_active;
+static DRAM_ATTR _Atomic uint32_t lcd_sequence, lcd_count, lcd_last_tick, lcd_last_context;
+
+void IRAM_ATTR pet_p4_lcd_on_underrun(void) {
+  /* Single interrupt producer. The reader must run outside the ISR. */
+  atomic_fetch_add(&lcd_sequence, 1);
+  atomic_store(&lcd_last_tick, xTaskGetTickCountFromISR());
+  atomic_store(&lcd_last_context,
+    atomic_load(&lcd_phase) | (atomic_load(&lcd_worker_active) << 8));
+  atomic_fetch_add(&lcd_count, 1);
+  atomic_fetch_add(&lcd_sequence, 1);
 }
+
+void pet_p4_lcd_render_phase(enum pet_lcd_phase phase) { atomic_store(&lcd_phase, phase); }
+void pet_p4_lcd_video_worker(bool active) { atomic_store(&lcd_worker_active, active); }
+uint32_t pet_p4_lcd_underrun_count(void) { return atomic_load(&lcd_count); }
+
+pet_lcd_underrun_t pet_p4_lcd_underrun(void) {
+  pet_lcd_underrun_t record;
+  uint32_t sequence;
+  uint32_t context;
+  do {
+    sequence = atomic_load(&lcd_sequence);
+    record.count = atomic_load(&lcd_count);
+    record.last_tick = atomic_load(&lcd_last_tick);
+    context = atomic_load(&lcd_last_context);
+  } while ((sequence & 1) || sequence != atomic_load(&lcd_sequence));
+  record.last_phase = context & 255;
+  record.video_worker = (context >> 8) != 0;
+  return record;
+}
+#endif
 
 static esp_err_t force_lcd_backlight_gpio(int level) {
   int backlight_gpio = BSP_LCD_BACKLIGHT;
@@ -153,70 +181,6 @@ esp_err_t pet_p4_lcd_keep_awake(void) {
   if (!g_panel_handle) return ESP_ERR_INVALID_STATE;
   if (!g_backlight_revealed) return ESP_ERR_INVALID_STATE;
   return g_backlight_status;
-}
-
-esp_err_t pet_p4_lcd_show_color_bar(void) {
-  if (!g_panel_handle) return ESP_ERR_INVALID_STATE;
-  ESP_LOGI(TAG, "Show LCD hardware color bar");
-  esp_err_t err = esp_lcd_dpi_panel_set_pattern(g_panel_handle, MIPI_DSI_PATTERN_BAR_VERTICAL);
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "failed to show color bar: %s", esp_err_to_name(err));
-  }
-  return err;
-}
-
-esp_err_t pet_p4_lcd_show_software_test_pattern(uint32_t phase) {
-  if (!g_panel_handle) return ESP_ERR_INVALID_STATE;
-
-  const int row_height = 32;
-  const size_t required_pixels = (size_t) BSP_LCD_H_RES * (size_t) row_height;
-  if (required_pixels > g_test_row_pixels) {
-    free(g_test_row_buffer);
-    g_test_row_buffer = (uint16_t *) heap_caps_malloc(required_pixels * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!g_test_row_buffer) {
-      g_test_row_buffer = (uint16_t *) heap_caps_malloc(required_pixels * sizeof(uint16_t), MALLOC_CAP_8BIT);
-    }
-    if (!g_test_row_buffer) {
-      g_test_row_pixels = 0;
-      return ESP_ERR_NO_MEM;
-    }
-    g_test_row_pixels = required_pixels;
-  }
-
-  const uint16_t colors[] = {
-    rgb565(255, 0, 0),
-    rgb565(0, 255, 0),
-    rgb565(0, 0, 255),
-    rgb565(255, 255, 255),
-    rgb565(0, 0, 0),
-    rgb565(255, 255, 0),
-    rgb565(0, 255, 255),
-    rgb565(255, 0, 255),
-  };
-  const int color_count = (int) (sizeof(colors) / sizeof(colors[0]));
-  const int moving_x = (int) ((phase * 19U) % (uint32_t) BSP_LCD_H_RES);
-
-  for (int y = 0; y < BSP_LCD_V_RES; y += row_height) {
-    int h = (y + row_height > BSP_LCD_V_RES) ? (BSP_LCD_V_RES - y) : row_height;
-    for (int yy = 0; yy < h; yy += 1) {
-      int screen_y = y + yy;
-      for (int x = 0; x < BSP_LCD_H_RES; x += 1) {
-        int bar = (x * color_count) / BSP_LCD_H_RES;
-        uint16_t color = colors[bar < color_count ? bar : color_count - 1];
-        if (x < 8 || x >= BSP_LCD_H_RES - 8 || screen_y < 8 || screen_y >= BSP_LCD_V_RES - 8) {
-          color = rgb565(255, 255, 255);
-        } else if (x >= moving_x && x < moving_x + 16) {
-          color = rgb565(255, 120, 0);
-        } else if (((x / 40) + (screen_y / 40) + (int) phase) % 9 == 0) {
-          color = rgb565(16, 16, 16);
-        }
-        g_test_row_buffer[yy * BSP_LCD_H_RES + x] = color;
-      }
-    }
-    esp_err_t err = pet_p4_lcd_draw_rgb565(0, y, BSP_LCD_H_RES, h, g_test_row_buffer);
-    if (err != ESP_OK) return err;
-  }
-  return ESP_OK;
 }
 
 static esp_err_t lcd_draw_core(int x,int y,int width,int height,const uint16_t *pixels,pet_lcd_observation_t *out) {

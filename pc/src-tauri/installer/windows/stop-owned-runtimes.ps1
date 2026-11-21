@@ -79,6 +79,7 @@ $ownedPaths = @(
     (Join-Path $normalizedInstallDir "pet-manager-tauri.exe"),
     (Join-Path $normalizedInstallDir "Pet Manager.exe"),
     (Join-Path $normalizedInstallDir "HachimiDock.exe"),
+    (Join-Path $normalizedInstallDir "Hachimodock.exe"),
     (Join-Path $normalizedInstallDir "bridge\runtime\node.exe")
 )
 

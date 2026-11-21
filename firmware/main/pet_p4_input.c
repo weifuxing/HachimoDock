@@ -20,9 +20,18 @@
  */
 
 #include "pet_p4_input.h"
+#include "pet_p4_wdt_deadlock.h"
 #include "pet_p4_audio.h"
 #include "pet_p4_conversation.h"
+#include "pet_p4_system_settings.h"
+#include "pet_p4_usb_native.h"
+#if PET_P4_SYSTEM_WIFI
+#include "pet_p4_lan.h"
+#include "pet_p4_ble_shortcut.h"
+#include "pet_p4_bluetooth_keys.h"
+#endif
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -45,6 +54,10 @@
 #include "pet_p4_observation.h"
 #include "pet_p4_miniapp.h"
 #include "pet_p4_media.h"
+
+#if PET_P4_RELEASE_PICO && !PET_P4_BOARD_PICO
+#error "A Pico release must enable the Pico bottom-board input pin map"
+#endif
 
 #define PET_P4_INPUT_SW3_GPIO GPIO_NUM_5
 #define PET_P4_INPUT_ENCODER_PRESS_GPIO GPIO_NUM_4
@@ -77,6 +90,10 @@ typedef struct {
   uint32_t binding_count;
   pet_p4_input_binding_t bindings[PET_P4_INPUT_MAX_BINDINGS];
 } pet_p4_input_config_t;
+
+#define PET_P4_INPUT_LEGACY_BINDINGS 16
+#define PET_P4_INPUT_LEGACY_SIZE (offsetof(pet_p4_input_config_t, bindings) + \
+  PET_P4_INPUT_LEGACY_BINDINGS * sizeof(pet_p4_input_binding_t))
 
 typedef enum {
   PET_P4_INPUT_CONTROL_SW1,
@@ -117,6 +134,7 @@ static QueueHandle_t g_event_queue;
 static pet_p4_input_config_t g_config;
 static atomic_uint g_dropped_events;
 static unsigned int g_event_sequence;
+static unsigned int g_input_config_epoch;
 static adc_oneshot_unit_handle_t g_joystick_adc;
 /* The existing input task is the only model writer. Diagnostics/providers read
  * only completed immutable observations, never these partially updated fields.
@@ -154,12 +172,15 @@ static const char *json_string(const cJSON *object, const char *key) {
 static bool event_is_allowed(const char *event) {
   static const char *const allowed[] = {
     "button.sw1.short_press",
+    "button.sw1.double_press",
     "button.sw1.long_press",
     "button.sw1.hold",
     "button.sw2.short_press",
+    "button.sw2.double_press",
     "button.sw2.long_press",
     "button.sw2.hold",
     "button.sw3.short_press",
+    "button.sw3.double_press",
     "button.sw3.long_press",
     "button.sw3.hold",
     "button.encoder.short_press",
@@ -180,6 +201,7 @@ static bool action_is_allowed(const char *action) {
   static const char *const allowed[] = {
     "disabled",
     "voice_ptt",
+    "voice_key_forward",
     "realtime_chat",
     "agent_enter",
     "agent_prompt",
@@ -196,6 +218,9 @@ static bool action_is_allowed(const char *action) {
     "page_app",
     "component_center",
     "miniapp_action",
+#if PET_P4_SYSTEM_WIFI
+    PET_SETTINGS_ACTION,
+#endif
   };
   for (size_t i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i += 1) {
     if (strcmp(action, allowed[i]) == 0) return true;
@@ -238,7 +263,11 @@ static void load_default_config(pet_p4_input_config_t *config) {
   add_default_binding(config, "button.sw2.long_press", "realtime_chat", "");
   add_default_binding(config, "button.sw2.hold", "disabled", "");
   add_default_binding(config, "button.sw3.short_press", "page_back", "");
+#if PET_P4_SYSTEM_WIFI
+  add_default_binding(config, "button.sw3.long_press", PET_SETTINGS_ACTION, "");
+#else
   add_default_binding(config, "button.sw3.long_press", "disabled", "");
+#endif
   add_default_binding(config, "button.sw3.hold", "disabled", "");
   add_default_binding(config, "button.encoder.short_press", "page_enter", "");
   add_default_binding(config, "button.encoder.long_press", "disabled", "");
@@ -471,7 +500,9 @@ static esp_err_t persist_config(const pet_p4_input_config_t *config) {
   nvs_handle_t handle;
   esp_err_t err = nvs_open(PET_P4_INPUT_NVS_NAMESPACE, NVS_READWRITE, &handle);
   if (err != ESP_OK) return err;
-  err = nvs_set_blob(handle, PET_P4_INPUT_NVS_KEY, config, sizeof(*config));
+  const size_t size = config->binding_count <= PET_P4_INPUT_LEGACY_BINDINGS
+    ? PET_P4_INPUT_LEGACY_SIZE : sizeof(*config);
+  err = nvs_set_blob(handle, PET_P4_INPUT_NVS_KEY, config, size);
   if (err == ESP_OK) err = nvs_commit(handle);
   nvs_close(handle);
   return err;
@@ -479,16 +510,18 @@ static esp_err_t persist_config(const pet_p4_input_config_t *config) {
 
 static void load_persisted_config(void) {
   nvs_handle_t handle;
-  pet_p4_input_config_t stored;
+  pet_p4_input_config_t stored = {0};
   size_t size = sizeof(stored);
   load_default_config(&g_config);
   if (nvs_open(PET_P4_INPUT_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return;
   esp_err_t err = nvs_get_blob(handle, PET_P4_INPUT_NVS_KEY, &stored, &size);
   nvs_close(handle);
-  if (err == ESP_OK && size == sizeof(stored) && config_is_valid(&stored)) {
+  if (err != ESP_OK || (size != sizeof(stored) &&
+      (size != PET_P4_INPUT_LEGACY_SIZE || stored.binding_count > PET_P4_INPUT_LEGACY_BINDINGS))) return;
+  if (config_is_valid(&stored)) {
     g_config = stored;
     ESP_LOGI(TAG, "restored %u input bindings from NVS", (unsigned int) g_config.binding_count);
-  } else if (err == ESP_OK && size == sizeof(stored)) {
+  } else {
     const uint32_t stored_version = stored.version;
     if (!migrate_input_config(&stored)) {
       ESP_LOGW(TAG, "ignored input config version %u", (unsigned int) stored_version);
@@ -506,8 +539,6 @@ static void load_persisted_config(void) {
     } else {
       ESP_LOGW(TAG, "using migrated input config without persistence: %s", esp_err_to_name(persist_err));
     }
-  } else if (err != ESP_ERR_NVS_NOT_FOUND) {
-    ESP_LOGW(TAG, "ignored invalid input config: %s", esp_err_to_name(err));
   }
 }
 
@@ -533,6 +564,16 @@ static bool apply_binding_json(pet_p4_input_config_t *config, const cJSON *item,
   }
   if (!action_is_allowed(action)) {
     snprintf(error, error_size, "unsupported input action: %s", action);
+    return false;
+  }
+  if (strcmp(action, "voice_key_forward") == 0 &&
+      (strncmp(event, "button.", 7) != 0 || strstr(event, ".hold") != NULL ||
+       (!pet_p4_native_voice_key_profile_valid(value)
+#if PET_P4_SYSTEM_WIFI
+        && !(pet_ble_shortcut_available() > 0 && pet_p4_bluetooth_chord(value))
+#endif
+        ))) {
+    snprintf(error, error_size, "unsupported voice shortcut binding");
     return false;
   }
   if (strlen(value) >= PET_P4_INPUT_VALUE_MAX) {
@@ -563,6 +604,7 @@ static void send_config_ack(
   unsigned int binding_count,
   const char *error
 ) {
+  if (!send_line) return;
   cJSON *root = cJSON_CreateObject();
   cJSON *payload = cJSON_CreateObject();
   char *line;
@@ -639,6 +681,7 @@ bool pet_p4_input_handle_config(
     return false;
   }
   g_config = *next;
+  ++g_input_config_epoch;
   free(next);
   send_config_ack(
     send_line,
@@ -653,39 +696,28 @@ bool pet_p4_input_handle_config(
   return true;
 }
 
-bool pet_p4_input_send_config_state(
-  const cJSON *request,
-  const char *board_device_id,
-  pet_p4_send_line_fn send_line,
-  void *ctx
-) {
+cJSON *pet_p4_input_config_state(const cJSON *request, const char *board_device_id) {
   const char *request_id = json_string(request, "requestId");
   const char *voice_button = "";
   bool voice_enabled = false;
-  cJSON *root = cJSON_CreateObject();
   cJSON *payload = cJSON_CreateObject();
   cJSON *config = cJSON_CreateObject();
   cJSON *bindings = cJSON_CreateArray();
-  char *line;
-  bool sent;
-
-  if (!root || !payload || !config || !bindings) {
-    cJSON_Delete(root);
+  if (!payload || !config || !bindings) {
     cJSON_Delete(payload);
     cJSON_Delete(config);
     cJSON_Delete(bindings);
-    return false;
+    return NULL;
   }
 
   for (uint32_t i = 0; i < g_config.binding_count; i += 1) {
     const pet_p4_input_binding_t *binding = &g_config.bindings[i];
     cJSON *item = cJSON_CreateObject();
     if (!item) {
-      cJSON_Delete(root);
       cJSON_Delete(payload);
       cJSON_Delete(config);
       cJSON_Delete(bindings);
-      return false;
+      return NULL;
     }
     cJSON_AddStringToObject(item, "event", binding->event);
     cJSON_AddStringToObject(item, "action", binding->action);
@@ -707,11 +739,27 @@ bool pet_p4_input_send_config_state(
   cJSON_AddStringToObject(payload, "runtime", "esp-p4");
   cJSON_AddNumberToObject(payload, "bindingCount", g_config.binding_count);
   cJSON_AddItemToObject(payload, "config", config);
+  return payload;
+}
+
+bool pet_p4_input_send_config_state(
+  const cJSON *request,
+  const char *board_device_id,
+  pet_p4_send_line_fn send_line,
+  void *ctx
+) {
+  cJSON *payload = pet_p4_input_config_state(request, board_device_id);
+  cJSON *root = cJSON_CreateObject();
+  if (!root || !payload) {
+    cJSON_Delete(root);
+    cJSON_Delete(payload);
+    return false;
+  }
   cJSON_AddStringToObject(root, "topic", "input/config-state");
   cJSON_AddItemToObject(root, "payload", payload);
 
-  line = cJSON_PrintUnformatted(root);
-  sent = line && send_line;
+  char *line = cJSON_PrintUnformatted(root);
+  const bool sent = line && send_line;
   if (sent) send_line(line, ctx);
   cJSON_free(line);
   cJSON_Delete(root);
@@ -757,6 +805,10 @@ static void queue_event(
 }
 
 static void queue_button_flags(pet_p4_input_control_t control, uint8_t flags) {
+#if PET_P4_SYSTEM_WIFI
+  if (flags & PET_P4_BUTTON_EVENT_LONG_PRESS) pet_p4_lan_voice_button(control, true);
+  if (flags & PET_P4_BUTTON_EVENT_UP) pet_p4_lan_voice_button(control, false);
+#endif
   if (flags & PET_P4_BUTTON_EVENT_DOWN) queue_event(control, PET_P4_INPUT_GESTURE_DOWN, 0);
   if (flags & PET_P4_BUTTON_EVENT_SHORT_PRESS) queue_event(control, PET_P4_INPUT_GESTURE_SHORT_PRESS, 0);
   if (flags & PET_P4_BUTTON_EVENT_LONG_PRESS) {
@@ -841,6 +893,7 @@ static void input_task(void *arg) {
   last_wake = xTaskGetTickCount();
 
   while (true) {
+    pet_p4_wdt_deadlock_feed(PET_DEADLOCK_INPUT);
     for (size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); i += 1) {
       uint8_t flags = pet_p4_button_decoder_update(
         &buttons[i].decoder,
@@ -886,6 +939,9 @@ static void input_task(void *arg) {
 }
 
 esp_err_t pet_p4_input_init(void) {
+#if PET_P4_SYSTEM_WIFI
+  pet_ble_keyboard_load();
+#endif
   gpio_config_t config = {
     .pin_bit_mask = (1ULL << PET_P4_INPUT_SW1_GPIO)
       | (1ULL << PET_P4_INPUT_SW2_GPIO)
@@ -975,12 +1031,23 @@ static void send_input_event(
   const char *action_override,
   bool handled_locally
 ) {
-  cJSON *root = cJSON_CreateObject();
-  cJSON *payload = cJSON_CreateObject();
   const char *resolved_action = action_override && action_override[0]
     ? action_override
     : (binding ? binding->action : "disabled");
   char *line;
+#if PET_P4_SYSTEM_WIFI
+  if (state && !handled_locally && !strcmp(resolved_action, "page_enter") &&
+      !pet_p4_state_usb_client_connected(state, (uint64_t)(esp_timer_get_time() / 1000)) &&
+      pet_p4_lan_voice_confirm((uint64_t)(esp_timer_get_time() / 1000))) {
+    return;
+  }
+  if (state && !strcmp(resolved_action, "realtime_chat") &&
+      pet_p4_lan_realtime_press(state, event->ts_ms, (uint64_t)(esp_timer_get_time() / 1000))) {
+    return;
+  }
+#endif
+  cJSON *root = cJSON_CreateObject();
+  cJSON *payload = cJSON_CreateObject();
   if (!root || !payload) {
     cJSON_Delete(root);
     cJSON_Delete(payload);
@@ -1097,6 +1164,12 @@ static bool handle_approval_input(
     /* A voice hold that began before the modal must not leave capture running
      * now that its release is swallowed by the modal. */
     state->session_voice_active = false;
+#if PET_P4_SYSTEM_WIFI
+    if (state->session_voice_lan_button) {
+      state->session_voice_lan_button = 0;
+      pet_p4_lan_voice_cancel();
+    } else
+#endif
     (void) pet_p4_audio_capture_stop();
   }
   if (event->gesture != PET_P4_INPUT_GESTURE_SHORT_PRESS) return true;
@@ -1390,6 +1463,30 @@ static void dispatch_binding_event(
     send_ignored_component_event(state, send_line, ctx, event, event_name, gesture);
     return;
   }
+#if PET_P4_SYSTEM_WIFI
+  if (pet_settings_active(state)) {
+    if (!strcmp(event_name, "joystick.up"))
+      pet_settings_input(state, PET_SETTINGS_UP, event->ts_ms);
+    else if (!strcmp(event_name, "joystick.down"))
+      pet_settings_input(state, PET_SETTINGS_DOWN, event->ts_ms);
+    else if (!strcmp(event_name, "knob.rotate_ccw"))
+      pet_settings_input(state, PET_SETTINGS_LEFT, event->ts_ms);
+    else if (!strcmp(event_name, "knob.rotate_cw"))
+      pet_settings_input(state, PET_SETTINGS_RIGHT, event->ts_ms);
+    else if (!strcmp(event_name, "button.encoder.short_press") ||
+             !strcmp(event_name, "button.sw1.short_press"))
+      pet_settings_input(state, PET_SETTINGS_ENTER, event->ts_ms);
+    else if (!strcmp(event_name, "button.sw3.short_press") ||
+             !strcmp(event_name, "button.encoder.long_press"))
+      pet_settings_input(state, PET_SETTINGS_BACK, event->ts_ms);
+    return;
+  }
+  if (binding && !strcmp(binding->action, PET_SETTINGS_ACTION)) {
+    // Keep device navigation local even if the current page cannot open Settings.
+    (void)pet_settings_open(state, event->ts_ms);
+    return;
+  }
+#endif
   // Leaving a component keeps music playing. A further configured Back on
   // the pet home page stops it; realtime mode above retains input priority.
   if (state && binding && strcmp(state->screen_page, "main") == 0
@@ -1469,6 +1566,24 @@ static void dispatch_binding_event(
     miniapp_action,
     sizeof(miniapp_action)
   );
+  if (binding && strcmp(binding->action, "voice_key_forward") == 0) {
+    const bool physical_button = strncmp(event_name, "button.", 7) == 0;
+    const bool tap = strcmp(gesture, "short_press") == 0 ||
+      strcmp(gesture, "long_press") == 0 || strcmp(gesture, "double_press") == 0;
+    handled_locally = state && strcmp(state->screen_page, "main") == 0 && physical_button && tap
+      && pet_p4_native_voice_key_tap(binding->value);
+  }
+#if PET_P4_SYSTEM_WIFI
+  if (state && binding && !handled_locally && !strcmp(binding->action, "voice_ptt") &&
+      !strcmp(gesture, "hold_start") &&
+      !pet_p4_state_usb_client_connected(state, (uint64_t)(esp_timer_get_time() / 1000))) {
+    if (pet_p4_lan_voice_press(state, event->control, (uint64_t)(esp_timer_get_time() / 1000))) {
+      state->session_voice_lan_button = event->control + 1u;
+      state->session_voice_active = true;
+    }
+    return;
+  }
+#endif
   if (binding && strcmp(binding->action, "voice_ptt") == 0) {
     if (strcmp(gesture, "hold_end") == 0) {
       if (state) state->session_voice_active = false;
@@ -1489,6 +1604,79 @@ static void dispatch_binding_event(
     miniapp_action,
     handled_locally
   );
+}
+
+#define DEVICE_DOUBLE_PRESS_MS 280u
+typedef struct {
+  pet_p4_input_event_t event;
+  unsigned int config_epoch;
+  uint64_t component_context;
+  char page[PET_P4_PAGE_MAX];
+  bool waiting;
+  bool second_down;
+} pending_button_click_t;
+
+static pending_button_click_t g_pending_clicks[3];
+
+static bool double_press_context_allowed(const pet_p4_runtime_state_t *state) {
+  return state && !state->approval_active && !state->session_voice_active &&
+    !pet_p4_conversation_active(state) &&
+    (!strcmp(state->screen_page, "main") || !strcmp(state->screen_page, "app"));
+}
+
+static bool pending_click_current(const pending_button_click_t *click,
+                                  const pet_p4_runtime_state_t *state) {
+  return double_press_context_allowed(state) &&
+    click->config_epoch == g_input_config_epoch &&
+    !strcmp(click->page, state->screen_page) &&
+    (strcmp(click->page, "app") ||
+      click->component_context == pet_p4_miniapp_input_context());
+}
+
+static void finish_pending_clicks(pet_p4_runtime_state_t *state, pet_p4_send_line_fn send_line,
+                                  void *ctx, unsigned long long now) {
+  for (unsigned i = 0; i < 3; ++i) {
+    pending_button_click_t *click = &g_pending_clicks[i];
+    if (!click->waiting) continue;
+    if (!pending_click_current(click, state)) {
+      click->waiting = false;
+    } else if (!click->second_down && now >= click->event.ts_ms + DEVICE_DOUBLE_PRESS_MS) {
+      char event_name[PET_P4_INPUT_EVENT_MAX];
+      snprintf(event_name, sizeof(event_name), "%s.short_press", button_event_prefix(click->event.control));
+      click->waiting = false;
+      click->event.ts_ms = now;
+      dispatch_binding_event(state, send_line, ctx, &click->event, event_name, "short_press");
+    }
+  }
+}
+
+static bool defer_device_click(pet_p4_runtime_state_t *state, pet_p4_send_line_fn send_line,
+                               void *ctx, const pet_p4_input_event_t *event, const char *short_event) {
+  if (event->control > PET_P4_INPUT_CONTROL_SW3 || !double_press_context_allowed(state)) return false;
+  char double_event[PET_P4_INPUT_EVENT_MAX];
+  snprintf(double_event, sizeof(double_event), "%s.double_press", button_event_prefix(event->control));
+  const pet_p4_input_binding_t *binding = active_binding(double_event);
+  const bool in_app = !strcmp(state->screen_page, "app");
+  if (in_app) {
+    if (active_global_priority_binding(state, short_event) ||
+        (!active_global_priority_binding(state, double_event) &&
+         !pet_p4_miniapp_has_input(double_event))) return false;
+  } else if (!binding || !strcmp(binding->action, "disabled")) {
+    return false;
+  }
+  pending_button_click_t *click = &g_pending_clicks[event->control];
+  if (click->waiting && pending_click_current(click, state)) {
+    click->waiting = false;
+    dispatch_binding_event(state, send_line, ctx, event, double_event, "double_press");
+    return true;
+  }
+  click->event = *event;
+  click->config_epoch = g_input_config_epoch;
+  click->component_context = in_app ? pet_p4_miniapp_input_context() : 0;
+  copy_text(click->page, sizeof(click->page), state->screen_page);
+  click->waiting = true;
+  click->second_down = false;
+  return true;
 }
 
 static void process_button_event(
@@ -1566,12 +1754,102 @@ static void process_button_event(
   }
   if (event->gesture == PET_P4_INPUT_GESTURE_SHORT_PRESS) {
     snprintf(event_name, sizeof(event_name), "%s.short_press", prefix);
-    dispatch_binding_event(state, send_line, ctx, event, event_name, "short_press");
+    if (!defer_device_click(state, send_line, ctx, event, event_name))
+      dispatch_binding_event(state, send_line, ctx, event, event_name, "short_press");
   } else if (event->gesture == PET_P4_INPUT_GESTURE_LONG_PRESS) {
     snprintf(event_name, sizeof(event_name), "%s.long_press", prefix);
+    const pet_p4_input_binding_t *binding = active_binding(event_name);
+    if (event->control == PET_P4_INPUT_CONTROL_ENCODER && state
+        && !strcmp(state->screen_page, "components") && !pet_p4_conversation_active(state)
+        && (!binding || !strcmp(binding->action, "disabled"))) {
+      pet_center_filter_t filter = (pet_p4_miniapp_center_filter() + 1) % PET_CENTER_FILTER_COUNT;
+      if (pet_p4_miniapp_center_set_filter(filter)) state->last_update_ms = event->ts_ms;
+      return;
+    }
     dispatch_binding_event(state, send_line, ctx, event, event_name, "long_press");
   }
 }
+
+#if PET_P4_SYSTEM_WIFI
+#define BLE_DOUBLE_MS 280u
+static struct {
+  unsigned down;
+  unsigned ignore;
+  unsigned normal_down;
+  bool active;
+  bool stick_neutral;
+  uint32_t deadline[3];
+} keyboard_gestures = { .stick_neutral = true };
+
+static void keyboard_tick(uint32_t now) {
+  for (unsigned button = 0; button < 3; ++button) {
+    const uint32_t deadline = keyboard_gestures.deadline[button];
+    if (deadline && (int32_t)(now - deadline) > 0) {
+      keyboard_gestures.deadline[button] = 0;
+      (void)pet_ble_keyboard_send(pet_ble_keyboard_chord(button * 3));
+    }
+  }
+}
+
+static void keyboard_click(unsigned button, uint32_t now) {
+  const unsigned slot = button * 3;
+  if (button >= 3) {
+    (void)pet_ble_keyboard_send(pet_ble_keyboard_chord(slot));
+    return;
+  }
+  if (keyboard_gestures.deadline[button]) {
+    keyboard_gestures.deadline[button] = 0;
+    (void)pet_ble_keyboard_send(pet_ble_keyboard_chord(slot + 1));
+  } else if (pet_ble_keyboard_chord(slot + 1)) {
+    keyboard_gestures.deadline[button] = (now + BLE_DOUBLE_MS) | 1u;
+  } else {
+    (void)pet_ble_keyboard_send(pet_ble_keyboard_chord(slot));
+  }
+}
+
+static bool keyboard_input(const pet_p4_input_event_t *event) {
+  const bool active = keyboard_gestures.active;
+  const uint32_t now = (uint32_t)event->ts_ms;
+  if (active) keyboard_tick(now);
+  if (event->control <= PET_P4_INPUT_CONTROL_ENCODER_PRESS) {
+    const unsigned button = (unsigned)event->control, bit = 1u << button;
+    if (event->gesture == PET_P4_INPUT_GESTURE_DOWN) {
+      keyboard_gestures.down |= bit;
+      if (!active) keyboard_gestures.normal_down |= bit;
+    }
+    if (keyboard_gestures.ignore & bit) {
+      const bool release = event->gesture == PET_P4_INPUT_GESTURE_UP ||
+                           event->gesture == PET_P4_INPUT_GESTURE_HOLD_END;
+      const bool normal_owns = (keyboard_gestures.normal_down & bit) != 0;
+      if (event->gesture == PET_P4_INPUT_GESTURE_UP) {
+        keyboard_gestures.down &= ~bit;
+        keyboard_gestures.ignore &= ~bit;
+        keyboard_gestures.normal_down &= ~bit;
+      }
+      /* Normal mode owns the release if it received the original down. */
+      return !release || !normal_owns;
+    }
+    if (event->gesture == PET_P4_INPUT_GESTURE_UP) {
+      keyboard_gestures.down &= ~bit;
+      keyboard_gestures.normal_down &= ~bit;
+    }
+    if (active && event->gesture == PET_P4_INPUT_GESTURE_SHORT_PRESS) keyboard_click(button, now);
+    if (active && event->gesture == PET_P4_INPUT_GESTURE_LONG_PRESS)
+      (void)pet_ble_keyboard_send(pet_ble_keyboard_chord(button * 3 + 2));
+  } else if (event->control == PET_P4_INPUT_CONTROL_JOYSTICK &&
+             event->gesture == PET_P4_INPUT_GESTURE_DIRECTION) {
+    if (event->delta == PET_P4_JOYSTICK_CENTER) keyboard_gestures.stick_neutral = true;
+    else if (keyboard_gestures.stick_neutral) {
+      keyboard_gestures.stick_neutral = false;
+      if (active && event->delta >= PET_P4_JOYSTICK_UP && event->delta <= PET_P4_JOYSTICK_RIGHT)
+        (void)pet_ble_keyboard_send(
+          pet_ble_keyboard_chord(12 + 2 * (unsigned)(event->delta - PET_P4_JOYSTICK_UP)));
+    }
+  }
+  return active;
+}
+
+#endif
 
 void pet_p4_input_process(
   pet_p4_runtime_state_t *state,
@@ -1580,13 +1858,50 @@ void pet_p4_input_process(
 ) {
   pet_p4_input_event_t event;
   if (!g_event_queue) return;
+#if PET_P4_SYSTEM_WIFI
+  const bool keyboard_active = pet_ble_keyboard_connected();
+  if (keyboard_gestures.active != keyboard_active) {
+    keyboard_gestures.active = keyboard_active;
+    keyboard_gestures.ignore = keyboard_gestures.down;
+    memset(keyboard_gestures.deadline, 0, sizeof(keyboard_gestures.deadline));
+    memset(g_pending_clicks, 0, sizeof(g_pending_clicks));
+    pet_p4_miniapp_side_axis(0);
+  }
+#endif
   while (xQueueReceive(g_event_queue, &event, 0) == pdTRUE) {
     /* Preserve cancellation across several queued navigation events in one
      * loop, including leave-and-return before the worker finishes loading. */
     pet_p4_miniapp_activation_guard(state && !strcmp(state->screen_page, "components")
       && !pet_p4_conversation_active(state));
+#if PET_P4_SYSTEM_WIFI
+    const bool keyboard_owns = keyboard_input(&event);
+    if (state && state->session_voice_lan_button == event.control + 1u &&
+        (event.gesture == PET_P4_INPUT_GESTURE_HOLD_END || event.gesture == PET_P4_INPUT_GESTURE_UP)) {
+      if (state->approval_active || keyboard_owns) pet_p4_lan_voice_cancel();
+      state->session_voice_lan_button = 0;
+      state->session_voice_active = false;
+      continue;
+    }
+    if (keyboard_owns) continue;
+#endif
     /* The pending DSH approval owns every physical event while it is visible. */
-    if (handle_approval_input(state, send_line, ctx, &event)) continue;
+    if (handle_approval_input(state, send_line, ctx, &event)) {
+      memset(g_pending_clicks, 0, sizeof(g_pending_clicks));
+      continue;
+    }
+    if (event.control <= PET_P4_INPUT_CONTROL_SW3) {
+      pending_button_click_t *click = &g_pending_clicks[event.control];
+      if (event.gesture == PET_P4_INPUT_GESTURE_LONG_PRESS ||
+          event.gesture == PET_P4_INPUT_GESTURE_HOLD_START) {
+        click->waiting = false;
+      } else if (event.gesture == PET_P4_INPUT_GESTURE_SHORT_PRESS) {
+        click->second_down = false;
+      }
+    }
+    finish_pending_clicks(state, send_line, ctx, event.ts_ms);
+    if (event.control <= PET_P4_INPUT_CONTROL_SW3 && event.gesture == PET_P4_INPUT_GESTURE_DOWN) {
+      g_pending_clicks[event.control].second_down = true;
+    }
     if (event.control == PET_P4_INPUT_CONTROL_JOYSTICK
         && (event.gesture == PET_P4_INPUT_GESTURE_DIRECTION||event.gesture==PET_P4_INPUT_GESTURE_REPEAT)) {
       static pet_p4_input_gate_t gate;
@@ -1693,6 +2008,10 @@ void pet_p4_input_process(
       process_button_event(state, send_line, ctx, &event);
     }
   }
+#if PET_P4_SYSTEM_WIFI
+  if (keyboard_active) keyboard_tick((uint32_t)(esp_timer_get_time() / 1000ULL));
+#endif
+  finish_pending_clicks(state, send_line, ctx, esp_timer_get_time() / 1000ULL);
   pet_p4_miniapp_activation_guard(state && !strcmp(state->screen_page, "components")
     && !pet_p4_conversation_active(state));
 }

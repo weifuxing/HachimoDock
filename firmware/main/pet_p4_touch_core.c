@@ -78,7 +78,8 @@ bool pet_p4_touch_decoder_update(
       decoder->start_ms = now_ms;
       return false;
     }
-    if (abs(x - decoder->start_x) > 12 || abs(y - decoder->start_y) > 12) decoder->moved = true;
+    const int tap_slop = decoder->anchor_tap ? 24 : 12;
+    if (abs(x - decoder->start_x) > tap_slop || abs(y - decoder->start_y) > tap_slop) decoder->moved = true;
     if (!decoder->moved && !decoder->long_press_emitted
         && now_ms >= decoder->start_ms && now_ms - decoder->start_ms >= decoder->long_press_ms) {
       decoder->long_press_emitted = true;
@@ -104,6 +105,10 @@ bool pet_p4_touch_decoder_update(
   }
   if (gesture == PET_P4_TOUCH_TAP && decoder->moved) return false;
   fill_event(decoder, event, gesture, now_ms);
+  if (gesture == PET_P4_TOUCH_TAP && decoder->anchor_tap) {
+    event->x = decoder->start_x;
+    event->y = decoder->start_y;
+  }
   return true;
 }
 

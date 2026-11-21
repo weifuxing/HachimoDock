@@ -9,6 +9,7 @@
  */
 
 const crypto = require("crypto");
+const { createCapability, readManagedBootstrap } = require("../../agent-session-bus/src/local-capability");
 const fs = require("fs");
 const http = require("http");
 const os = require("os");
@@ -32,9 +33,9 @@ const APP_VERSION = "0.1.0";
 const PROTOCOL_VERSION_FALLBACK = 3;
 const SPEECH_EXPIRES_MS = 30000;
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
-const STATUS_VALUES = new Set(["idle", "working", "speaking", "done", "reply_complete", "error", "waiting_user"]);
+const STATUS_VALUES = new Set(["idle", "working", "speaking", "done", "reply_complete", "error", "waiting_user", "sleeping"]);
 const LEGACY_WORKING_STATUS_VALUES = new Set(["thinking", "tool_running"]);
-const KNOWN_AGENT_SOURCES = ["codex", "claude-code", "openclaw", "mimocode", "workbuddy"];
+const KNOWN_AGENT_SOURCES = ["codex", "claude-code", "openclaw", "mimocode", "workbuddy", "devin", "deepseek-harness"];
 
 function requireOptional(name) {
   try {
@@ -603,7 +604,14 @@ class LocalStatePublisher {
     return this.latestStateBySource.get(normalizeAgentId(sourceId || "")) || "";
   }
 
-  publishSource(payload) {
+  publishSource(payload, { sessionOnly = false } = {}) {
+    if (sessionOnly) {
+      try {
+        fs.mkdirSync(this.localStateDir, { recursive: true });
+        this._writeLocalSessionPayload(normalizeAgentId(payload.source), payload, this.localStateDir);
+      } catch { /* Same best-effort atomic session publication as the source path. */ }
+      return;
+    }
     const source = normalizeAgentId(payload.source || "unknown");
     this.latestStateBySource.set(source, normalizeStatus(payload.state) || "");
     this._writeLocalState(source, payload);
@@ -1113,6 +1121,7 @@ class OpenClawGatewayBridge {
 class HookHttpServer {
   constructor(config) {
     this.config = config;
+    this.capability = config.capability || createCapability();
     this.server = null;
     this.port = null;
   }
@@ -1228,6 +1237,12 @@ class HookHttpServer {
         version: APP_VERSION,
         port: this.port,
       });
+      return;
+    }
+
+    const roles = req.url === "/state" || req.url === "/permission" ? ["hook"] : ["control"];
+    if (!this.capability.authorize(req, roles)) {
+      this.sendJson(res, 401, { ok: false, code: "CAPABILITY_REQUIRED" });
       return;
     }
 
@@ -1449,6 +1464,7 @@ function injectViaAgentBusOnce(agentBus, injectBody, options = {}) {
       headers: {
         "Content-Type": "application/json; charset=utf-8",
         Accept: "text/event-stream",
+        ...agentBus.authorizationHeaders("control"),
       },
     }, (res) => {
       const statusCode = Number.isFinite(res.statusCode) ? res.statusCode : 0;
@@ -1655,7 +1671,9 @@ function publishClawdState(config, payload) {
       ? buildMiMoCodeHookDisplay(payload, status, event)
       : source === "workbuddy"
         ? buildWorkBuddyHookDisplay(payload, status, event)
-        : undefined;
+        : source === "devin"
+          ? buildDevinCloudDisplay(payload, status, event)
+          : undefined;
   const explicitSessionTitle = compactHookText(payload.session_title, 160);
   const sessionTitle = explicitSessionTitle
     || (display && display.title)
@@ -1663,7 +1681,7 @@ function publishClawdState(config, payload) {
 
   const out = {
     source,
-    channel: source === "mimocode" ? "mimocode-plugin" : "clawd-hook",
+    channel: config.channel || (source === "mimocode" ? "mimocode-plugin" : "clawd-hook"),
     bridge: APP_NAME,
     bridgeVersion: APP_VERSION,
     state: status,
@@ -1704,13 +1722,31 @@ function publishClawdState(config, payload) {
 
 function buildWorkBuddyHookDisplay(payload, status, event) {
   const { displayText } = require("../../../hooks/workbuddy-display");
+  const sessionId = payload?.session_id;
+  const title = payload?.session_title_explicit === true
+    && typeof sessionId === "string" && sessionId.trim() && sessionId.length <= 256
+    ? displayText(payload.session_title, 120)
+    : "";
   const content = displayText(payload?.display_content) || {
     working: event === "PreToolUse" ? "正在执行任务" : "正在思考",
     speaking: "正在回复", waiting_user: "等待确认", done: "已完成",
     error: "执行失败", idle: "等待任务", sleeping: "会话已结束",
   }[status] || "正在处理";
   // Sanitized current-turn prose only; status is a fallback when unavailable.
-  return { title: "WorkBuddy", content, status, event, updatedAtMs: Date.now() };
+  return { title: title || "WorkBuddy", content, status, event, updatedAtMs: Date.now() };
+}
+
+function buildDevinCloudDisplay(payload, status, event) {
+  const title = compactHookText(payload?.session_title, 160) || "Devin 会话";
+  const content = compactHookText(payload?.display_content, 320);
+  if (!title && !content) return undefined;
+  return {
+    title,
+    content: content || compactHookText(payload?.display_title, 320),
+    status,
+    event,
+    updatedAtMs: Date.now(),
+  };
 }
 
 function publishPermissionRequest(config, payload) {
@@ -2138,10 +2174,22 @@ function resolveConfig() {
     mimocode: {
       enabled: getEnvBool("CLAWD_ENABLE_MIMOCODE", true),
     },
+    hermes: {
+      enabled: parseCsvEnv("CLAWD_ENABLED_AGENTS", []).includes("hermes")
+        || getEnv("CLAWD_SELECTED_AGENT_ID", "") === "hermes",
+    },
+    dsh: {
+      enabled: require("../../../agents/dsh-status-monitor").isDshFollowEnabled(),
+    },
     workbuddy: {
       // Selected/enabled channel is authoritative in both direct and autostart launches.
       enabled: parseCsvEnv("CLAWD_ENABLED_AGENTS", []).includes("workbuddy")
         || getEnv("CLAWD_SELECTED_AGENT_ID", "") === "workbuddy",
+    },
+    devin: {
+      enabled: getEnv("CLAWD_DEVIN_CLOUD_ENABLED", "false").toLowerCase() === "true"
+        || parseCsvEnv("CLAWD_ENABLED_AGENTS", []).includes("devin")
+        || getEnv("CLAWD_SELECTED_AGENT_ID", "") === "devin",
     },
     openclawState: {
       idleTimeoutMs: Math.max(1000, getEnvInt("STATUS_IDLE_TIMEOUT_MS", 15000)),
@@ -2199,6 +2247,8 @@ function startParentProcessWatchdog(onParentExit) {
 }
 
 async function main() {
+  const managedBootstrap = process.argv.includes("--managed-stdio-capability")
+    ? await readManagedBootstrap(process.stdin) : null;
   const config = resolveConfig();
   ensureDependencies(config);
 
@@ -2268,17 +2318,22 @@ async function main() {
   });
   publisher.start();
 
+  const capability = createCapability(managedBootstrap);
   const server = new HookHttpServer({
+    capability,
     port: config.http.port,
     strictPort: config.http.strictPort,
     publisher,
-    onState: config.http.syncHooks || config.mimocode.enabled || config.workbuddy.enabled
-      ? (payload) => publishClawdState({
+    onState: (payload) => {
+      if (config.http.syncHooks || config.mimocode.enabled || config.workbuddy.enabled
+          || normalizeAgentId(payload.agent_id) === "devin") {
+        publishClawdState({
           publisher,
           metricsTracker,
           includeRaw: config.includeRaw,
-        }, payload)
-      : () => {},
+        }, payload);
+      }
+    },
     onPermission: config.http.syncHooks
       ? (payload) => {
           publishPermissionRequest({
@@ -2370,6 +2425,40 @@ async function main() {
     ? startClaudeLogMonitor({ publisher, metricsTracker, includeRaw: config.includeRaw })
     : { stop() {} };
 
+  let mimoDesktopMonitor = { stop() {} };
+  if (config.mimocode.enabled) {
+    try {
+      const { startMimoDesktopMonitor } = require("../../../agents/mimo-desktop-monitor");
+      mimoDesktopMonitor = startMimoDesktopMonitor({
+        onState: (payload) => publishClawdState({
+          publisher, metricsTracker, includeRaw: false, channel: "mimo-desktop",
+        }, payload),
+        onUnavailable: () => log("warn", "MiMo Desktop lifecycle metadata unavailable"),
+      });
+    } catch {
+      log("warn", "MiMo Desktop monitor requires a Node runtime with SQLite support");
+    }
+  }
+
+  let hermesMonitor = { stop() {} };
+  if (config.hermes.enabled) {
+    try {
+      const { startHermesMonitor } = require("../../../agents/hermes-monitor");
+      hermesMonitor = startHermesMonitor({
+        onState: (payload) => publishClawdState({ publisher, metricsTracker, includeRaw: false }, payload),
+        onUnavailable: () => log("warn", "Hermes session database unavailable"),
+      });
+    } catch {
+      log("warn", "Hermes monitor requires a Node runtime with SQLite support");
+    }
+  }
+
+  const dshMonitor = require("../../../agents/dsh-status-monitor").startDshMonitor({
+    enabled: config.dsh.enabled,
+    onState: (payload, options) => publisher.publishSource(enrichPayloadMetrics(metricsTracker, payload), options),
+    onUnavailable: () => log("warn", "DSH follow snapshot unavailable"),
+  });
+
   let openclawStatus = null;
   let openclawBridge = null;
 
@@ -2397,7 +2486,7 @@ async function main() {
   // at ${VOICE_BUS_URL}/agent/inject and the bus dispatches turns into
   // the user's currently selected coding agent (Claude / Codex / OpenClaw).
   // See docs/voice-architecture.md for the full design.
-  if (process.env.AGENT_BUS_DISABLED !== "1") {
+  if (managedBootstrap || getEnvBool("PET_MANAGER_MANAGED_BRIDGE", false) || process.env.AGENT_BUS_DISABLED !== "1") {
     const busModule = tryLoadAgentSessionBus();
     if (!busModule) {
       throw new Error("agent-session-bus is required but could not be loaded");
@@ -2421,8 +2510,11 @@ async function main() {
       new DshAdapter({ log: busLog }),
     ];
     agentBus = createAgentSessionBus({
+      capability,
       adapters,
-      sessionStatusProvider: (agentId) => metricsTracker.sessionStatuses(agentId),
+      // DSH has authoritative live snapshots with epoch/revision. A slower
+      // polling cache must never overlay a newer turn or plugin incarnation.
+      sessionStatusProvider: (agentId) => agentId === "deepseek-harness" ? [] : metricsTracker.sessionStatuses(agentId),
       sessionEventProvider: (agentId, options) => metricsTracker.sessionEvents(agentId, options),
       log: busLog,
     });
@@ -2443,11 +2535,24 @@ async function main() {
     log("info", "agent-session-bus disabled", { reason: "AGENT_BUS_DISABLED=1" });
   }
 
+  const capabilityPorts = { hookPort: server.port, busPort: agentBus?.port_() || null };
+  let stopCapabilityWorker = () => {};
+  if (managedBootstrap) {
+    // Desktop credentials arrived over its private pipe. External hooks still
+    // require a verified descriptor, but their filesystem must not gate voice.
+    stopCapabilityWorker = capability.publishInWorker(capabilityPorts, reason =>
+      log("warn", "external bridge capability unavailable", { reason }));
+  } else {
+    capability.publish(capabilityPorts);
+  }
+
   let shuttingDown = false;
   let parentWatchdog = { stop() {} };
   function shutdown(signal) {
     if (shuttingDown) return;
     shuttingDown = true;
+    stopCapabilityWorker();
+    capability.clear();
     log("info", "shutdown requested", { signal });
     parentWatchdog.stop();
     queuedHardwareInputs.stop();
@@ -2458,6 +2563,9 @@ async function main() {
     if (openclawStatus) openclawStatus.stop();
     codexMonitor.stop();
     claudeLogMonitor.stop();
+    mimoDesktopMonitor.stop();
+    hermesMonitor.stop();
+    dshMonitor.stop();
     server.stop();
     publisher.stop();
     setTimeout(() => process.exit(0), 50).unref?.();
@@ -2476,6 +2584,7 @@ async function main() {
     claudeLogMonitor: config.claude.enabledLogMonitor,
     openclawEnabled: config.openclaw.enabled,
     mimocodeEnabled: config.mimocode.enabled,
+    dshEnabled: config.dsh.enabled,
     workbuddyEnabled: config.workbuddy.enabled,
     agentBusEnabled: Boolean(agentBus),
   });

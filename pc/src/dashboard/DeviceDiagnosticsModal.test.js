@@ -27,7 +27,7 @@ test("diagnostics modal uses ACK-gated P4 commands", () => {
 });
 
 test("diagnostics modal exposes reset, memory, storage and input health", () => {
-  for (const field of ["lastResetReason", "faultResetCount", "minimumFreeHeapBytes", "freePsramBytes", "activeAppearanceSlot", "inputDroppedEvents", "imageState"]) {
+  for (const field of ["lastResetReason", "faultResetCount", "minimumFreeHeapBytes", "freePsramBytes", "activeAppearanceSlot", "inputDroppedEvents", "imageState", "widgetWasm", "widgetWasmCanvas", "widgetWasmHost"]) {
     assert.match(source, new RegExp(field));
   }
 });

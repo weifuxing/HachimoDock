@@ -1,8 +1,8 @@
 # HD28091 硬件改动与固件适配
 
-本分支基于 HachimoDock 公开 R181 源码，适配 HD28091C40-V1 屏幕及自制转接板，并提供微雪 ESP32-P4-WIFI6 和 ESP32-P4-Pico 的外接按键配置。本文记录截至 2026-11-13 的实现与联调结果。
+本分支已合入 HachimoDock 官方 0.1.245 / R292 公开源码，基线为上游 `139c993`，继续适配 HD28091C40-V1 屏幕及自制转接板。ESP32-P4-Pico 沿用官方板型配置，输入采样与握手能力共用本分支的引脚定义。本文记录截至 2026-11-21 的源码适配及已有联调结果。
 
-上游 0.1.217 发布包搭配 R206 固件。其发布清单的 `sourcePublished` 为 `false`，本分支构建版本由 `firmware/CMakeLists.txt` 和 `firmware/platformio.ini` 中的 R181 基线生成。[上游发布清单](https://github.com/ai-maker-lab/HachimoDock/blob/main/latest-release.json)
+上游 0.1.245 搭配 `0.7.107-p4-r292`，发布清单的 `sourcePublished` 为 `true`。本分支四个板型发布目标在版本号末尾追加 `-hd28091`，例如 Pico 为 `0.7.107-p4-r292-pico-hd28091`。构建目标及本分支的硬件参数见下文。[上游发布清单](https://github.com/ai-maker-lab/HachimoDock/blob/main/latest-release.json)
 
 ## 屏幕与转接板
 
@@ -31,7 +31,7 @@ GPIO26、GPIO27 在原 BSP 中分别定义为背光和 LCD 复位控制引脚。
 
 | 参数 | 设置 |
 | --- | --- |
-| DSI 数据通道 | 2 路，每通道 500Mbps，按转接板 D0/D1 接线配置 |
+| DSI 数据通道 | 默认 2 路，每通道 500Mbps，通过 `sdkconfig.defaults` 设置官方 DSI 配置项 |
 | 像素格式 | RGB565，RGB 顺序 |
 | 水平有效像素 / HBP / HSYNC / HFP | 480 / 20 / 4 / 328，总计 832 像素周期 |
 | 垂直有效行 / VBP / VSYNC / VFP | 640 / 16 / 4 / 14，总计 674 行 |
@@ -74,14 +74,14 @@ GPIO26、GPIO27 在原 BSP 中分别定义为背光和 LCD 复位控制引脚。
 | 摇杆 X / Y | GPIO21 / 20 | GPIO21 / 20 |
 | CST328 INT 可选飞线 | GPIO22，默认悬空轮询 | GPIO22，默认悬空轮询 |
 
-`PET_P4_BOARD_PICO=1` 选择 Pico 配置。输入采样与握手中的 `capabilities.controls.sw1/sw2` 共用 `pet_p4_input.h` 的定义。Pico 构建版本为 `0.7.103-p4-r181-pico`。[Pico 引脚图](https://docs.waveshare.com/ESP32-P4-Pico#pinout-definition) [WIFI6 引脚图](https://docs.waveshare.com/ESP32-P4-WIFI6#pinout-definition)
+`PET_P4_BOARD_PICO=1` 选择 Pico 配置。输入采样与握手中的 `capabilities.controls.sw1/sw2` 共用 `pet_p4_input.h` 的定义。Pico 构建版本为 `0.7.107-p4-r292-pico-hd28091`。[Pico 引脚图](https://docs.waveshare.com/ESP32-P4-Pico#pinout-definition) [WIFI6 引脚图](https://docs.waveshare.com/ESP32-P4-WIFI6#pinout-definition)
 
 | 板型 | 芯片 v1 构建目标 | 芯片 v3 构建目标 |
 | --- | --- | --- |
-| WIFI6 | `esp32_p4_evboard` | `esp32_p4_evboard_v3` |
-| Pico | `esp32_p4_pico` | `esp32_p4_pico_v3` |
+| WIFI6 | `esp32_p4_wifi6_system_settings_v1` | `esp32_p4_wifi6_system_settings_v3` |
+| Pico | `esp32_p4_pico_v1` | `esp32_p4_pico_v3` |
 
-依赖与芯片修订范围见 [构建说明](../firmware/BUILD.md)。在 `firmware` 目录构建 Pico v3 应用及完整出厂镜像可执行以下命令。
+旧命令 `esp32_p4_pico` 保留为 Pico v1 的兼容别名。依赖与芯片修订范围见 [构建说明](../firmware/BUILD.md)。构建前设置 `WAMR_ROOT`，使用 `firmware/tools/prepare_ci_sdk.py` 中锁定的 WAMR 源码与摘要。在 `firmware` 目录构建 Pico v3 应用及完整出厂镜像可执行以下命令。
 
 ```sh
 python -m platformio run -e esp32_p4_pico_v3
@@ -95,6 +95,10 @@ python -m platformio run -e esp32_p4_pico_v3 -t factory
 整套外壳文件与打印说明集中在 [hardware/enclosure-hd28091](../hardware/enclosure-hd28091/README.md)。当前保留方案一 R10，包含 R10 外角和约 R4.5 面框边缘，摇杆凸台采用抬高前的位置。前壳打印入口为 [screen-up STL](../hardware/enclosure-hd28091/HD28091-option1-R10-screen-up.stl) 和 [screen-up 3MF](../hardware/enclosure-hd28091/HD28091-option1-R10-screen-up.3mf)，文件与选定版本保持一致。后壳、三个按键帽及摇把的三个零件已从原总装中独立导出，整套共 8 件，每件打印 1 个。同目录提供各件 STEP、使用当前 R10 前壳的总装 STEP、FreeCAD 工程、零件预览和来源核验清单。前壳 CAD 为网格转实体，配套件的切片与实物装配验证待完成。
 
 ## 验证记录与待测项
+
+2026-11-21 完成官方 `139c993` 的合入和 HD28091 适配。Pico v3 使用 Windows 本地 PlatformIO / ESP-IDF 编译通过，应用镜像为 2,381,824 字节，3MiB OTA 分区余量为 763,904 字节。镜像版本为 `0.7.107-p4-r292-pico-hd28091`，芯片范围为 3.0–3.99。ELF 中确认按键 GPIO14/GPIO6，生成配置确认双通道 DSI、每通道 500Mbps。显示、CST328、IRQ/轮询和协议回归共 78 项通过，内置组件包检查通过。本次构建验证范围为 Pico v3，R292 实机验证待进行。
+
+新增 WAMR 使用官方准备脚本锁定的 `47c7c85ac21f240a878026af603e032065d183fb`，构建入口兼容 Windows 路径。依赖解析后的 v3 锁文件记录 `esp-dl 3.3.15`、`dl_fft 0.8.0`，对应本次编译产物。
 
 2026-11-07 的 v3.2 联调已完成 WIFI6/Pico 对应固件的构建、串口 A/B 升级及新板完整初始化；设备通过镜像校验和启动健康检查。20MHz 对比固件通过运行中 ELF 摘要核对。Pico 版本上报 SW1/SW2/SW3＝GPIO14/6/5。
 

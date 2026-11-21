@@ -3,7 +3,7 @@ import { createDesktopPetIntentId } from "./desktop-pet-assignment.js";
 
 export function appearanceObservationError(error) {
   const code = typeof error === "string" ? error : error?.message || "";
-  if (code === "appearance_raw_stream_quarantined_no_probe") return "素材传输保护仍生效，本次未发送设备核对请求。需先完成真实复位证明的恢复流程；不会自动重发旧操作。";
+  if (code === "appearance_raw_stream_quarantined_no_probe") return "请断开 USB 后重新连接，再到设备页点「确认重启并恢复」。上次传输不会自动重发。";
   if (["appearance_recovery_busy", "appearance_recovery_waiting_quiescence"].includes(code)) return "设备操作尚未结束，本次未切换或重发。稍后可再次单独核对状态。";
   return "当前形象状态未能确认；旧同步结果仍未确认。本次未切换或重发。";
 }

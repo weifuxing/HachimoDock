@@ -25,7 +25,8 @@ def function(code, name):
 
 @pytest.fixture(scope='module', params=[0, 1], ids=['atomic-rename', 'sealed-inplace'])
 def binary(request, tmp_path_factory):
-    code = SOURCE.read_text(); out = tmp_path_factory.mktemp('catalog-host')
+    code = SOURCE.read_text().replace('__attribute__((optimize("Oz"))) ', '')
+    out = tmp_path_factory.mktemp('catalog-host')
     record = code[code.index('typedef struct {\n  char widget_id[PET_P4_MINIAPP_WIDGET_ID_MAX];\n  char title[64];'):code.index('static const char *TAG =', code.index('} miniapp_catalog_item_t;'))]
     cursor = code[code.index('typedef struct {uint32_t magic,sequence;char id[48];} catalog_cursor_t;'):code.index('static bool write_catalog_snapshot_at(')]
     bundle = json.dumps({'version': 1, 'components': [{'id': 'seed-one', 'resourcePackage': True, 'widget': {}, 'buttons': [], 'spriteFiles': [], 'spritesChecksum': '00000000'}, {'id': 'seed-two', 'resourcePackage': True, 'widget': {}, 'buttons': [], 'spriteFiles': [], 'spritesChecksum': '00000000'}]}, separators=(',', ':')).encode() + b'\0'
@@ -41,17 +42,28 @@ def binary(request, tmp_path_factory):
 #include <unistd.h>
 #include <zlib.h>
 #include "cJSON.h"
+#include "pet_p4_component_metadata.h"
+#include "pet_p4_builtin_index.h"
+#define MALLOC_CAP_SPIRAM 1
+#define MALLOC_CAP_8BIT 2
+#define heap_caps_malloc(n,c) (assert((c)==3),malloc(n))
+#define heap_caps_calloc(n,s,c) (assert((c)==3),calloc(n,s))
+#include "pet_p4_center_layout.h"
+static pet_center_filter_t g_center_filter = PET_CENTER_ALL;
 #define PET_P4_MINIAPP_WIDGET_ID_MAX 48
 #define PET_COMPONENT_BACKGROUND_ENABLED 1
+#define PET_COMPONENT_PROGRAM_ENABLED 1
+#define PET_COMPONENT_PROGRAM_EXECUTION_REVIEWED 1
+#define PET_COMPONENT_PROGRAM_PARENT_UNIFIED 1
 #define PET_P4_MINIAPP_BACKGROUND_MAX 4
 typedef struct {char widget_id[48];} pet_p4_miniapp_background_status_t;
 static char registered_program[48];
 static size_t pet_p4_miniapp_background_list(pet_p4_miniapp_background_status_t *out){if(!registered_program[0])return 0;strcpy(out[0].widget_id,registered_program);return 1;}
-#define PET_P4_MINIAPP_CATALOG_MAX 32
+#include "pet_p4_catalog_profile.h"
 #define MINIAPP_CATALOG_GENERATION_COUNT 2
 #define MINIAPP_PACKAGE_GENERATION_COUNT 2
 #define MINIAPP_CATALOG_VERSION 3
-#define MINIAPP_CATALOG_JSON_MAX 16384
+#define MINIAPP_CATALOG_JSON_MAX (32 * 1024)
 #define MINIAPP_WIDGET_JSON_MAX 20000
 #define MINIAPP_BUTTONS_JSON_MAX 4000
 #define PET_P4_BUILD_ID "host-next-build"
@@ -113,11 +125,8 @@ static bool enqueue_cursor(uint64_t token,void *ctx){(void)ctx;if(!queue_ok)retu
 
 static struct{bool active;char widget_id[48];} g_runtime,g_staging;
 '''
-    for name in ['safe_widget_id', 'copy_utf8', 'parse_checksum_hex', 'miniapp_checksum', 'catalog_find', 'catalog_item_visible', 'catalog_entry_visible', 'catalog_visible_index','catalog_visible_preferred_in','catalog_visible_preferred']:
+    for name in ['safe_widget_id', 'copy_utf8', 'parse_checksum_hex', 'miniapp_checksum', 'catalog_find', 'catalog_id_visible', 'catalog_item_visible', 'catalog_entry_visible', 'catalog_entry_matches', 'catalog_filtered_index', 'catalog_visible_index','catalog_visible_preferred_in','catalog_visible_preferred']:
         body += function(code, name)
-    body += r'''
-static bool validate_catalog_snapshot(miniapp_catalog_snapshot_t *s,const miniapp_catalog_snapshot_t *prior,unsigned *loads){(void)prior;(void)loads;s->valid=true;for(size_t i=0;i<s->count;i++)s->items[i].resource_state=1;return true;}
-'''
     body += '#define MINIAPP_CATALOG_CHECK_KEY "\\\"check\\\":\\\""\n'
     for name in ['catalog_hex_digit', 'catalog_check_digits', 'catalog_check_value', 'catalog_check_seal', 'catalog_check_verify']:
         body += function(code, name)
@@ -161,8 +170,8 @@ static cJSON *reply;static char reply_topic[64];
 static void send_topic_payload(pet_p4_send_line_fn send,void *ctx,const char *topic,cJSON *payload){(void)send;(void)ctx;cJSON_Delete(reply);reply=payload;copy_utf8(reply_topic,sizeof(reply_topic),topic);}
 '''
     body += function((ROOT/'main/pet_p4_protocol.c').read_text(),'send_catalog_admin')
-    body += '\nstatic const unsigned char pet_p4_builtin_components_zlib[]={' + ','.join(map(str, compressed)) + '};\n'
-    body += f'static const size_t pet_p4_builtin_components_zlib_size={len(compressed)},pet_p4_builtin_components_json_size={len(bundle)};\n'
+    body += '\nconst unsigned char pet_p4_builtin_components_zlib[]={' + ','.join(map(str, compressed)) + '};\n'
+    body += f'const size_t pet_p4_builtin_components_zlib_size={len(compressed)},pet_p4_builtin_components_json_size={len(bundle)};\n'
     body += r'''
 typedef unsigned char mz_uint8;typedef int tinfl_decompressor;typedef int tinfl_status;
 #define TINFL_STATUS_DONE 0
@@ -187,6 +196,13 @@ static bool commit_builtin_package(const char *id,const char *widget,const char 
 '''
     body += function(code, 'restore_active_after_builtin_sync')
     body += function(code, 'reorder_catalog_for_builtin_bundle')
+    # Generated index must describe this fixture's packages, not the production bundle.
+    import sys
+    sys.path.insert(0,str(ROOT/'tools'))
+    from build_builtin_bundle import render_data_source
+    generated = render_data_source(bundle[:-1].decode())
+    body += generated[generated.index('const char pet_p4_builtin_index_json'):generated.index('const uint8_t *pet_p4_builtin_wasm')]
+    body += function(code, 'builtin_raw_free') + function(code, 'builtin_package_free')
     body += function(code, 'pet_p4_miniapp_sync_builtins')
     tail = r'''
 static cJSON *plan(const char *remove,const char *order){
@@ -203,7 +219,7 @@ static void reset(void){
  assert(pet_storage_lane_configure(&lane,lane_unlock,lane_lock,lane_owner,NULL));
  assert(pet_p4_miniapp_catalog_cursor_configure(enqueue_cursor,NULL));
 }
-static void readback(miniapp_catalog_snapshot_t *s){assert(load_catalog_snapshot((uint8_t)g_catalog_file_generation,s,NULL));assert(s->valid);}
+static void readback(miniapp_catalog_snapshot_t *s){assert(load_catalog_snapshot((uint8_t)g_catalog_file_generation,s));assert(s->parsed);}
 int main(int argc,char **argv){
  assert(argc==2);reset();char err[160]={0};const char *test=argv[1];
  if(!strcmp(test,"atomic")){
@@ -300,7 +316,7 @@ int main(int argc,char **argv){
    if(gen==1)cJSON_ReplaceItemInObjectCaseSensitive(p,"version",cJSON_CreateNumber(2));
    char *json=cJSON_PrintUnformatted(p);assert(write_bytes(path,json,strlen(json)));cJSON_free(json);cJSON_Delete(p);
   }
-  miniapp_catalog_snapshot_t a,b;assert(load_catalog_snapshot(0,&a,NULL)&&load_catalog_snapshot(1,&b,NULL));
+  miniapp_catalog_snapshot_t a,b;assert(load_catalog_snapshot(0,&a)&&load_catalog_snapshot(1,&b));
   uint32_t seq=0;miniapp_catalog_snapshot_t *latest=catalog_latest_snapshot(&a,&b,&seq);assert(seq==42&&latest->count==17&&!latest->seed_pending);
   assert(catalog_cursor_write(seq,g_catalog[7].widget_id));
   char active[48],cursor[48];bool exists;catalog_restore_navigation(latest,active,cursor,&exists);
@@ -337,7 +353,7 @@ int main(int argc,char **argv){
   cJSON *p=cJSON_Parse(raw);cJSON_DeleteItemFromObjectCaseSensitive(p,"seedPending");cJSON_DeleteItemFromObjectCaseSensitive(p,"selectedWidgetId");cJSON_DeleteItemFromObjectCaseSensitive(p,"check");
   char *s=cJSON_PrintUnformatted(p);assert(write_bytes(path,s,strlen(s)));cJSON_free(s);cJSON_Delete(p);
   miniapp_catalog_snapshot_t loaded;readback(&loaded);assert(!loaded.seed_pending&&!loaded.selected_widget_id[0]);
-  p=cJSON_Parse(raw);cJSON_DeleteItemFromObjectCaseSensitive(p,"check");cJSON_ReplaceItemInObjectCaseSensitive(p,"seedPending",cJSON_CreateString("true"));s=cJSON_PrintUnformatted(p);assert(write_bytes(path,s,strlen(s)));cJSON_free(s);cJSON_Delete(p);assert(!load_catalog_snapshot((uint8_t)g_catalog_file_generation,&loaded,NULL));
+  p=cJSON_Parse(raw);cJSON_DeleteItemFromObjectCaseSensitive(p,"check");cJSON_ReplaceItemInObjectCaseSensitive(p,"seedPending",cJSON_CreateString("true"));s=cJSON_PrintUnformatted(p);assert(write_bytes(path,s,strlen(s)));cJSON_free(s);cJSON_Delete(p);assert(!load_catalog_snapshot((uint8_t)g_catalog_file_generation,&loaded));
  }else if(!strcmp(test,"empty")){
   g_catalog_count=0;g_catalog_selected=0;g_runtime.active=false;assert(persist_catalog_snapshot(g_catalog,0,NULL));miniapp_catalog_snapshot_t s;readback(&s);assert(!s.seed_pending&&!s.count);
   assert(pet_p4_miniapp_sync_builtins()==ESP_OK&&materialized==0&&g_catalog_count==0);

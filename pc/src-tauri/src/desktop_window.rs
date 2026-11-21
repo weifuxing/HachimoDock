@@ -15,6 +15,51 @@ static PROMPT:AtomicBool=AtomicBool::new(false);
 static APPROVED:AtomicBool=AtomicBool::new(false);
 const TRAY_ID:&str="hachimidock-background";
 
+#[cfg(target_os = "macos")]
+pub fn guard_macos_system_quit(app: &AppHandle) -> Result<(), &'static str> {
+    use objc2::{ffi, runtime::{AnyClass, AnyObject, Sel}, sel, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSApplicationTerminateReply};
+    use std::sync::OnceLock;
+
+    static APP: OnceLock<AppHandle> = OnceLock::new();
+
+    extern "C" fn should_terminate(
+        _: &AnyObject,
+        _: Sel,
+        _: &NSApplication,
+    ) -> NSApplicationTerminateReply {
+        if APP.get().is_some_and(request_exit) {
+            NSApplicationTerminateReply::TerminateCancel
+        } else {
+            NSApplicationTerminateReply::TerminateNow
+        }
+    }
+
+    let mtm = MainThreadMarker::new().ok_or("not on the main thread")?;
+    let delegate = NSApplication::sharedApplication(mtm).delegate().ok_or("missing app delegate")?;
+    let object: &AnyObject = delegate.as_ref();
+    let selector = sel!(applicationShouldTerminate:);
+    let class = object.class();
+    if class.instance_method(selector).is_some() {
+        return Err("the application delegate already handles system Quit");
+    }
+    APP.set(app.clone()).map_err(|_| "the system Quit guard was already installed")?;
+    // Extend Tao's delegate without replacing its existing methods. AppKit calls
+    // this on the main thread; NSApplicationTerminateReply is NSUInteger.
+    let installed = unsafe {
+        ffi::class_addMethod(
+            class as *const AnyClass as *mut AnyClass,
+            selector,
+            std::mem::transmute::<
+                extern "C" fn(&AnyObject, Sel, &NSApplication) -> NSApplicationTerminateReply,
+                objc2::runtime::Imp,
+            >(should_terminate),
+            c"Q@:@".as_ptr(),
+        )
+    };
+    installed.as_bool().then_some(()).ok_or("could not install system Quit guard")
+}
+
 #[cfg(target_os="macos")]
 pub fn route_macos_quit(app:&AppHandle)->tauri::Result<()>{
     // Keep Tauri's default menu and all native Edit/Window/Services items.
@@ -57,8 +102,23 @@ pub fn init_tray(app:&AppHandle)->tauri::Result<()>{
             "quit-app"=>app.exit(0),
             _=>{}
         });
-    let icon=app.default_window_icon().ok_or_else(||std::io::Error::new(std::io::ErrorKind::NotFound,"default tray icon unavailable"))?;
-    let tray=tray.icon(icon.clone()).build(app)?;
+    #[cfg(target_os = "macos")]
+    let tray = {
+        let image = image::load_from_memory_with_format(
+            include_bytes!("../icons/tray-macos.png"), image::ImageFormat::Png,
+        ).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?.to_rgba8();
+        let (width, height) = image.dimensions();
+        tray.icon(tauri::image::Image::new_owned(image.into_raw(), width, height))
+            .icon_as_template(true)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let tray = {
+        let icon = app.default_window_icon().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "default tray icon unavailable")
+        })?;
+        tray.icon(icon.clone())
+    };
+    let tray = tray.build(app)?;
     // Keep an owned handle for the entire application lifetime.
     app.manage(tray);
     Ok(())

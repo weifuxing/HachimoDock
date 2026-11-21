@@ -112,7 +112,11 @@
 #ifndef PET_P4_EVENTS
 #define PET_P4_EVENTS 0
 #endif
-#define PET_P4_CAPABILITY_EXT (PET_P4_SEQUENCE || PET_P4_SAMPLES || PET_P4_CLIP || PET_P4_BIG_IMAGE || PET_P4_EVENTS)
+/* widgetWasmAudio = hachi-audio-v1: bounded local WASM speech clips. */
+#ifndef PET_P4_WASM_AUDIO
+#define PET_P4_WASM_AUDIO 0
+#endif
+#define PET_P4_CAPABILITY_EXT (PET_P4_SEQUENCE || PET_P4_SAMPLES || PET_P4_CLIP || PET_P4_BIG_IMAGE || PET_P4_EVENTS || PET_P4_WASM_AUDIO)
 #if PET_P4_CLIP && !(defined(PET_P4_H264_WORKER_PACK) && PET_P4_H264_WORKER_PACK)
 #error "Component clips reuse the worker-side H.264 decode/pack parent (PET_P4_H264_WORKER_PACK)"
 #endif

@@ -62,10 +62,6 @@ class Component(C.Structure):
     _fields_ = [('widget_id', C.c_char * 48), ('names', (C.c_char * 16) * 8), ('name_count', C.c_uint8), ('queue', (C.c_char * 16) * 8), ('head', C.c_uint8), ('count', C.c_uint8), ('dropped', C.c_uint32), ('used', C.c_bool)]
 
 
-class Bus(C.Structure):
-    _fields_ = [('items', Component * 32), ('emitted', C.c_uint32), ('delivered', C.c_uint32), ('dropped', C.c_uint32)]
-
-
 class Alarm(C.Structure):
     _fields_ = [('id', C.c_char * 16), ('action', C.c_char * 48), ('text', C.c_char * 41), ('every_ms', C.c_uint32), ('at_var', C.c_int8), ('last_var', C.c_int32), ('deadline_ms', C.c_uint64), ('background', C.c_bool), ('armed', C.c_bool), ('pending', C.c_bool), ('utc_deadline_ms', C.c_uint64), ('waiting_ms', C.c_uint32), ('utc_deadline', C.c_bool), ('waiting_for_clock', C.c_bool), ('cancelled', C.c_bool)]
 
@@ -89,8 +85,25 @@ class ClipState(C.Structure):
 @pytest.fixture(scope='module')
 def core(tmp_path_factory):
     out = tmp_path_factory.mktemp('cext-core') / 'core.so'
-    subprocess.run([*CC, '-shared', '-fPIC', '-O2', *SOURCES, str(FW / 'tests/vendor/cjson/cJSON.c'), '-o', str(out)], check=True)
+    layout = out.with_name('event_layout.c')
+    layout.write_text(
+        '#include "pet_p4_component_events.h"\n'
+        'unsigned test_event_capacity(void) { return PET_CEV_COMPONENTS; }\n'
+        'size_t test_event_bus_size(void) { return sizeof(pet_cev_bus_t); }\n'
+        'size_t test_event_counters_offset(void) { return offsetof(pet_cev_bus_t, emitted); }\n'
+    )
+    subprocess.run([*CC, '-shared', '-fPIC', '-O2', str(layout), *SOURCES, str(FW / 'tests/vendor/cjson/cJSON.c'), '-o', str(out)], check=True)
     lib = C.CDLL(str(out))
+    lib.test_event_capacity.restype = C.c_uint
+    lib.test_event_bus_size.restype = lib.test_event_counters_offset.restype = C.c_size_t
+
+    class Bus(C.Structure):
+        _fields_ = [('items', Component * lib.test_event_capacity()), ('emitted', C.c_uint32),
+                    ('delivered', C.c_uint32), ('dropped', C.c_uint32)]
+
+    assert C.sizeof(Bus) == lib.test_event_bus_size()
+    assert Bus.emitted.offset == lib.test_event_counters_offset()
+    lib.Bus = Bus
     lib.pet_seq_program_valid.argtypes = [C.POINTER(SeqProgram)]; lib.pet_seq_program_valid.restype = C.c_bool
     lib.pet_seq_start.argtypes = [C.POINTER(SeqState), C.POINTER(SeqProgram)]
     lib.pet_seq_stop.argtypes = [C.POINTER(SeqState)]
@@ -237,13 +250,14 @@ def names(*values):
 
 
 def test_event_bus_bounds_fanout_queue_drop_and_hidden_delivery(core):
-    bus = Bus(); core.pet_cev_bus_reset(C.byref(bus))
+    bus = core.Bus(); core.pet_cev_bus_reset(C.byref(bus))
+    capacity = len(bus.items)
     assert core.pet_cev_name_valid(b'done') and not core.pet_cev_name_valid(b'a:b') and not core.pet_cev_name_valid(b'x' * 16)
-    for i in range(32):
+    for i in range(capacity):
         assert core.pet_cev_bus_subscribe(C.byref(bus), f'c{i}'.encode(), names('done'), 1)
-    assert not core.pet_cev_bus_subscribe(C.byref(bus), b'c32', names('done'), 1), '33rd component is refused'
+    assert not core.pet_cev_bus_subscribe(C.byref(bus), b'overflow', names('done'), 1), 'full catalog must refuse another subscription'
     assert not core.pet_cev_bus_subscribe(C.byref(bus), b'c0', names(*[f'n{i}' for i in range(8)]), 9), 'nine names are refused'
-    assert core.pet_cev_bus_emit(C.byref(bus), b'done') == 32 and core.pet_cev_bus_emit(C.byref(bus), b'other') == 0
+    assert core.pet_cev_bus_emit(C.byref(bus), b'done') == capacity and core.pet_cev_bus_emit(C.byref(bus), b'other') == 0
     assert core.pet_cev_bus_emit(C.byref(bus), b'a:b') == 0
     out = C.create_string_buffer(16)
     assert core.pet_cev_bus_pop(C.byref(bus), b'c5', out) and out.value == b'done' and not core.pet_cev_bus_pop(C.byref(bus), b'c5', out)

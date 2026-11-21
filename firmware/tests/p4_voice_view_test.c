@@ -45,6 +45,13 @@ int main(void) {
   pet_p4_build_view_model(&state, &view);
   assert(view.show_voice_overlay);
   state.session_voice_active = false;
+  strcpy(state.current_speech, "正在处理");
+  pet_p4_build_view_model(&state, &view);
+  assert(!view.show_voice_overlay && view.show_bubble && !view.compact_bubble);
+  assert(strcmp(view.body, "正在处理") == 0);
+
+  strcpy(state.current_state, "idle");
+  strcpy(state.current_speech, "休息中");
   pet_p4_build_view_model(&state, &view);
   assert(!view.show_voice_overlay && view.show_bubble && view.compact_bubble);
   assert(strcmp(view.body, "休息中") == 0);

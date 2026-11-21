@@ -45,7 +45,7 @@ def test_runtime_task_mutex_contended_snapshots_and_fail_closed_guards(tmp_path)
             guard=scope.split('miniapp_runtime_lock();',1)[1].split('miniapp_runtime_unlock();',1)[0]
             assert all(op not in guard for op in ('heap_caps_','fopen(','persist_','enqueue('))
         census=census.replace(scope,'',1)
-    install=function(code,'pet_p4_miniapp_install_commit')
+    install=function(code,'install_commit_fenced')
     prepare=install.split('pet_cext_publish_ticket_t media_ticket={0};',1)[1].split('if(ext_swap&&!miniapp_ext_prepare(',1)[0]
     assert prepare.count('miniapp_runtime_lock();')==prepare.count('miniapp_runtime_unlock();')==1
     assert 'const bool ext_swap=' in prepare
@@ -60,8 +60,9 @@ def test_runtime_task_mutex_contended_snapshots_and_fail_closed_guards(tmp_path)
             locked=section.split('miniapp_runtime_unlock();',1)[0]
             assert all(op not in locked for op in ('catalog_cursor_write(','storage_scope_','fopen(','malloc(','g_catalog_cursor_schedule('))
         census=census.replace(scope,'',1)
-    # 58: the original sfx scope only copies cue bits. No other scope grows.
-    assert census.count('miniapp_runtime_lock();') == 58
+    # 65: includes the merged WASM package/speech and filtered-center accessors.
+    # Preserve an exact census while the contention test below exercises snapshots.
+    assert census.count('miniapp_runtime_lock();') == 65
     for section in optional.split('miniapp_runtime_lock();')[1:]:
         locked=section.split('miniapp_runtime_unlock();',1)[0]
         assert all(operation not in locked for operation in

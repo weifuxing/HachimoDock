@@ -7,21 +7,37 @@
 #include <stdatomic.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <dirent.h>
+#include "pet_p4_file_cleanup.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#ifdef ESP_PLATFORM
-#include "pet_p4_resources_device.h"
-#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#if PET_P4_WASM_AUDIO
+#include "mbedtls/sha256.h"
+#endif
+#ifdef ESP_PLATFORM
+#include "freertos/task.h"
+#include "pet_p4_resources_device.h"
+#include "pet_p4_fs_activity.h"
+#include "esp_timer.h"
+#include "esp_spiffs.h"
+#endif
 static const char *TAG = "p4-cmedia";
 typedef struct { pet_cext_media_kind_t kind; char id[PET_CEXT_ID_MAX]; uint32_t offset, size, next_index, last_offset, last_size; bool complete; } cmedia_file_t;
 #define CMEDIA_FILES (PET_SAMPLE_MAX_SLOTS + PET_CEXT_CLIP_MAX + PET_CEXT_BIG_MAX)
 static struct { uint8_t *arena; uint32_t used; cmedia_file_t files[CMEDIA_FILES]; unsigned count; } g_stage;
+#if PET_P4_WASM_AUDIO
+static struct { uint8_t *bytes; size_t size, used; } g_speech_stage;
+#endif
 typedef struct {
   uint8_t *samples; uint32_t sample_offset[PET_SAMPLE_MAX_SLOTS], sample_frames[PET_SAMPLE_MAX_SLOTS]; unsigned sample_count;
   uint8_t *clip; size_t clip_bytes; pet_cext_clip_t clip_meta; bool clip_ready;
   char big_path[PET_CEXT_BIG_MAX][32]; pet_cext_big_t big_meta[PET_CEXT_BIG_MAX]; uint8_t *big_table[PET_CEXT_BIG_MAX]; unsigned big_count;
+#if PET_P4_WASM_AUDIO
+  uint8_t *speech;
+  size_t speech_size;
+#endif
   uint32_t generation;
   unsigned pins;
 } cmedia_bank_t;
@@ -64,8 +80,145 @@ static void media_path(size_t slot, uint8_t generation, pet_cext_media_kind_t ki
 static uint32_t kind_budget(pet_cext_media_kind_t kind) {
   return kind == PET_CEXT_MEDIA_SAMPLE ? PET_SAMPLE_MAX_BYTES + PET_CEXT_SAMPLE_HEADER : kind == PET_CEXT_MEDIA_CLIP ? PET_CEXT_CLIP_MAX_BYTES : PET_CEXT_BIG_BUDGET_BYTES;
 }
-void pet_cmedia_stage_reset(void) { free(g_stage.arena); g_stage.arena = NULL; g_stage.used = 0; g_stage.count = 0; memset(g_stage.files, 0, sizeof(g_stage.files)); }
 static void fail(char *e, size_t n, const char *m) { if (e && n) snprintf(e, n, "%s", m); }
+
+void pet_cmedia_stage_reset(void) {
+  free(g_stage.arena);
+  memset(&g_stage, 0, sizeof(g_stage));
+#if PET_P4_WASM_AUDIO
+  free(g_speech_stage.bytes);
+  memset(&g_speech_stage, 0, sizeof(g_speech_stage));
+#endif
+}
+
+#if PET_P4_WASM_AUDIO
+static void speech_path(size_t slot, uint8_t generation, bool temporary, char path[32]) {
+  snprintf(path, 32, "/spiffs/p4m%02u-%u-a0.%s", (unsigned)slot, (unsigned)generation,
+           temporary ? "tmp" : "bin");
+}
+
+static bool speech_digest_matches(const uint8_t hash[32], const char *expected) {
+  static const char hex[] = "0123456789abcdef";
+  for (unsigned i = 0; i < 32; ++i)
+    if (expected[i * 2] != hex[hash[i] >> 4] || expected[i * 2 + 1] != hex[hash[i] & 15])
+      return false;
+  return true;
+}
+
+/* Yield between VFS calls so a bank read or write cannot monopolize the
+ * protocol worker or hold the flash cache disabled across scheduler ticks. */
+static void speech_io_yield(void) {
+#ifdef ESP_PLATFORM
+  vTaskDelay(1);
+#endif
+}
+
+static bool speech_matches(const uint8_t *bytes, size_t size, const char *expected) {
+  uint8_t hash[32];
+  if (!pet_cext_speech_bank_valid(bytes, size)) return false;
+  mbedtls_sha256_context ctx;
+  mbedtls_sha256_init(&ctx);
+  bool ok = mbedtls_sha256_starts(&ctx, 0) == 0;
+  for (size_t offset = 0; ok && offset < size;) {
+    const size_t remaining = size - offset;
+    const size_t length = remaining > 4096 ? 4096 : remaining;
+    ok = mbedtls_sha256_update(&ctx, bytes + offset, length) == 0;
+    offset += length;
+    speech_io_yield();
+  }
+  ok = ok && mbedtls_sha256_finish(&ctx, hash) == 0 && speech_digest_matches(hash, expected);
+  mbedtls_sha256_free(&ctx);
+  return ok;
+}
+
+static bool speech_write(const char *tmp, const char *path, const uint8_t *bytes, size_t size) {
+  FILE *f = fopen(tmp, "wb");
+  if (!f) return false;
+  bool ok = setvbuf(f, NULL, _IONBF, 0) == 0;
+  for (size_t offset = 0; ok && offset < size;) {
+    size_t length = size - offset;
+    if (length > 4096) length = 4096;
+    ok = fwrite(bytes + offset, 1, length, f) == length;
+    offset += length;
+    speech_io_yield();
+  }
+  if (fclose(f) != 0) ok = false;
+  if (ok) ok = rename(tmp, path) == 0;
+  if (!ok) unlink(tmp);
+  return ok;
+}
+
+static uint8_t *speech_read(const char *path, size_t *size) {
+  struct stat info;
+  if (stat(path, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size <= 0 ||
+      (uint64_t)info.st_size > PET_CEXT_SPEECH_MAX_BYTES) return NULL;
+  FILE *f = fopen(path, "rb");
+  if (!f) return NULL;
+  *size = (size_t)info.st_size;
+  uint8_t *bytes = heap_caps_malloc(*size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  bool ok = bytes != NULL;
+  for (size_t offset = 0; ok && offset < *size;) {
+    size_t length = *size - offset;
+    if (length > 4096) length = 4096;
+    ok = fread(bytes + offset, 1, length, f) == length;
+    offset += length;
+    speech_io_yield();
+  }
+  ok = ok && fgetc(f) == EOF && !ferror(f);
+  if (fclose(f) != 0) ok = false;
+  if (ok) return bytes;
+  free(bytes);
+  return NULL;
+}
+
+bool pet_cmedia_speech_stage(size_t file_size, size_t offset, const uint8_t *bytes,
+                             size_t len, char *error, size_t error_size) {
+  if (!bytes || !len || file_size < PET_CEXT_SPEECH_HEADER + 8u + PET_CEXT_SPEECH_BLOCK_BYTES ||
+      file_size > PET_CEXT_SPEECH_MAX_BYTES || offset != g_speech_stage.used ||
+      (g_speech_stage.size && g_speech_stage.size != file_size) ||
+      offset > file_size || len > file_size - offset) {
+    fail(error, error_size, "invalid WASM speech sidecar length or offset");
+    return false;
+  }
+  if (!g_speech_stage.bytes) {
+    g_speech_stage.bytes = heap_caps_malloc(file_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!g_speech_stage.bytes) {
+      fail(error, error_size, "WASM speech staging memory unavailable");
+      return false;
+    }
+    g_speech_stage.size = file_size;
+  }
+  memcpy(g_speech_stage.bytes + offset, bytes, len);
+  g_speech_stage.used += len;
+  return true;
+}
+
+/* Catalog recovery verifies the selected generation before exposing its entry.
+ * Stream the file so a catalog scan does not allocate a second bank. */
+bool pet_cmedia_speech_verify_file(size_t slot, uint8_t generation, const char *expected) {
+  if (!expected || strlen(expected) != 64 || slot >= PET_CEV_COMPONENTS || generation > 1)
+    return false;
+  char path[32];
+  speech_path(slot, generation, false, path);
+  FILE *f = fopen(path, "rb");
+  if (!f) return false;
+  uint8_t buffer[2048], hash[32];
+  mbedtls_sha256_context ctx;
+  mbedtls_sha256_init(&ctx);
+  bool ok = mbedtls_sha256_starts(&ctx, 0) == 0;
+  size_t total = 0, length;
+  while (ok && (length = fread(buffer, 1, sizeof(buffer), f)) != 0) {
+    total += length;
+    ok = total <= PET_CEXT_SPEECH_MAX_BYTES &&
+         mbedtls_sha256_update(&ctx, buffer, length) == 0;
+    speech_io_yield();
+  }
+  ok = ok && feof(f) && !ferror(f) && total >= PET_CEXT_SPEECH_HEADER + 8u + PET_CEXT_SPEECH_BLOCK_BYTES
+      && mbedtls_sha256_finish(&ctx, hash) == 0 && speech_digest_matches(hash, expected);
+  mbedtls_sha256_free(&ctx);
+  return fclose(f) == 0 && ok;
+}
+#endif
 bool pet_cmedia_stage_chunk(pet_cext_media_kind_t kind, const char *id, uint32_t index, const uint8_t *data, size_t len, char *error, size_t size) {
   if (kind < PET_CEXT_MEDIA_SAMPLE || kind > PET_CEXT_MEDIA_BIG || !pet_cev_name_valid(id) || !data || !len || len > kind_budget(kind) || index == UINT32_MAX) { fail(error, size, "invalid component media chunk"); return false; }
   if (!g_stage.arena) g_stage.arena = heap_caps_malloc(PET_CMEDIA_STAGE_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -116,7 +269,11 @@ static const cmedia_file_t *staged(pet_cext_media_kind_t kind, const char *id) {
   return NULL;
 }
 bool pet_cmedia_stage_matches(const pet_cext_runtime_t *r, char *error, size_t size) {
-  if (!r) return g_stage.count == 0;
+  if (!r) return g_stage.count == 0
+#if PET_P4_WASM_AUDIO
+      && !g_speech_stage.size
+#endif
+      ;
   if (r->sample_count > PET_SAMPLE_MAX_SLOTS || r->clip_count > PET_CEXT_CLIP_MAX || r->big_count > PET_CEXT_BIG_MAX) return false;
   for (unsigned i = 0; i < r->sample_count; i++) {
     const cmedia_file_t *f = staged(PET_CEXT_MEDIA_SAMPLE, r->sample[i].id);
@@ -130,6 +287,15 @@ bool pet_cmedia_stage_matches(const pet_cext_runtime_t *r, char *error, size_t s
     const cmedia_file_t *f = staged(PET_CEXT_MEDIA_BIG, r->bigs[i].id); pet_cext_big_t meta;
     if (!f || !pet_cext_big_header(g_stage.arena + f->offset, f->size, &meta) || meta.w != r->bigs[i].w || meta.h != r->bigs[i].h) { fail(error, size, "declared big image is missing or malformed"); return false; }
   }
+#if PET_P4_WASM_AUDIO
+  const bool declared = r->speech_sha256[0] != 0;
+  if (declared != (g_speech_stage.size != 0) ||
+      (declared && (g_speech_stage.used != g_speech_stage.size ||
+          !speech_matches(g_speech_stage.bytes, g_speech_stage.size, r->speech_sha256)))) {
+    fail(error, size, "WASM speech sidecar is missing, malformed, or differs from SHA-256");
+    return false;
+  }
+#endif
   if (g_stage.count != (unsigned)r->sample_count + r->clip_count + r->big_count) { fail(error, size, "undeclared component media file"); return false; }
   return true;
 }
@@ -140,35 +306,128 @@ static bool write_atomic(const char *tmp, const char *final, const uint8_t *data
   if (!ok) unlink(tmp);
   return ok;
 }
-/* Fixed namespace scan; conservative admission includes old files plus staged bytes. */
+/* Count actual files in the reserved namespace. A failed or interrupted
+ * directory read is never accepted as proof of unused media space. */
+enum { CMEDIA_BUDGET_SCAN_US = 5000000 };
+static bool budget_scan_current(uint64_t epoch, int64_t deadline, unsigned step) {
+#ifdef ESP_PLATFORM
+  if (step && step % 16 == 0) vTaskDelay(1);
+  uint64_t observed;
+  return esp_timer_get_time() < deadline && pet_fs_activity_idle_epoch(&observed)
+    && observed == epoch;
+#else
+  (void)epoch; (void)deadline; (void)step;
+  return true;
+#endif
+}
+
+static bool media_budget_name(const char *name) {
+  // p4m00-0-s0.bin; count both published and spare/temporary generations.
+  if (strlen(name) != 14 || memcmp(name, "p4m", 3)
+      || name[3] < '0' || name[3] > '9' || name[4] < '0' || name[4] > '9'
+      || name[5] != '-' || (name[6] != '0' && name[6] != '1') || name[7] != '-'
+      || name[9] < '0' || name[9] > '9'
+      || (strcmp(name + 10, ".bin") && strcmp(name + 10, ".tmp"))) return false;
+  const unsigned slot = (unsigned)(name[3] - '0') * 10 + (unsigned)(name[4] - '0');
+  const unsigned index = (unsigned)(name[9] - '0');
+  return slot < PET_CEV_COMPONENTS && ((name[8] == 's' && index < PET_SAMPLE_MAX_SLOTS)
+    || (name[8] == 'c' && index < PET_CEXT_CLIP_MAX)
+    || (name[8] == 'b' && index < PET_CEXT_BIG_MAX)
+#if PET_P4_WASM_AUDIO
+    || (name[8] == 'a' && index == 0)
+#endif
+  );
+}
+
 static bool disk_budget_ok(void) {
   size_t total = g_stage.used;
+#if PET_P4_WASM_AUDIO
+  total += g_speech_stage.used;
+#endif
   if (total > PET_CMEDIA_DEVICE_BUDGET_BYTES) return false;
-  /* An empty media stage cannot increase media storage usage. Ordinary
-   * widgets must not pay 896 negative SPIFFS stat lookups on every commit:
-   * each missing name scans the filesystem and can starve the protocol task.
-   * Staging validation, pending-publication exclusion and spare-generation
-   * cleanup still run in pet_cmedia_persist/persist_locked below. */
-  if (total == 0) return true;
+  if (!total) return true;
+
+  uint64_t epoch = 0;
+  int64_t deadline = 0;
+#ifdef ESP_PLATFORM
+  deadline = esp_timer_get_time() + CMEDIA_BUDGET_SCAN_US;
+  // Allocated SPIFFS payload pages bound all existing media file bytes.
+  // Most devices can prove the budget with this O(1) allocation counter.
+  size_t used = SIZE_MAX;
+  if (esp_spiffs_info("storage", NULL, &used) == ESP_OK
+      && used <= PET_CMEDIA_DEVICE_BUDGET_BYTES - total) return true;
+  if (!pet_fs_activity_idle_epoch(&epoch)) return false;
+#endif
+  DIR *directory = opendir("/spiffs");
+  if (!directory) return false;
+
+  /* Finish enumeration before stat: an ESP-IDF SPIFFS lookup can leave a
+   * shared errno behind, which older VFS versions can report at directory EOF. */
+  enum { BUDGET_FILES = CMEDIA_FILES + (PET_P4_WASM_AUDIO ? 1 : 0),
+         MEDIA_NAMES = PET_CEV_COMPONENTS * 4 * BUDGET_FILES };
+  uint8_t present[(MEDIA_NAMES + 7) / 8] = {0};
+  bool complete = false;
+  unsigned step = 0;
+  for (; step <= PET_FILE_CLEANUP_MAX_ENTRIES && budget_scan_current(epoch, deadline, step); ++step) {
+    errno = 0;
+    const struct dirent *entry = readdir(directory);
+    if (!entry) { complete = errno == 0; break; }
+    if (!memchr(entry->d_name, 0, sizeof(entry->d_name))) break;
+    const char *name = entry->d_name;
+    if (!media_budget_name(name)) continue;
+    const unsigned slot = (unsigned)(name[3] - '0') * 10 + (unsigned)(name[4] - '0');
+    const unsigned generation = (unsigned)(name[6] - '0');
+    const unsigned type_base = name[8] == 'a' ? CMEDIA_FILES : name[8] == 's' ? 0 : PET_SAMPLE_MAX_SLOTS
+      + (name[8] == 'c' ? 0 : PET_CEXT_CLIP_MAX);
+    const unsigned item = type_base + (unsigned)(name[9] - '0');
+    const unsigned bit = ((slot * 2 + generation) * BUDGET_FILES + item) * 2
+      + (name[11] == 't');
+    const uint8_t mask = (uint8_t)(1u << (bit % 8));
+    if (present[bit / 8] & mask) break;
+    present[bit / 8] |= mask;
+  }
+  if (closedir(directory) != 0 || !complete || !budget_scan_current(epoch, deadline, 0)) return false;
+
   char path[32];
-  for (size_t slot = 0; slot < PET_CEV_COMPONENTS; slot++)
-    for (unsigned gen = 0; gen < 2; gen++)
-      for (pet_cext_media_kind_t kind = PET_CEXT_MEDIA_SAMPLE; kind <= PET_CEXT_MEDIA_BIG; kind++) {
-        unsigned count = kind == PET_CEXT_MEDIA_SAMPLE ? PET_SAMPLE_MAX_SLOTS : kind == PET_CEXT_MEDIA_CLIP ? PET_CEXT_CLIP_MAX : PET_CEXT_BIG_MAX;
-        for (unsigned i = 0; i < count; i++) for (unsigned tmp = 0; tmp < 2; tmp++) {
-          struct stat info;
-          media_path(slot, gen, kind, i, tmp != 0, path, sizeof(path));
-          if (stat(path, &info)) { if (errno == ENOENT) continue; return false; }
-          if (!S_ISREG(info.st_mode) || info.st_size < 0 || (uint64_t)info.st_size > PET_CMEDIA_DEVICE_BUDGET_BYTES - total) return false;
-          total += (size_t)info.st_size;
-        }
+  for (unsigned bit = 0; bit < MEDIA_NAMES; ++bit) {
+    if (!(present[bit / 8] & (1u << (bit % 8)))) continue;
+    if (!budget_scan_current(epoch, deadline, ++step)) return false;
+    const unsigned pair = bit / 2;
+    unsigned index = pair % BUDGET_FILES;
+#if PET_P4_WASM_AUDIO
+    if (index == CMEDIA_FILES) {
+      speech_path(pair / BUDGET_FILES / 2, (pair / BUDGET_FILES) % 2, bit % 2 != 0, path);
+    } else
+#endif
+    {
+    pet_cext_media_kind_t kind = PET_CEXT_MEDIA_SAMPLE;
+    if (index >= PET_SAMPLE_MAX_SLOTS) {
+      index -= PET_SAMPLE_MAX_SLOTS;
+      kind = PET_CEXT_MEDIA_CLIP;
+      if (index >= PET_CEXT_CLIP_MAX) {
+        index -= PET_CEXT_CLIP_MAX;
+        kind = PET_CEXT_MEDIA_BIG;
       }
-  return true;
+    }
+    media_path(pair / BUDGET_FILES / 2, (pair / BUDGET_FILES) % 2, kind, index,
+      bit % 2 != 0, path, sizeof(path));
+    }
+    struct stat info;
+    if (stat(path, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size < 0
+        || (uint64_t)info.st_size > PET_CMEDIA_DEVICE_BUDGET_BYTES - total) return false;
+    total += (size_t)info.st_size;
+  }
+  return budget_scan_current(epoch, deadline, 0);
 }
 static bool persist_locked(size_t slot, uint8_t generation, const pet_cext_runtime_t *r);
 bool pet_cmedia_persist(size_t slot, uint8_t generation, const pet_cext_runtime_t *r) {
   if (slot >= PET_CEV_COMPONENTS || generation > 1 || !pet_cmedia_stage_matches(r, NULL, 0)) return false;
-  lock(); bool ok = !g_pending.serial && disk_budget_ok() && persist_locked(slot, generation, r); unlock(); return ok;
+  lock();
+  bool ok = !g_pending.serial && disk_budget_ok();
+  if (ok) ok = persist_locked(slot, generation, r);
+  else ESP_LOGW(TAG, "component media budget unavailable or exceeded");
+  unlock();
+  return ok;
 }
 static bool persist_locked(size_t slot, uint8_t generation, const pet_cext_runtime_t *r) {
   if (!r) return true;
@@ -185,6 +444,18 @@ static bool persist_locked(size_t slot, uint8_t generation, const pet_cext_runti
       if (!f || !write_atomic(tmp, path, g_stage.arena + f->offset, f->size)) { ESP_LOGW(TAG, "component media persist failed %s", path); return false; }
     }
   }
+#if PET_P4_WASM_AUDIO
+  speech_path(slot, generation, false, path);
+  speech_path(slot, generation, true, tmp);
+  /* The storage owner selected the spare generation. SPIFFS rename refuses
+   * existing names, so remove only the inactive sidecar before replacing it. */
+  if (unlink(path) != 0 && errno != ENOENT) return false;
+  if (r->speech_sha256[0]) {
+    if (!speech_write(tmp, path, g_speech_stage.bytes, g_speech_stage.used)) return false;
+  } else {
+    unlink(tmp);
+  }
+#endif
   return true;
 }
 void pet_cmedia_remove(size_t slot) {
@@ -198,6 +469,14 @@ void pet_cmedia_remove(size_t slot) {
         media_path(slot, generation, kind, i, false, path, sizeof(path)); unlink(path);
         media_path(slot, generation, kind, i, true, path, sizeof(path)); unlink(path);
       }
+#if PET_P4_WASM_AUDIO
+  for (uint8_t generation = 0; generation < 2; ++generation) {
+    speech_path(slot, generation, false, path);
+    unlink(path);
+    speech_path(slot, generation, true, path);
+    unlink(path);
+  }
+#endif
   unlock();
 }
 static uint8_t *read_file(const char *path, size_t max, size_t *out_size) {
@@ -209,15 +488,35 @@ static uint8_t *read_file(const char *path, size_t max, size_t *out_size) {
 }
 static void bank_free(cmedia_bank_t *bank) {
   free(bank->samples); free(bank->clip);
+#if PET_P4_WASM_AUDIO
+  free(bank->speech);
+#endif
   for (unsigned i = 0; i < PET_CEXT_BIG_MAX; i++) free(bank->big_table[i]);
   memset(bank, 0, sizeof(*bank));
 }
+static bool bank_visible(const cmedia_bank_t *bank) {
+  return bank->sample_count || bank->clip_ready || bank->big_count
+#if PET_P4_WASM_AUDIO
+      || bank->speech_size
+#endif
+      ;
+}
+
+static void bank_hide(cmedia_bank_t *bank) {
+  bank->sample_count = 0;
+  bank->clip_ready = false;
+  bank->big_count = 0;
+#if PET_P4_WASM_AUDIO
+  bank->speech_size = 0;
+#endif
+}
+
 static void reap_locked(void) {
   for (unsigned i = 0; i < PET_CMEDIA_LEASES; i++) {
     if (!(atomic_load(&g_leases[i].token) & CMEDIA_RELEASED)) continue;
     unsigned bank = g_leases[i].bank;
     g_reclaimed++; g_deferred_reclaimed++;
-    if (--g_banks[bank].pins == 0 && (bank != g_current || (!g_active.sample_count && !g_active.clip_ready && !g_active.big_count))) bank_free(&g_banks[bank]);
+    if (--g_banks[bank].pins == 0 && (bank != g_current || !bank_visible(&g_active))) bank_free(&g_banks[bank]);
     atomic_store(&g_leases[i].token, 0);
   }
 }
@@ -243,7 +542,7 @@ void pet_cmedia_unload(void) {
   if (g_pending.serial) { unlock(); return; }
   /* Detach visibility immediately; pinned buffers retire until their last unpin. */
   if (!g_active.pins) bank_free(&g_active);
-  g_active.sample_count = 0; g_active.clip_ready = false; g_active.big_count = 0;
+  bank_hide(&g_active);
   if (g_generation == UINT32_MAX) { g_generation = 0; g_generation_exhausted = true; }
   else if (!g_generation_exhausted) g_generation++;
   unlock();
@@ -258,7 +557,11 @@ bool pet_cmedia_prepare(size_t slot, uint8_t generation, const pet_cext_runtime_
   lock();
   if (g_pending.serial || g_prepare_serial == UINT64_MAX || g_generation_exhausted || g_generation == UINT32_MAX) { unlock(); return false; }
   if (r && (r->sample_count > PET_SAMPLE_MAX_SLOTS || r->clip_count > PET_CEXT_CLIP_MAX || r->big_count > PET_CEXT_BIG_MAX)) { unlock(); return false; }
-  if (!r || (!r->sample_count && !r->clip_count && !r->big_count)) {
+  if (!r || (!r->sample_count && !r->clip_count && !r->big_count
+#if PET_P4_WASM_AUDIO
+      && !r->speech_sha256[0]
+#endif
+      )) {
     g_pending.serial = ++g_prepare_serial; g_pending.generation = g_generation; g_pending.empty = true;
     *ticket = (pet_cmedia_ticket_t){g_pending.serial, g_generation}; unlock(); return true;
   }
@@ -326,6 +629,15 @@ bool pet_cmedia_prepare(size_t slot, uint8_t generation, const pet_cext_runtime_
       if (ok) { g_active.big_meta[i] = r->bigs[i]; g_active.big_meta[i].tile_w = tw; g_active.big_meta[i].tile_h = th; g_active.big_meta[i].cols = header[4]; g_active.big_meta[i].rows = header[5]; g_active.big_meta[i].bytes = (uint32_t) total; g_active.big_count++; }
     }
   }
+#if PET_P4_WASM_AUDIO
+  if (ok && r->speech_sha256[0]) {
+    size_t size = 0;
+    speech_path(slot, generation, false, path);
+    g_active.speech = speech_read(path, &size);
+    ok = g_active.speech && speech_matches(g_active.speech, size, r->speech_sha256);
+    if (ok) g_active.speech_size = size;
+  }
+#endif
   if (ok) {
     g_pending.serial = ++g_prepare_serial; g_pending.generation = g_generation;
     g_pending.bank = target; g_pending.empty = false;
@@ -344,7 +656,7 @@ bool pet_cmedia_commit(pet_cmedia_ticket_t *ticket) {
   if (!ticket_current(ticket)) { unlock(); return false; }
   unsigned previous = g_current;
   if (!g_pending.empty) g_current = g_pending.bank;
-  else { g_active.sample_count = 0; g_active.clip_ready = false; g_active.big_count = 0; }
+  else bank_hide(&g_active);
   if (!g_banks[previous].pins) bank_free(&g_banks[previous]);
   g_active.generation = ++g_generation;
   memset(&g_pending, 0, sizeof(g_pending)); memset(ticket, 0, sizeof(*ticket));
@@ -366,6 +678,25 @@ static uint64_t pin_locked(void) {
   }
   return 0;
 }
+#if PET_P4_WASM_AUDIO
+bool pet_cmedia_speech_pin_try_at(unsigned index, uint32_t expected, pet_cmedia_speech_lease_t *out) {
+  if (!out) return false;
+  *out = (pet_cmedia_speech_lease_t){0};
+  if (!expected || !try_lock()) return false;
+  uint32_t offset, length;
+  if (expected == g_generation &&
+      pet_cext_speech_cue(g_active.speech, g_active.speech_size, index, &offset, &length)) {
+    out->token = pin_locked();
+    if (out->token) {
+      out->data = g_active.speech + offset;
+      out->bytes = length;
+    }
+  }
+  unlock();
+  return out->token != 0;
+}
+#endif
+
 bool pet_cmedia_sample_pin(unsigned index, pet_cmedia_sample_lease_t *out) {
   if (!out) return false;
   memset(out, 0, sizeof(*out)); lock();
@@ -423,7 +754,7 @@ bool pet_cmedia_unpin(uint64_t token) {
     if (!atomic_compare_exchange_strong(&g_leases[i].token, &expected, 0)) continue;
     unsigned bank = g_leases[i].bank;
     g_reclaimed++;
-    if (--g_banks[bank].pins == 0 && (bank != g_current || (!g_active.sample_count && !g_active.clip_ready && !g_active.big_count))) bank_free(&g_banks[bank]);
+    if (--g_banks[bank].pins == 0 && (bank != g_current || !bank_visible(&g_active))) bank_free(&g_banks[bank]);
     unlock(); return true;
   }
   unlock(); return false;
@@ -496,6 +827,9 @@ bool pet_cmedia_stats(pet_cmedia_stats_t *out) {
   out->tokens_reclaimed = g_reclaimed; out->deferred_reclaimed = g_deferred_reclaimed;
   for (unsigned i = 0; i < PET_CMEDIA_BANKS; i++) {
     const cmedia_bank_t *b = &g_banks[i]; bool live = b->samples || b->clip;
+#if PET_P4_WASM_AUDIO
+    live = live || b->speech;
+#endif
     if (b->samples) out->sample_alloc_bytes += PET_SAMPLE_BUDGET_BYTES + PET_SAMPLE_MAX_SLOTS * PET_CEXT_SAMPLE_HEADER;
     if (b->clip) out->clip_alloc_bytes += PET_CEXT_CLIP_MAX_BYTES;
     for (unsigned j = 0; j < PET_CEXT_BIG_MAX; j++) if (b->big_table[j]) {

@@ -87,9 +87,9 @@ def test_actual_unchanged_helper_compares_all_resources_preserving_live_state(tm
 #define MINIAPP_SPRITE_FILE_HEADER_SIZE 8
 typedef struct {unsigned frame_width,frame_height,frames,fps,data_offset,data_length;} pet_p4_miniapp_sprite_t;
 typedef struct {unsigned count,data_length;uint8_t pixels[1024];pet_p4_miniapp_sprite_t items[4];} pack_t;
-typedef struct {char widget_id[48],title[64];unsigned resource_state,slot,package_generation;uint32_t widget_checksum,buttons_checksum,sprites_checksum;} miniapp_catalog_item_t;
+typedef struct {char widget_id[48],title[64];unsigned resource_state,slot,package_generation;uint32_t widget_checksum,buttons_checksum,sprites_checksum,center_title_checksum;char package_metadata[53];} miniapp_catalog_item_t;
 typedef struct {bool active;char widget_id[48];struct {char title[64];}view;} miniapp_runtime_t;
-typedef struct {bool preserve_unchanged,repair_resources;char widget_id[48],widget_json[1024],buttons_json[1024];size_t widget_len,buttons_len;pack_t sprites;} staging_t;
+typedef struct {bool preserve_unchanged,repair_resources;char widget_id[48],widget_json[1024],buttons_json[1024];size_t widget_len,buttons_len;pack_t sprites;char package_metadata[53];} staging_t;
 typedef struct {bool active;} pet_storage_physical_scope_t;
 static bool audio,owner=true,physical,deny_begin,revoke_finish;
 static unsigned model_lock,begins,finishes;
@@ -116,33 +116,33 @@ static void put(const char*p,const void*b,size_t n){FILE*f=fopen(p,"wb");assert(
 int main(void){
  miniapp_runtime_t next=g_runtime,original=g_runtime;
  put("widget.bin",g_staging.widget_json,7);put("buttons.bin",g_staging.buttons_json,2);
- assert(preserve_unchanged_package(&next)==1&&begins==1&&finishes==1);
+ assert(preserve_unchanged_package(&next,0)==1&&begins==1&&finishes==1);
  assert(!memcmp(&original,&g_runtime,sizeof(original))&&g_image_revision==8&&!physical);
- g_staging.widget_json[1]^=1;assert(!preserve_unchanged_package(&next));g_staging.widget_json[1]^=1;
- put("buttons.bin","[]x",3);assert(!preserve_unchanged_package(&next));put("buttons.bin","[]",2);
+ g_staging.widget_json[1]^=1;assert(!preserve_unchanged_package(&next,0));g_staging.widget_json[1]^=1;
+ put("buttons.bin","[]x",3);assert(!preserve_unchanged_package(&next,0));put("buttons.bin","[]",2);
  g_staging.sprites.count=1;g_staging.sprites.data_length=600;g_catalog[0].sprites_checksum=123;
  pet_p4_miniapp_sprite_t*s=&g_staging.sprites.items[0];*s=(pet_p4_miniapp_sprite_t){16,16,1,8,0,600};
  uint8_t image[608]={'P','4','S','1',16,16,1,8};
  for(unsigned i=0;i<600;i++)image[i+8]=g_staging.sprites.pixels[i]=(uint8_t)(i*17);
- put("sprite.bin",image,sizeof(image));assert(preserve_unchanged_package(&next)==1);
- image[0]^=1;put("sprite.bin",image,sizeof(image));assert(!preserve_unchanged_package(&next));image[0]^=1;
- image[408]^=1;put("sprite.bin",image,sizeof(image));assert(!preserve_unchanged_package(&next));image[408]^=1;
- s->fps=0;put("sprite.bin",image+8,600);assert(preserve_unchanged_package(&next)==1);
- s->data_length=601;assert(!preserve_unchanged_package(&next));s->data_length=600;
- g_staging.repair_resources=true;assert(!preserve_unchanged_package(&next));g_staging.repair_resources=false;
- g_builtin_sync_in_progress=true;assert(!preserve_unchanged_package(&next));g_builtin_sync_in_progress=false;
- for(unsigned state=0;state<4;state++)if(state!=1){g_catalog[0].resource_state=state;assert(!preserve_unchanged_package(&next));}g_catalog[0].resource_state=1;
- g_runtime.active=false;assert(!preserve_unchanged_package(&next));g_runtime.active=true;
- g_catalog_selected=1;assert(!preserve_unchanged_package(&next));g_catalog_selected=0;
- g_staging.preserve_unchanged=false;assert(!preserve_unchanged_package(&next));g_staging.preserve_unchanged=true;
- deny_begin=true;assert(preserve_unchanged_package(&next)==-1);deny_begin=false;
- audio=true;assert(preserve_unchanged_package(&next)==-1);audio=false;
- revoke_finish=true;assert(preserve_unchanged_package(&next)==-1&&!physical);owner=true;
+ put("sprite.bin",image,sizeof(image));assert(preserve_unchanged_package(&next,0)==1);
+ image[0]^=1;put("sprite.bin",image,sizeof(image));assert(!preserve_unchanged_package(&next,0));image[0]^=1;
+ image[408]^=1;put("sprite.bin",image,sizeof(image));assert(!preserve_unchanged_package(&next,0));image[408]^=1;
+ s->fps=0;put("sprite.bin",image+8,600);assert(preserve_unchanged_package(&next,0)==1);
+ s->data_length=601;assert(!preserve_unchanged_package(&next,0));s->data_length=600;
+ g_staging.repair_resources=true;assert(!preserve_unchanged_package(&next,0));g_staging.repair_resources=false;
+ g_builtin_sync_in_progress=true;assert(!preserve_unchanged_package(&next,0));g_builtin_sync_in_progress=false;
+ for(unsigned state=0;state<4;state++)if(state!=1){g_catalog[0].resource_state=state;assert(!preserve_unchanged_package(&next,0));}g_catalog[0].resource_state=1;
+ g_runtime.active=false;assert(!preserve_unchanged_package(&next,0));g_runtime.active=true;
+ g_catalog_selected=1;assert(!preserve_unchanged_package(&next,0));g_catalog_selected=0;
+ g_staging.preserve_unchanged=false;assert(!preserve_unchanged_package(&next,0));g_staging.preserve_unchanged=true;
+ deny_begin=true;assert(preserve_unchanged_package(&next,0)==-1);deny_begin=false;
+ audio=true;assert(preserve_unchanged_package(&next,0)==-1);audio=false;
+ revoke_finish=true;assert(preserve_unchanged_package(&next,0)==-1&&!physical);owner=true;
  assert(!memcmp(&original,&g_runtime,sizeof(original))&&g_image_revision==8&&!physical&&!model_lock);return 0;
 }
 '''
     run(tmp_path,code)
-    commit=function(text,'pet_p4_miniapp_install_commit')
+    commit=function(text,'install_commit_fenced')
     assert commit.index('parse_runtime(')<commit.index('preserve_unchanged_package(')<commit.index('background_prepare_replace(')<commit.index('write_spare_package_json(')
     branch=commit.split('if(unchanged==1){',1)[1].split('#endif',1)[0]
     assert all(word not in branch for word in ('g_runtime =','g_catalog_selected =','g_image_revision++','background_','write_','persist_'))

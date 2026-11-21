@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 from PIL import Image,ImageDraw,ImageFont
 
-ROOT=Path(__file__).resolve().parents[1]/'builtin-clawpkgs/daily-news'
+ROOT=Path(__file__).resolve().parents[1]/'optional-clawpkgs/daily-news'
 def save(name,value):
     path=ROOT/name;path.parent.mkdir(parents=True,exist_ok=True)
     path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n')

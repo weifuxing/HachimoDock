@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+workspace="$HOME/.claw-pet/authoring"
+if [ ! -r "$workspace/desktop-path" ] || ! IFS= read -r desktop < "$workspace/desktop-path" || [ ! -x "$desktop" ]; then
+    printf '%s\n' '请在当前客户端打开「组件中心 → 创建组件」以更新 PetUI 命令。' >&2
+    exit 1
+fi
+exec "$desktop" --petui "$@"

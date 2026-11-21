@@ -2,7 +2,7 @@
  * [Input] Consume the sidebar shell in `pc/src/App.jsx`[Pos], plus the setup and dashboard flows rendered below it.
  * [Output] Provide the token-driven Pet Manager visual language, including unified page/card/control/modal primitives, a semantic shared Button hierarchy, USB-only first-run and dashboard status surfaces without Wi-Fi configuration chrome, first-visit page onboarding with compact reopenable quick-start dialogs, a unified Component Center library whose cards own device sync/removal state, keep type filters in a compact row below title actions, and show concise mapping-aware game instructions while pixel styling remains inside widget previews, a compact step-based device guide with hardware-shaped cues, a responsive centralized API-configuration workspace with official credential links and provider-readiness strips, the preview-first appearance workspace, editable per-component button mappings with compact/mobile layouts, image-first grouped Linux/P4 hardware controls with shared voice enablement, compact Agent rows, responsive shell/context navigation with inline firmware-update states, and a high-density voice command bar with API readiness, diagnostics, and platform-specific foreground-input recovery tips.
  * [Pos] style node in pc/src
- * [Sync] If this file changes, update this header and `pc/src/.folder.md`.
+ * [Sync] Keyboard configuration uses two top tabs with an accent underline. If this file changes, update this header and `pc/src/.folder.md`.
  */
 
 :root {
@@ -616,6 +616,26 @@ select:focus-visible {
   cursor: default;
 }
 
+.modal-card.firmware-board-dialog {
+  width: min(380px, 100%);
+}
+
+.firmware-board-dialog__options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.firmware-board-dialog__options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
 .sidebar-firmware-update__action {
   flex: 0 0 auto;
   min-width: 42px;
@@ -640,6 +660,7 @@ select:focus-visible {
   opacity: 0.7;
 }
 
+.sidebar-firmware-update__board,
 .sidebar-firmware-update__latest {
   flex: 0 0 auto;
   color: var(--text-muted);
@@ -1387,6 +1408,35 @@ select:focus-visible {
   align-items: end;
 }
 
+.bluetooth-shortcut-editor {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.bluetooth-shortcut-chord {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: var(--space-3);
+}
+
+.bluetooth-shortcut-chord__modifiers,
+.bluetooth-shortcut-actions {
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.bluetooth-shortcut-chord__modifiers label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .llm-network-settings { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
 .llm-network-settings summary { cursor: pointer; font-weight: 600; }
 .llm-network-settings__actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
@@ -1397,6 +1447,39 @@ select:focus-visible {
 }
 
 .api-settings__form--speech { grid-template-columns: minmax(240px, 1fr) auto; }
+.api-settings__form--devin { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.api-settings__devin-enable,
+.api-settings__devin-actions { grid-column: 1 / -1; }
+.api-settings__devin-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.modal-card.devin-config-dialog {
+  width: min(560px, calc(100% - var(--space-6) * 2));
+  margin: auto;
+  padding: 0;
+  color: var(--text);
+}
+.devin-config-dialog::backdrop {
+  background: var(--backdrop);
+  backdrop-filter: blur(3px);
+}
+.devin-config-dialog__body {
+  display: grid;
+  gap: var(--space-3);
+}
+.devin-config-dialog__body p {
+  margin: 0;
+}
+.devin-config-dialog__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  border-top: 1px solid var(--line);
+  padding: var(--space-3) var(--space-5);
+}
 
 .api-settings__secret-input {
   padding: 0 11px;
@@ -1496,6 +1579,10 @@ select:focus-visible {
 
 .api-settings__provider-result.is-error {
   color: var(--danger);
+}
+
+@media (max-width: 640px) {
+  .api-settings__form--devin { grid-template-columns: 1fr; }
 }
 
 .generation-api-status {
@@ -10464,7 +10551,7 @@ select:focus-visible {
   color: var(--text);
   font-size: 12px;
   line-height: 1.55;
-  white-space: normal;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 .component-generate-guidance {
@@ -12043,6 +12130,12 @@ select:focus-visible {
   stroke-width: 3;
   cursor: pointer;
   transition: filter 120ms ease, stroke-width 120ms ease;
+}
+
+.board-button-map__encoder--p4.is-hovered,
+.board-button-map__device [role="button"][aria-pressed="true"] .board-button-map__encoder--p4 {
+  stroke: var(--accent);
+  stroke-width: 4;
 }
 
 .board-button-map__encoder-cap {
@@ -14834,4 +14927,26 @@ select:focus-visible {
 
 .wifi-settings__note--warning {
   color: var(--warning);
+}
+
+.keyboard-configuration-tabs {
+  display: flex;
+  gap: 26px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 20px;
+}
+
+.keyboard-configuration-tabs > button {
+  border: 0;
+  border-bottom: 3px solid transparent;
+  background: none;
+  padding: 14px 0;
+  font: 600 14px var(--font-sans);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.keyboard-configuration-tabs > button[aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
 }

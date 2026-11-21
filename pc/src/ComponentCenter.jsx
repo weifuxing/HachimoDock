@@ -12,7 +12,7 @@
  *          short-lived session cache is only a stale placeholder; entry/reconnect and visible
  *          polling revalidate the board. Old requests cannot refresh a new connection's cache.
  *          Formal local deletion is a device-first transaction when the package is installed,
- *          so a failed board ACK never destroys the only local source. Generated formal-local
+ *          so an unconfirmed device removal never archives the local source. Generated formal-local
  *          packages lead newest-first; builtins follow in product order with stocks first.
  *          Same-id local/builtin sources share one card with an explicit source selector;
  *          newer valid resources are preferred without deleting custom revisions.
@@ -27,17 +27,16 @@
  *          in the user's current Agent conversation through the editable frog-pet example:
  *          petui validates and atomically publishes
  *          to the formal local library, which this page watches and refreshes without launching CLIs
- *          or exposing a separate manual package-import flow.
+ *          or exposing a separate manual package-import flow. Preview details load on demand with a cancellable loading dialog.
  * [Pos] component node in pc/src
  * [Sync] If this file changes, update this header and `pc/src/.folder.md`.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
 import {
   Clipboard,
   Gamepad2,
   LayoutGrid,
-  PackageCheck,
   Plus,
   RefreshCw,
   Sparkles,
@@ -47,10 +46,12 @@ import {
   X,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
+import { open as openPackageFile } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { watch } from "@tauri-apps/plugin-fs";
+import { centerTitleForSync } from "./lib/component-center-text.js";
 import { useExitProtection } from "./lib/exit-protection.js";
-import {syncAudioPreflight,deviceDeletePolicy,componentTransferError} from './component-center/component-transfer-policy.js';
+import {syncAudioPreflight,deviceDeletePolicy,componentTransferError,componentCommitOutcomeUnknown} from './component-center/component-transfer-policy.js';
 import { componentRequiresPc } from "./component-center/catalog-state.js";
 import { BUILTIN_COMPONENT_CENTER } from "./fixtures";
 import {
@@ -59,6 +60,7 @@ import {
   removeActiveComponentForTarget,
   writeActiveComponentForTarget,
 } from "./lib/active-component-store.js";
+import { wifiDeviceControl, wifiDeviceControlReady } from "./lib/wifi-device-control.js";
 import PageShell from "./shell/PageShell.jsx";
 import PageOnboardingModal, {
   usePageOnboarding,
@@ -67,7 +69,6 @@ import { useToast } from "./shell/ToastStack.jsx";
 import { useDeviceContext } from "./shell/DeviceContext.jsx";
 import { ONBOARDING_PAGE_IDS } from "./lib/onboarding-state.js";
 import CandidateCard, { resolveComponentKind } from "./component-center/CandidateCard.jsx";
-import ComponentPreviewModal from "./component-center/ComponentPreviewModal.jsx";
 import {ProgramBackgroundProvider} from './component-center/ProgramBackground.jsx';
 import CommunityCenter from "./component-center/CommunityCenter.jsx";
 import RemovedComponents from './component-center/RemovedComponents.jsx';
@@ -76,7 +77,7 @@ import {useDialogFocus} from './component-center/use-dialog-focus.js';
 import './component-center/center-workflow.css';
 import {devicePackageState, readCenterPreference, saveCenterPreference} from './component-center/catalog-state.js';
 import { isRoutedWidgetBinding } from "./component-center/binding-labels.js";
-import { isComponentVisible, mergeComponentCatalog, sortComponentsByCreatedAt } from "./component-center/library-order.js";
+import { componentUsbInstallBlockedReason, isComponentVisible, legacyAudioInstallBlockedReason, mergeComponentCatalog, sortComponentsByCreatedAt } from "./component-center/library-order.js";
 import {
   COMPONENT_CONTROL_OPTIONS,
   componentInputEventSlots,
@@ -85,7 +86,10 @@ import {
   globalExitControlLabel,
   optionForControlLabel,
   resolveGlobalExitEvents,
+  resolveGlobalButtonEvents,
 } from "./component-center/button-config.js";
+
+const ComponentPreviewModal = lazy(() => import("./component-center/ComponentPreviewModal.jsx"));
 
 const COMPONENT_BUTTON_OVERRIDES_STORAGE_KEY = "pet-manager:component-button-overrides:v1";
 // Formal-library source revisions that have been promoted into the builtin
@@ -116,15 +120,8 @@ const CONTROL_HELP = Object.fromEntries(
   COMPONENT_CONTROL_OPTIONS.map((option) => [option.label, option.help]),
 );
 
-function gameInstallBlockedReason(_component, _usb) {
-  // Optional device capability/ready snapshots do not prohibit installation.
-  // Package validity, target scope, capacity and actual native transfer errors
-  // remain authoritative. Installation never asserts optional features can run.
-  return "";
-}
-
 function localInstallBlockedReason(component) {
-  if (component?.valid !== false) return "";
+  if (component?.valid !== false) return legacyAudioInstallBlockedReason(component);
   const errors = Array.isArray(component.validationErrors)
     ? component.validationErrors.filter(Boolean)
     : [];
@@ -213,6 +210,7 @@ function componentTargetLabel(target) {
   if (target?.transport === "usb") {
     return `USB · ${target.boardDeviceId || "未识别设备"}`;
   }
+  if (target?.transport === "wifi") return `Wi-Fi · ${target.boardDeviceId}`;
   if (target?.transport === "ssh") {
     return `SSH · ${target.sshHost || "未设置主机"}`;
   }
@@ -294,14 +292,19 @@ function inventoryFailure(error, target) {
   };
 }
 
+function inventoryTargetKey(target) {
+  const identity = activeComponentTargetKey(target);
+  return target?.transport === "wifi" && identity ? `wifi:${identity}:${target.bootId}` : identity;
+}
+
 function readSessionDeviceInventory(target) {
-  const targetKey = activeComponentTargetKey(target);
+  const targetKey = inventoryTargetKey(target);
   const cached = targetKey ? SESSION_DEVICE_INVENTORY_CACHE.get(targetKey) : null;
   return cached && Date.now() - cached.checkedAt < 15000 ? cached : null;
 }
 
 function writeSessionDeviceInventory(target, inventory) {
-  const targetKey = activeComponentTargetKey(target);
+  const targetKey = inventoryTargetKey(target);
   if (targetKey && inventory) {
     SESSION_DEVICE_INVENTORY_CACHE.set(targetKey, {...inventory,checkedAt:Date.now()});
   }
@@ -309,19 +312,26 @@ function writeSessionDeviceInventory(target, inventory) {
 }
 
 function requestSessionDeviceInventory(target) {
-  const targetKey = activeComponentTargetKey(target);
+  const targetKey = inventoryTargetKey(target);
   if (!targetKey) return Promise.resolve(EMPTY_DEVICE_INVENTORY);
   const existingRequest = SESSION_DEVICE_INVENTORY_REQUESTS.get(targetKey);
   if (existingRequest) return existingRequest;
 
-  const request = invoke("list_device_widgets", {
+  const request = (target.transport === "wifi"
+    ? wifiDeviceControl(invoke, target, "readComponents").then((reply) => {
+        if (reply.complete !== true || reply.recoveryBlocked) {
+          throw new Error("设备组件清单不可用，请等待设备恢复。");
+        }
+        return { ...reply, transport: "wifi", freshness: "live" };
+      })
+    : invoke("list_device_widgets", {
     input: {
       transport: target.transport,
       boardDeviceId: target.boardDeviceId || "",
       sshHost: target.sshHost || "",
     },
-  }).then((result) => {
-    const inventory=normalizeDeviceInventory(result);
+  })).then((result) => {
+    const inventory={...normalizeDeviceInventory(result), scope:targetKey};
     return SESSION_DEVICE_INVENTORY_REQUESTS.get(targetKey)===request?writeSessionDeviceInventory(target,inventory):inventory;
   }).catch((error) => {
     console.warn("[ComponentCenter] list_device_widgets failed", error);
@@ -367,7 +377,7 @@ function componentActionErrorMessage(error) {
     return "当前设备固件不支持可靠的组件删除。请升级固件、重启 Pet Manager 并重新连接；本机状态尚未清除。";
   }
   if (/未收到板端组件 OTA 确认|widget.*ack.*timed out|timed out|timeout/i.test(detail)) {
-    return "设备没有确认删除，可能是连接中断或旧固件导致。请确认设备在线后重试；若仍出现，请升级固件并重启 Pet Manager。本机状态尚未清除。";
+    return "设备未确认删除。本机组件未清除。请关闭弹窗，刷新组件库核对设备状态。";
   }
   return detail || "设备操作失败";
 }
@@ -386,24 +396,34 @@ function matchesLibraryPath(component, clawpkgPath) {
     || pathContainsComponentId(clawpkgPath, component.id);
 }
 
-export default function ComponentCenter({ active = true }) {
+export default function ComponentCenter({ active = true, onOpenWirelessMaintenance }) {
   const { push } = useToast();
   const onboarding = usePageOnboarding(ONBOARDING_PAGE_IDS.COMPONENT_CENTER);
   const {
     usb,
+    wifi,
     currentComponent: deviceCurrentComponent,
   } = useDeviceContext();
   const configuredSshHost = readConfiguredComponentSshHost();
+  const wirelessInventoryReady = wifiDeviceControlReady(wifi) && wifi?.componentDelivery === true;
+  const wifiBoardDeviceId = wifi?.boardDeviceId;
+  const wifiBootId = wifi?.bootId;
   const liveInventoryTarget = useMemo(() => {
     const boardDeviceId = String(usb.boardDeviceId || "").trim();
     if (usb.connected && boardDeviceId) {
       return { transport: "usb", boardDeviceId };
     }
+    if (!usb.connected && wirelessInventoryReady && wifiBoardDeviceId && wifiBootId) {
+      return { transport: "wifi", boardDeviceId: wifiBoardDeviceId, bootId: wifiBootId,
+        controlTrusted: true, panelControl: true };
+    }
     return configuredSshHost
       ? { transport: "ssh", sshHost: configuredSshHost }
       : null;
-  }, [configuredSshHost, usb.boardDeviceId, usb.connected]);
+  }, [configuredSshHost, usb.boardDeviceId, usb.connected, wirelessInventoryReady, wifiBoardDeviceId, wifiBootId]);
   const deviceConnected = Boolean(liveInventoryTarget);
+  const readsGlobalButtons = liveInventoryTarget?.transport === "wifi"
+    || (liveInventoryTarget?.transport === "usb" && usb.runtime === "esp-p4");
 
   const [createDrawerOpen, setCreateDrawerOpen] = useState(false);
   const [trashOpen,setTrashOpen]=useState(false);
@@ -418,8 +438,19 @@ export default function ComponentCenter({ active = true }) {
   useEffect(()=>()=>{installEpoch.current++;},[]);
   const targetRef = useRef(liveInventoryTarget);
   targetRef.current = liveInventoryTarget;
-  const [skillInstalling, setSkillInstalling] = useState(false);
-  const [skillInstallResult, setSkillInstallResult] = useState(null);
+  const [authoring, setAuthoring] = useState({ phase: "preparing" });
+  const [projectBuilding, setProjectBuilding] = useState(false);
+  useEffect(() => {
+    if (!active) return undefined;
+    let cancelled = false;
+    setAuthoring({ phase: "preparing" });
+    invoke("prepare_petui_authoring").then((result) => {
+      if (!cancelled) setAuthoring({ ...result, phase: "ready" });
+    }).catch((error) => {
+      if (!cancelled) setAuthoring({ phase: "error", error: String(error) });
+    });
+    return () => { cancelled = true; };
+  }, [active, createDrawerOpen]);
   const [localComponents, setLocalComponents] = useState(()=>lastLibrarySnapshot?.components||[]);
   const [componentLibraryPath, setComponentLibraryPath] = useState(()=>lastLibrarySnapshot?.libraryPath||"");
   const [libraryReady,setLibraryReady] = useState(()=>lastLibrarySnapshot!==null);
@@ -441,7 +472,16 @@ export default function ComponentCenter({ active = true }) {
   const [libraryStatus,setLibraryStatus] = useState(()=>readCenterPreference('status','all'));
   const [centerTab,setCenterTab] = useState('local');
   useEffect(()=>{saveCenterPreference('kind',libraryKind);saveCenterPreference('query',libraryQuery);saveCenterPreference('status',libraryStatus);},[libraryKind,libraryQuery,libraryStatus]);
-  function openComponent(component) {if(!isComponentVisible(component))return;setBindingOverrides(savedBindingOverrides);setPreviewComponent(component);}
+  function openComponent(component) {
+    if (!isComponentVisible(component)) return;
+    const unavailable = legacyAudioInstallBlockedReason(component);
+    if (unavailable) {
+      push({ tone: "warning", title: component.name, message: unavailable });
+      return;
+    }
+    setBindingOverrides(savedBindingOverrides);
+    setPreviewComponent(component);
+  }
   function closeComponent() {setBindingOverrides(savedBindingOverrides);setPreviewComponent(null);}
   const [globalExitBinding, setGlobalExitBinding] = useState({
     boardDeviceId: "",
@@ -449,6 +489,9 @@ export default function ComponentCenter({ active = true }) {
     status: "idle",
   });
   const globalExitEvents = globalExitBinding.events;
+  const globalRealtimeEvents = globalExitBinding.realtimeEvents ?? [];
+  const reservedEvents = [...globalExitEvents, ...globalRealtimeEvents];
+  const previewComponentId = previewComponent?.id;
   const libraryRefreshRequestRef = useRef(0);
   const inventoryRefreshRequestRef = useRef(0);
   const componentActionDialogRef = useRef(null);
@@ -456,7 +499,7 @@ export default function ComponentCenter({ active = true }) {
   const componentActionReturnFocusRef = useRef(null);
   /* USB OTA install flow modal: idle | checking-usb | waiting-usb | installing | success | error */
   const [otaPhase, setOtaPhase] = useState("idle");
-  useExitProtection(otaPhase === "installing" || skillInstalling || componentActionPending ? "组件安装或更新尚未完成" : "");
+  useExitProtection(otaPhase === "installing" || projectBuilding || componentActionPending ? "组件安装或更新尚未完成" : "");
   const [otaProgress, setOtaProgress] = useState(null);
   const [communityRefreshKey, setCommunityRefreshKey] = useState(0);
   useEffect(() => {
@@ -475,31 +518,38 @@ export default function ComponentCenter({ active = true }) {
   }, [deviceCurrentComponent]);
 
   useEffect(() => {
-    const boardDeviceId = String(usb.boardDeviceId || "").trim();
-    if (!usb.connected || !boardDeviceId || String(usb.runtime || "").toLowerCase() !== "esp-p4") {
+    if (!readsGlobalButtons || !active) {
       setGlobalExitBinding({ boardDeviceId: "", events: [], status: "idle" });
       return undefined;
     }
+    const target = liveInventoryTarget;
+    const { boardDeviceId } = target;
+    const scope = inventoryTargetKey(target);
     let cancelled = false;
-    setGlobalExitBinding({ boardDeviceId, events: [], status: "loading" });
-    invoke("usb_get_button_config", { expectedBoardDeviceId: boardDeviceId })
+    setGlobalExitBinding({ boardDeviceId, scope, events: [], status: "loading" });
+    const pending = target.transport === "wifi"
+      ? wifiDeviceControl(invoke, target, "readInput")
+      : invoke("usb_get_button_config", { expectedBoardDeviceId: boardDeviceId });
+    pending
       .then((response) => {
         if (!cancelled) {
           setGlobalExitBinding({
             boardDeviceId,
+            scope,
             events: resolveGlobalExitEvents(response),
+            realtimeEvents: resolveGlobalButtonEvents(response, "realtime_chat"),
             status: "ready",
           });
         }
       })
       .catch((error) => {
         console.warn("[ComponentCenter] global exit binding query failed", error);
-        if (!cancelled) setGlobalExitBinding({ boardDeviceId, events: [], status: "error" });
+        if (!cancelled) setGlobalExitBinding({ boardDeviceId, scope, events: [], status: "error" });
       });
     return () => {
       cancelled = true;
     };
-  }, [usb.boardDeviceId, usb.connected, usb.runtime]);
+  }, [active, liveInventoryTarget, readsGlobalButtons, previewComponentId]);
 
   const refreshComponentLibrary = useCallback(async () => {
     const requestId = libraryRefreshRequestRef.current + 1;
@@ -511,7 +561,7 @@ export default function ComponentCenter({ active = true }) {
         lastLibrarySnapshot={components:Array.isArray(snapshot?.components)?snapshot.components:[],libraryPath:String(snapshot?.libraryPath||"")};
         setLocalComponents(Array.isArray(snapshot?.components) ? snapshot.components : []);
         setComponentLibraryPath(String(snapshot?.libraryPath || ""));
-        setComponentLibraryError("");
+        setComponentLibraryError((snapshot?.warnings || []).join("；"));
       }
     } catch (err) {
       console.warn("[ComponentCenter] list_component_library failed", err);
@@ -617,7 +667,7 @@ export default function ComponentCenter({ active = true }) {
     refreshDeviceInventory();
     return ()=>{
       inventoryRefreshRequestRef.current+=1;
-      SESSION_DEVICE_INVENTORY_REQUESTS.delete(activeComponentTargetKey(liveInventoryTarget));
+      SESSION_DEVICE_INVENTORY_REQUESTS.delete(inventoryTargetKey(liveInventoryTarget));
     };
   }, [active, liveInventoryTarget, refreshDeviceInventory]);
 
@@ -647,10 +697,13 @@ export default function ComponentCenter({ active = true }) {
       name: entry.name || entry.id,
       goal: buildLibraryGoal(entry),
       dashboard: entry.dashboard || {},
+      coverDataUrl: entry.coverDataUrl || null,
+      wasmPreview: entry.wasmPreview || null,
       gameType: entry.gameType || "",
       runtimeEngine: entry.runtimeEngine || "",
       dataSource: entry.dataSource || "",
       mediaSource: entry.mediaSource || "",
+      syncRequirements: entry.syncRequirements || null,
       pcExtension: entry.pcExtension || null,
       mediaSurface: entry.mediaSurface || null,
       appRuntime: entry.appRuntime || null,
@@ -837,8 +890,32 @@ export default function ComponentCenter({ active = true }) {
     );
   }
 
-  async function syncSelectedComponent(component, allowDowngrade=false) {
-    if (!component?.id || component.isDeviceOnly || syncInFlight.current) return;
+  async function handleCommunityImport(entry, installTargetKey) {
+    if (!entry?.id) {
+      await refreshComponentLibrary();
+      return;
+    }
+    const component = buildLibraryComponent(entry);
+    libraryRefreshRequestRef.current++;
+    const recent = {...entry, createdAtMs: Date.now()};
+    setLocalComponents(items => [recent, ...items.filter(item => item.id !== entry.id)]);
+    const refresh = refreshComponentLibrary();
+    setLibraryKind("all");
+    setLibraryStatus("all");
+    setLibraryQuery("");
+    focusComponentLibrary();
+    if (!installTargetKey) {
+      push({tone:"success",title:`已下载「${component.name}」`,message:"已加入我的组件。"});
+    } else if (installTargetKey !== inventoryTargetKey(targetRef.current)) {
+      push({tone:"warning",title:`已下载「${component.name}」`,message:"设备连接已变化，请从我的组件确认安装目标。"});
+    } else {
+      await syncSelectedComponent(component, false, {freshImport:true});
+    }
+    await refresh;
+  }
+
+  async function syncSelectedComponent(component, allowDowngrade=false, {freshImport=false}={}) {
+    if (!component?.id || component.isDeviceOnly || syncInFlight.current || transferInFlight.current) return;
     const conflict=bindingConflictForComponent(component);
     if(conflict){push({tone:'warning',title:'请先调整按钮设置',message:conflict});return;}
     const validationError = localInstallBlockedReason(component);
@@ -850,7 +927,7 @@ export default function ComponentCenter({ active = true }) {
       });
       return;
     }
-    const firmwareError = gameInstallBlockedReason(component, usb);
+    const firmwareError = componentUsbInstallBlockedReason(component, usb);
     if (firmwareError) {
       push({
         tone: "error",
@@ -885,11 +962,19 @@ export default function ComponentCenter({ active = true }) {
       return;
     }
     syncInFlight.current=true;
-    try {await installSelectedComponent(component);} catch(error){push({tone:'error',title:'同步未开始',message:String(error)});} finally {syncInFlight.current=false;}
+    try {await installSelectedComponent(component, {freshImport});} catch(error){push({tone:'error',title:'同步未开始',message:String(error)});} finally {syncInFlight.current=false;}
   }
 
-  async function installSelectedComponent(component = previewComponent) {
-    if (!component || !isComponentVisible(component)) return false;
+  async function installSelectedComponent(component = previewComponent, {freshImport=false}={}) {
+    if (!component || !isComponentVisible(component) || localInstallBlockedReason(component)) return false;
+    if (component.libraryPath && component.versionHash) {
+      const latest = localComponents.find((entry) => entry.id === component.id);
+      if (!freshImport && latest?.versionHash && latest.versionHash !== component.versionHash) {
+        openComponent(buildLibraryComponent(latest));
+        push({ tone: "warning", title: "组件已更新", message: "已打开新版详情，请确认试玩后同步。" });
+        return false;
+      }
+    }
     setPreviewComponent(null);
 
     /* Formal local components ship their own buttons.json + dashboard. Builtins
@@ -992,7 +1077,9 @@ export default function ComponentCenter({ active = true }) {
   }, [componentActionPending, pendingComponentAction, clearSaveConfirmationMode]);
 
   function clearActiveComponentState(target) {
-    setActiveComponentRecord(null);
+    if (activeComponentTargetKey(targetRef.current) === activeComponentTargetKey(target)) {
+      setActiveComponentRecord(null);
+    }
     try {
       removeActiveComponentForTarget(target);
       window.dispatchEvent(new Event("storage"));
@@ -1035,7 +1122,14 @@ export default function ComponentCenter({ active = true }) {
       if (removesDevice) {
         if (!target) throw new Error("无法确认要删除组件的目标设备");
         const savePolicy=deviceDeletePolicy({clearSave:clearDeviceSave,transport:target.transport,capabilities:usb.capabilities});
-        deviceResult = await invoke("remove_widget_from_device", {
+        if (inventoryTargetKey(target) !== inventoryTargetKey(targetRef.current)) {
+          throw new Error("设备或连接已变化，请重新确认移除。");
+        }
+        deviceResult = target.transport === "wifi"
+          ? await wifiDeviceControl(invoke, target, "removeComponent", {
+              removal: { ...savePolicy, componentId: component.id },
+            })
+          : await invoke("remove_widget_from_device", {
           input: {
             ...savePolicy,
             componentId: component.id,
@@ -1049,16 +1143,17 @@ export default function ComponentCenter({ active = true }) {
         }
         if (wasActive) clearActiveComponentState(target);
         deviceRemoved=true;
-        setDeviceInventory((current) => writeSessionDeviceInventory(target, {
-          ...current,
-          activeWidgetId: wasActive ? "" : current.activeWidgetId,
-          items: current.items.filter((item) => item.id !== component.id),
-        }));
+        setDeviceInventory((current) => current.scope === inventoryTargetKey(target)
+          ? writeSessionDeviceInventory(target, {
+              ...current,
+              activeWidgetId: wasActive ? "" : current.activeWidgetId,
+              items: current.items.filter((item) => item.id !== component.id),
+            })
+          : current);
       }
 
       if (deleteLibrary) {
-        // Device removal happens first. A failed board ACK leaves the local
-        // package intact, so users never lose the only source by accident.
+        // Device removal must be confirmed before archiving the local source.
         const targetPath = component.libraryPath || component.path;
         if (!targetPath) throw new Error("找不到要删除的正式本地组件路径");
         await invoke("delete_component_from_library", { input: { path: targetPath } });
@@ -1131,29 +1226,22 @@ export default function ComponentCenter({ active = true }) {
   }
 
   function bindingConflictForComponent(component) {
-    const boardDeviceId = String(usb.boardDeviceId || "").trim();
-    if (
-      usb.connected
-      && String(usb.runtime || "").toLowerCase() === "esp-p4"
-      && boardDeviceId
-      && (globalExitBinding.boardDeviceId !== boardDeviceId || globalExitBinding.status === "loading")
-    ) {
-      return "正在读取设备的全局按键配置，请稍候";
-    }
-    if (
-      usb.connected
-      && String(usb.runtime || "").toLowerCase() === "esp-p4"
-      && boardDeviceId
-      && globalExitBinding.boardDeviceId === boardDeviceId
-      && globalExitBinding.status === "error"
-    ) {
-      return "读取设备的全局按键配置失败，请重新连接设备后再试";
+    if (readsGlobalButtons) {
+      if (globalExitBinding.scope !== inventoryTargetKey(liveInventoryTarget) || globalExitBinding.status === "loading") {
+        return "正在读取设备的全局按键配置，请稍候";
+      }
+      if (globalExitBinding.status === "error") {
+        return "读取设备的全局按键配置失败，请重新连接设备后再试";
+      }
     }
     const seen = new Map();
     for (const binding of resolveComponentBindings(component)) {
       for (const eventSlot of componentInputEventSlots(binding.event)) {
         if (globalExitEvents.includes(eventSlot)) {
           return `${binding.label} 占用了当前全局退出键，请改用其他按键`;
+        }
+        if (globalRealtimeEvents.includes(eventSlot)) {
+          return `${binding.label} 占用了当前实时对话键，请改用其他按键`;
         }
         if (seen.has(eventSlot)) {
           return `${seen.get(eventSlot)} 和 ${binding.label} 都绑定到了 ${binding.controlLabel}`;
@@ -1195,7 +1283,7 @@ export default function ComponentCenter({ active = true }) {
       .map((option) => ({
         ...option,
         disabled: (
-          componentInputEventSlots(option.event).some((event) => globalExitEvents.includes(event))
+          componentInputEventSlots(option.event).some((event) => reservedEvents.includes(event))
           || (
             option.event !== currentEvent
             && componentInputEventSlots(option.event).some((event) => usedEvents.has(event))
@@ -1203,7 +1291,9 @@ export default function ComponentCenter({ active = true }) {
         ),
         disabledReason: componentInputEventSlots(option.event).some((event) => globalExitEvents.includes(event))
           ? "全局退出"
-          : "已占用",
+          : componentInputEventSlots(option.event).some((event) => globalRealtimeEvents.includes(event))
+            ? "实时对话"
+            : "已占用",
       }));
   }
 
@@ -1231,7 +1321,7 @@ export default function ComponentCenter({ active = true }) {
   }
 
   async function startOtaInstall(componentId, clawpkgPath, options = {}) {
-    options={...options,epoch:++installEpoch.current};
+    options={...options,target:options.target || liveInventoryTarget,epoch:++installEpoch.current};
     const component = BUILTIN_COMPONENT_CENTER.components.find((c) => c.id === componentId);
     const targetName = options.targetName || component?.name || componentId;
     setOtaTargetName(targetName);
@@ -1240,7 +1330,7 @@ export default function ComponentCenter({ active = true }) {
     setOtaError(null);
     setOtaResult(null);
     const sshHost = readConfiguredComponentSshHost();
-    if (sshHost && !usb.connected && !options.forceUsb) {
+    if (options.target?.transport === "wifi" || (sshHost && !usb.connected && !options.forceUsb)) {
       return performOtaInstall(componentId, clawpkgPath, options);
     }
     setOtaPhase("checking-usb");
@@ -1277,9 +1367,10 @@ export default function ComponentCenter({ active = true }) {
     const sshHost = readConfiguredComponentSshHost();
     let componentPackageInstalled = false;
     let attemptedSsh = false;
+    const useWifi = options.target?.transport === "wifi";
     transferInFlight.current=true;
     try {
-      if(options.target&&activeComponentTargetKey(options.target)!==activeComponentTargetKey(targetRef.current))throw new Error('目标设备已变化，请关闭后重新确认同步目标。');
+      if(options.target&&inventoryTargetKey(options.target)!==inventoryTargetKey(targetRef.current))throw new Error('目标设备已变化，请关闭后重新确认同步目标。');
       let result;
       let installTarget;
       let liveStatus = null;
@@ -1290,15 +1381,38 @@ export default function ComponentCenter({ active = true }) {
       }
       const liveUsbConnected = Boolean(liveStatus?.connected);
       if(options.epoch!==undefined&&options.epoch!==installEpoch.current)return false;
-      const useSsh = !options.forceUsb && !liveUsbConnected && sshHost.length > 0;
+      const useSsh = !useWifi && !options.forceUsb && !liveUsbConnected && sshHost.length > 0;
       attemptedSsh = useSsh;
-      if (useSsh) {
+      if (useWifi) {
+        if (liveUsbConnected) throw new Error("连接已切换到 USB，请重新确认同步。");
+        installTarget = options.target;
+        if (deviceInventory.freshness !== "live" || deviceInventory.scope !== inventoryTargetKey(installTarget)) {
+          throw new Error("请先刷新设备组件清单，再同步组件。");
+        }
+        const preview = await invoke("lan_component_preview", { path: clawpkgPath });
+        if (component?.id && component.id !== preview.id) throw new Error("组件与所选文件不匹配。");
+        const installed = deviceInventory.items.find((entry) => entry.id === preview.id);
+        if (installed && !installed.version) throw new Error("请先确认设备上已安装组件的版本。");
+        const inspected = await invoke("inspect_clawpkg", { path: clawpkgPath }).catch(() => null);
+        const centerTitle = centerTitleForSync(inspected?.deviceCenterTitle);
+        if (options.epoch !== undefined && options.epoch !== installEpoch.current) return false;
+        result = await invoke("lan_component_install", {
+          path: clawpkgPath, ...preview,
+          expectedBoardDeviceId: installTarget.boardDeviceId,
+          expectedBootId: installTarget.bootId,
+          expectedInstalledVersion: installed?.version,
+          centerTitle,
+          expectedVersionHash: component?.versionHash || undefined,
+          bindingOverrides: options.bindingMap || buildBindingOverridesForInstall(component),
+        });
+      } else if (useSsh) {
         installTarget = { transport: "ssh", sshHost };
         if(options.target&&activeComponentTargetKey(options.target)!==activeComponentTargetKey(installTarget))throw new Error('连接方式或目标已变化，请重新确认同步目标。');
         result = await invoke("install_clawpkg_over_ssh", {
           input: {
             clawpkgPath,
             sshHost,
+            expectedVersionHash: component?.versionHash || undefined,
             bindingOverrides: options.bindingMap || buildBindingOverridesForInstall(component),
           },
         });
@@ -1321,11 +1435,19 @@ export default function ComponentCenter({ active = true }) {
         setAudioSyncPending(null);
         setOtaProgress(null);
         const footerOverride = options.skipFooterOverride ? "" : buildBindingsFooter(component);
+        let centerTitle = null;
+        if (liveStatus.capabilities?.widgetCenterTitle === "rle4-v1") {
+          const inspected = await invoke("inspect_clawpkg", { path: clawpkgPath }).catch(() => null);
+          centerTitle = centerTitleForSync(inspected?.deviceCenterTitle);
+          if (options.epoch !== undefined && options.epoch !== installEpoch.current) return false;
+        }
         result = await invoke("install_clawpkg_over_usb", {
           input: {
             clawpkgPath,
             expectedBoardDeviceId: boardDeviceId,
+            expectedVersionHash: component?.versionHash || undefined,
             footerOverride,
+            centerTitle,
             bindingOverrides: options.bindingMap || buildBindingOverridesForInstall(component),
           },
         });
@@ -1338,6 +1460,7 @@ export default function ComponentCenter({ active = true }) {
         return false;
       }
       componentPackageInstalled = true;
+      setOtaPendingOptions(current => current.epoch === options.epoch ? { ...current, target: installTarget } : current);
       if(options.bindingSnapshot)setSavedBindingOverrides(options.bindingSnapshot);
       markComponentInstalled(component, installTarget);
       await refreshDeviceInventory({ silent: true });
@@ -1350,18 +1473,20 @@ export default function ComponentCenter({ active = true }) {
       return true;
     } catch (err) {
       const msg = componentTransferError(err);
+      const commitUnconfirmed = !componentPackageInstalled && !attemptedSsh && !useWifi && componentCommitOutcomeUnknown(err);
       if (
         !componentPackageInstalled
         && !attemptedSsh
+        && !useWifi
         && (msg.includes("USB 未连接") || msg.includes("USB not connected"))
       ) {
         setOtaPhase("waiting-usb");
       } else {
         setOtaError(msg);
-        setOtaPhase("error");
+        setOtaPhase(commitUnconfirmed ? "unconfirmed" : "error");
         push({
           tone: "error",
-          title: componentPackageInstalled ? "组件已安装，本地状态更新失败" : "同步失败",
+          title: componentPackageInstalled ? "组件已安装，本地状态更新失败" : commitUnconfirmed ? "安装结果待核对" : "同步失败",
           message: msg,
         });
       }
@@ -1417,31 +1542,34 @@ export default function ComponentCenter({ active = true }) {
     setOtaResult(null);
   }
 
-  async function handleInstallSkill() {
-    setSkillInstalling(true);
+  async function handleBuildProject() {
+    if (projectBuilding) return;
+    setProjectBuilding(true);
     try {
-      const result = await invoke("install_widget_skill");
-      setSkillInstallResult(result);
-      const installedCount = result?.installed?.length ?? 0;
-      push({
-        tone: installedCount > 0 ? "success" : "info",
-        title: installedCount > 0
-          ? `Skill 已安装到 ${installedCount} 个 coding agent`
-          : "未检测到可安装的 coding agent",
-      });
-    } catch (err) {
-      const msg = typeof err === "string" ? err : String(err);
-      push({ tone: "error", title: "Skill 安装失败", message: msg });
+      const project = await openPackageFile({ directory: true, multiple: false });
+      if (typeof project !== "string") return;
+      const { entry, delivery } = await invoke("build_petui_project", { project });
+      await refreshComponentLibrary();
+      setCreateDrawerOpen(false);
+      openComponent(buildLibraryComponent(entry));
+      if (delivery?.state === "blocked") {
+        push({ tone: "warning", title: "组件可试玩，当前设备未通过同步检查", message: delivery.message });
+      } else if (delivery?.state === "ready") {
+        push({ tone: "success", title: "已构建并通过当前设备的发送前检查" });
+      }
+    } catch (error) {
+      push({ tone: "error", title: "组件构建失败", message: String(error) });
     } finally {
-      setSkillInstalling(false);
+      setProjectBuilding(false);
     }
   }
 
   async function installClawpkgFromPath(clawpkgPath, options = {}) {
     try {
-      const localMatch = localComponents.find((component) => matchesLibraryPath(component, clawpkgPath));
+      const localMatch = localComponents.find((component) =>
+        normalizeLocalPath(component.path) === normalizeLocalPath(clawpkgPath));
       const builtinMatch = BUILTIN_COMPONENT_CENTER.components.find((c) => clawpkgPath.includes(c.id));
-      const guessedId = localMatch?.id || builtinMatch?.id || currentFullComponent?.id || "";
+      const guessedId = options.component?.id || localMatch?.id || builtinMatch?.id || currentFullComponent?.id || "";
       const resolvedOptions = localMatch
         ? {
             targetName: localMatch.name,
@@ -1478,6 +1606,29 @@ export default function ComponentCenter({ active = true }) {
         >
           <RefreshCw size={14} />
           {componentLibraryLoading || inventoryLoading ? "刷新中…" : "刷新组件库"}
+        </button>,
+        wifi?.componentDelivery && !wirelessInventoryReady && onOpenWirelessMaintenance && <button key="wireless-component-install"
+          type="button" className="btn-ghost btn-sm" onClick={onOpenWirelessMaintenance}>
+          Wi-Fi 安装组件包
+        </button>,
+        <button
+          key="import-hachiapp"
+          type="button"
+          className="btn-ghost btn-sm"
+          onClick={async () => {
+            try {
+              const path = await openPackageFile({ multiple: false, filters: [{ name: "组件包", extensions: ["hachiapp", "clawpkg"] }] });
+              if (typeof path !== "string") return;
+              const entry = await invoke("import_hachiapp", { path });
+              await refreshComponentLibrary();
+              const unavailable = legacyAudioInstallBlockedReason(entry) || componentUsbInstallBlockedReason(entry, usb);
+              if (unavailable) push({ tone: "warning", title: `已导入「${entry.name}」，暂不可同步`, message: unavailable });
+            } catch (error) {
+              push({ tone: "error", title: "导入组件失败", message: String(error) });
+            }
+          }}
+        >
+          导入组件
         </button>,
         <button
           key="create-component"
@@ -1538,10 +1689,16 @@ export default function ComponentCenter({ active = true }) {
         inventory={deviceInventory}
         onOpenLocal={openComponent}
         onCreate={() => setCreateDrawerOpen(true)}
-        onImported={() => refreshComponentLibrary()}
+        deviceInstallTargetKey={(liveInventoryTarget?.transport === "usb" || liveInventoryTarget?.transport === "wifi")
+          && deviceInventory.freshness === "live" && !transferInFlight.current && !syncInFlight.current
+          ? inventoryTargetKey(liveInventoryTarget) : ""}
+        onImported={handleCommunityImport}
       >
       {componentLibraryError&&<div role="alert" className="community-error">本机组件库读取失败，保留上次列表。{componentLibraryError}<button onClick={refreshComponentLibrary}>重试</button></div>}
-      {deviceInventory.freshness!=='live'&&<p role="status">{deviceConnected?'设备清单待核对；安装状态暂不确定。':'设备未连接；仍可管理本机组件。'}</p>}
+      {deviceInventory.freshness !== 'live' && <p role="status">{deviceConnected
+        ? '设备清单待核对；安装状态暂不确定。'
+        : wifi ? '此固件暂未提供 Wi-Fi 组件清单。'
+          : '设备未连接；仍可管理本机组件。'}</p>}
       {deviceInventory.warnings?.map(w=><p role="alert" className="community-error" key={w}>{w}</p>)}
       {/* ── one library: local availability and live board state ─────────── */}
       <section
@@ -1596,6 +1753,7 @@ export default function ComponentCenter({ active = true }) {
                 isInstalled={isInstalled}
                 isEnabled={isEnabled}
                 deviceState={devicePackageState(item,deviceInventory)}
+                unavailableReason={legacyAudioInstallBlockedReason(item)}
                 onClick={() => openComponent(item)}
                 onDeviceAction={() => {
                   openComponent(item);
@@ -1625,63 +1783,66 @@ export default function ComponentCenter({ active = true }) {
       {trashOpen&&<RemovedComponents onClose={()=>setTrashOpen(false)} onRestored={refreshComponentLibrary}/>}
 
       {previewComponent && isComponentVisible(previewComponent) && (
-        <ComponentPreviewModal
-          active={active}
-          component={previewComponent}
-          onSourceChange={openComponent}
-          usb={usb}
-          kind={resolveComponentKind(previewComponent.kind, previewComponent.gameType)}
-          isLocal={previewComponent.isLocal}
-          isInstalled={previewIsInstalled}
-          currentComponent={currentFullComponent}
-          isCurrent={previewIsCurrent}
-          singleSlotReplacement={previewReplacesSingleSlot}
-          deviceConnected={deviceConnected}
-          installing={otaPhase === "installing"}
-          bindings={resolveComponentBindings(previewComponent)}
-          bindingConflict={bindingConflictForComponent(previewComponent)}
-          globalExitControl={
-            globalExitEvents
-              .map(globalExitControlLabel)
-              .filter(Boolean)
-              .join("、") || "未设置"
-          }
-          getControlOptions={(binding) => controlOptionsForBinding(binding, previewComponent)}
-          onBindingChange={(binding, nextControl) => updateBinding(binding, nextControl, previewComponent)}
-          onResetBindings={() => resetBindings(previewComponent)}
-          componentButtonsWillApply={
-            Array.isArray(previewComponent.defaultBindings)
-            && previewComponent.defaultBindings.filter(isRoutedWidgetBinding).length > 0
-          }
-          installBlockedReason={
-            previewComponent.isDeviceOnly
-              ? "本机没有这个组件的安装源；可以继续保留，或从当前卡片移除。"
-              : localInstallBlockedReason(previewComponent)
-                || gameInstallBlockedReason(previewComponent, usb)
-          }
-          onInstall={
-            previewComponent.isDeviceOnly
-              ? undefined
-              : () => syncSelectedComponent(previewComponent)
-          }
-          onDelete={
-            previewComponent.isLocal || previewIsInstalled
-              ? () => {
-                  const component = previewComponent;
-                  setPreviewComponent(null);
-                  requestComponentDelete(component, previewIsInstalled);
-                }
-              : undefined
-          }
-          onClose={closeComponent}
-        />
+        <Suspense fallback={<ComponentPreviewLoading onClose={closeComponent} />}>
+          <ComponentPreviewModal
+            active={active}
+            component={previewComponent}
+            onSourceChange={openComponent}
+            usb={usb}
+            kind={resolveComponentKind(previewComponent.kind, previewComponent.gameType)}
+            isLocal={previewComponent.isLocal}
+            isInstalled={previewIsInstalled}
+            currentComponent={currentFullComponent}
+            isCurrent={previewIsCurrent}
+            singleSlotReplacement={previewReplacesSingleSlot}
+            deviceConnected={deviceConnected}
+            installing={otaPhase === "installing"}
+            bindings={resolveComponentBindings(previewComponent)}
+            bindingConflict={bindingConflictForComponent(previewComponent)}
+            reservedEvents={reservedEvents}
+            globalExitControl={
+              globalExitEvents
+                .map(globalExitControlLabel)
+                .filter(Boolean)
+                .join("、") || "未设置"
+            }
+            getControlOptions={(binding) => controlOptionsForBinding(binding, previewComponent)}
+            onBindingChange={(binding, nextControl) => updateBinding(binding, nextControl, previewComponent)}
+            onResetBindings={() => resetBindings(previewComponent)}
+            componentButtonsWillApply={
+              Array.isArray(previewComponent.defaultBindings)
+              && previewComponent.defaultBindings.filter(isRoutedWidgetBinding).length > 0
+            }
+            installBlockedReason={
+              previewComponent.isDeviceOnly
+                ? "本机没有这个组件的安装源；可以继续保留，或从当前卡片移除。"
+                : localInstallBlockedReason(previewComponent)
+                  || componentUsbInstallBlockedReason(previewComponent, usb)
+            }
+            onInstall={
+              previewComponent.isDeviceOnly
+                ? undefined
+                : () => syncSelectedComponent(previewComponent)
+            }
+            onDelete={
+              previewComponent.isLocal || previewIsInstalled
+                ? () => {
+                    const component = previewComponent;
+                    setPreviewComponent(null);
+                    requestComponentDelete(component, previewIsInstalled);
+                  }
+                : undefined
+            }
+            onClose={closeComponent}
+          />
+        </Suspense>
       )}
 
       {otaPhase !== "idle" && (
         <InstallDialog busy={otaPhase==='installing'} onClose={dismissOtaModal}>
           <section className="ota-modal">
             <span className="ota-modal__eyebrow">
-              {otaPhase === "success" ? "✓ 安装完成" : otaPhase === "error" ? "× 安装失败" : "USB OTA 安装"}
+              {otaPhase === "success" ? "✓ 安装完成" : otaPhase === "unconfirmed" ? "安装结果待核对" : otaPhase === "error" ? "× 安装失败" : "USB OTA 安装"}
             </span>
             <h2>{otaTargetName}</h2>
             {otaPhase === "checking-usb" && <p>正在检测 USB 连接…</p>}
@@ -1710,13 +1871,25 @@ export default function ComponentCenter({ active = true }) {
                 {otaResult.manifest?.name && ` 屏幕应已切到 "${otaResult.manifest.name}"。`}
               </p>
             )}
-            {otaPhase === "error" && (
+            {(otaPhase === "error" || otaPhase === "unconfirmed") && (
               <p className="ota-modal__error">{otaError || "未知错误"}</p>
             )}
             <div className="ota-modal__actions">
               {(otaPhase === "waiting-usb" || otaPhase === "checking-usb") && (
                 <button className="btn-secondary" type="button" onClick={dismissOtaModal}>
                   取消
+                </button>
+              )}
+              {otaPhase === "unconfirmed" && (
+                <button
+                  className="btn-primary"
+                  type="button"
+                  onClick={() => {
+                    dismissOtaModal();
+                    refreshDeviceInventory({ announce: true });
+                  }}
+                >
+                  刷新设备组件清单
                 </button>
               )}
               {otaPhase === "error" && otaPendingPath && (
@@ -1737,14 +1910,19 @@ export default function ComponentCenter({ active = true }) {
                   重试
                 </button>
               )}
-              {otaPhase === "success" && (
+              {otaPhase === "success" && otaPendingOptions.target?.transport !== "ssh" && (
                 <button
                   className="btn-secondary"
                   type="button"
-                  title="设备负一屏切回宠物主屏（widget 仍保留在 widgets/<id>/）"
+                  title="切回设备宠物主屏"
                   onClick={async () => {
                     try {
-                      await invoke("usb_set_screen_page", { page: "main" });
+                      const target = otaPendingOptions.target;
+                      if (!target || inventoryTargetKey(target) !== inventoryTargetKey(targetRef.current)) {
+                        throw new Error("设备或连接已变化，请在设备菜单重新操作。");
+                      }
+                      if (target.transport === "wifi") await wifiDeviceControl(invoke, target, "returnHome");
+                      else await invoke("usb_set_screen_page", { page: "main", expectedBoardDeviceId: target.boardDeviceId });
                       push({ tone: "success", title: "已请求设备切回主屏" });
                       dismissOtaModal();
                     } catch (err) {
@@ -1756,7 +1934,7 @@ export default function ComponentCenter({ active = true }) {
                   ⤴ 返回主屏
                 </button>
               )}
-              {(otaPhase === "success" || otaPhase === "error") && (
+              {(otaPhase === "success" || otaPhase === "error" || otaPhase === "unconfirmed") && (
                 <button
                   className={otaPhase === "success" ? "btn-primary" : "btn-secondary"}
                   type="button"
@@ -1876,9 +2054,9 @@ export default function ComponentCenter({ active = true }) {
       {createDrawerOpen && (
         <CreateComponentDrawer
           onClose={() => setCreateDrawerOpen(false)}
-          handleInstallSkill={handleInstallSkill}
-          skillInstalling={skillInstalling}
-          skillInstallResult={skillInstallResult}
+          authoring={authoring}
+          handleBuildProject={handleBuildProject}
+          projectBuilding={projectBuilding}
           componentLibraryLoading={componentLibraryLoading}
           refreshComponentLibrary={refreshComponentLibrary}
         />
@@ -1916,16 +2094,22 @@ function InstallDialog({busy,onClose,children}){
 
 function CreateComponentDrawer({
   onClose,
-  handleInstallSkill,
-  skillInstalling,
-  skillInstallResult,
+  authoring,
+  handleBuildProject,
+  projectBuilding,
   componentLibraryLoading,
   refreshComponentLibrary,
 }) {
   const [invocationCopied, setInvocationCopied] = useState(false);
   const [copyError,setCopyError]=useState('');
-  const drawerRef=useDialogFocus(onClose,skillInstalling);
-  const invocationExample = "请使用 $petui，帮我生成一个桌搭子组件：<宠物养成小游戏，一个类似旅行青蛙的可爱小青蛙形象，1键是抚摸、亲密度+1，2键是喂食、亲密度+5，摇杆上下左右可让它到处移动> （示意，请按照自己想法重新输入）";
+  const drawerRef=useDialogFocus(onClose,projectBuilding);
+  const invocationExample = [
+    "请使用 PetUI（支持技能指令时用 $petui）制作一个桌搭子组件：<用一句话描述用途或玩法>。",
+    "先给我看 640×480 UI，确认后再实现。简单组件展示首屏和主操作，复杂组件按需补关键状态。构建后试玩主操作，按需检查实际键位、动效和依赖真机的功能。",
+    "控件写动作名，键位提示跟随实际绑定。用真实运行画面做最终封面，交付 .hachiapp，用 petui publish 发布到本地组件库，并说明怎么用。",
+    `PetUI Skill：${authoring.skillPath || "用户目录下的 .agents/skills/petui"}`,
+    `使用 Pet Manager 提供的命令构建，工具入口：${authoring.command || "用户目录下的 .claw-pet/authoring/petui（Windows 使用 petui.cmd）"}`,
+  ].join("\n");
 
   async function copyInvocationExample() {
     try {
@@ -1943,7 +2127,7 @@ function CreateComponentDrawer({
     <div
       className="component-center-drawer-backdrop"
       role="presentation"
-      onClick={()=>{if(!skillInstalling)onClose();}}
+      onClick={()=>{if(!projectBuilding)onClose();}}
     >
       <aside
         ref={drawerRef}
@@ -1956,72 +2140,35 @@ function CreateComponentDrawer({
         <header className="component-center-drawer__head">
           <div>
             <h2>创建组件</h2>
-            <p>安装 petui 后，在你正在使用的 Agent 对话中生成；校验通过的组件会发布到正式本地组件库。</p>
+            <p>用任意 Agent 描述需求，也可以直接构建已有源码。构建通过后可在组件详情里试玩。</p>
           </div>
           <button
             type="button"
             className="icon-btn"
             onClick={onClose}
-            disabled={skillInstalling}
+            disabled={projectBuilding}
             aria-label="关闭抽屉"
           >
             <X size={16} />
           </button>
         </header>
 
-        <article className="component-tool-card component-tool-card--skill">
-          <header>
-            <span className="component-tool-eyebrow">STEP 1 · 装 Skill</span>
-            <h3>安装 petui</h3>
-            <p>安装到检测到的 Codex、Claude、OpenClaw、MiMoCode 等兼容目录。旧版组件生成 Skill 会被替换。</p>
-          </header>
-          <button
-            className="btn-primary component-skill-install-button"
-            type="button"
-            onClick={handleInstallSkill}
-            disabled={skillInstalling}
-          >
-            <PackageCheck size={15} />
-            {skillInstalling ? "正在安装…" : "一键安装 Skill"}
-          </button>
-          {skillInstallResult && (
-            <div className="component-skill-install-result">
-              {skillInstallResult.installed.length > 0 && (
-                <>
-                  <p className="component-tool-result__title">已安装到 {skillInstallResult.installed.length} 个 coding agent</p>
-                  <ul>
-                    {skillInstallResult.installed.map((entry) => (
-                      <li key={entry.agent}>
-                        <strong>{entry.agent}</strong>
-                        <span>{entry.fileCount} 文件{entry.overwrote ? " · 覆盖更新" : ""}</span>
-                        <code>{entry.targetPath}</code>
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
-              {skillInstallResult.skipped.length > 0 && (
-                <details className="component-skill-install-skipped">
-                  <summary>跳过了 {skillInstallResult.skipped.length} 个未检测到的 agent</summary>
-                  <ul>
-                    {skillInstallResult.skipped.map((entry) => (
-                      <li key={entry.agent}>
-                        <strong>{entry.agent}</strong>
-                        <span>{entry.reason}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </details>
-              )}
-            </div>
-          )}
-        </article>
+        <p className="component-tool-result__title" role={authoring.phase === "error" ? "alert" : "status"}>
+          {authoring.phase === "ready" ? "PetUI 命令已就绪"
+            : authoring.phase === "error" ? `创作环境暂不可用：${authoring.error}`
+            : "正在同步 PetUI 创作技能…"}
+        </p>
+        {authoring.skillWarnings?.length > 0 && (
+          <ul aria-label="Agent 技能同步问题">
+            {authoring.skillWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+          </ul>
+        )}
 
         <article className="component-tool-card component-tool-card--generate">
           <header>
-            <span className="component-tool-eyebrow">STEP 2 · 在 Agent 中生成</span>
+            <span className="component-tool-eyebrow">在 Agent 中创作</span>
             <h3>打开你正在使用的 Agent</h3>
-            <p>复制下方示例文案到Agent界面，与Agent对话生成你想要在设备上使用的小组件或小游戏</p>
+            <p>用一句话告诉你的 Agent 想做什么。也可以补充喜欢的画风、参考图或操作方式。</p>
           </header>
           <code className="component-petui-invocation">{invocationExample}</code>
           {copyError&&<p role="alert">{copyError}</p>}
@@ -2033,16 +2180,15 @@ function CreateComponentDrawer({
 
         <article className="component-tool-card component-tool-card--refresh">
           <header>
-            <span className="component-tool-eyebrow">STEP 3 · 刷新组件库</span>
-            <h3>Agent制作完成后，刷新组件库</h3>
-            <p>刷新后新组件会出现在组件中心</p>
+            <h3>已有项目源码</h3>
+            <p>选择含有 package 文件夹的项目。WASM 项目在同一层提供 app.c。</p>
           </header>
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={refreshComponentLibrary}
-            disabled={componentLibraryLoading}
-          >
+          <button className="btn-secondary" type="button" onClick={handleBuildProject}
+            disabled={projectBuilding}>
+            {projectBuilding ? "正在构建…" : "构建并试玩"}
+          </button>
+          <button className="btn-secondary" type="button" onClick={refreshComponentLibrary}
+            disabled={componentLibraryLoading}>
             <RefreshCw size={15} />
             {componentLibraryLoading ? "刷新中…" : "刷新组件库"}
           </button>
@@ -2050,4 +2196,12 @@ function CreateComponentDrawer({
       </aside>
     </div>
   );
+}
+
+function ComponentPreviewLoading({ onClose }) {
+  const ref = useDialogFocus(onClose, false);
+  return <div ref={ref} tabIndex={-1} className="component-replace-modal" role="dialog" aria-modal="true" aria-label="组件预览">
+    <p role="status">正在加载组件预览…</p>
+    <button type="button" className="btn btn-secondary" onClick={onClose}>关闭</button>
+  </div>;
 }

@@ -13,15 +13,17 @@ import {
 } from "./agent-bus-client.js";
 
 test("Agent Bus client normalizes adapters and encodes ordered Session cursors", async () => {
-  const previousFetch = globalThis.fetch;
+  const previousWindow = globalThis.window;
   const requests = [];
-  globalThis.fetch = async (url, options) => {
-    requests.push({ url: String(url), signal: options?.signal });
+  globalThis.window = { __TAURI_INTERNALS__: { invoke: async (command, options) => {
+    assert.equal(command, "local_bridge_request");
+    const url = options.route;
+    requests.push({ url: String(url) });
     const body = String(url).includes("session-events")
       ? { cursor: 9, streamId: "stream-a", events: [{ sequence: 9 }] }
       : { ok: true, adapters: [{ agentId: "codex" }] };
-    return { ok: true, status: 200, json: async () => body };
-  };
+    return body;
+  } } };
 
   try {
     assert.deepEqual(await fetchAgentBusStatus(), {
@@ -40,8 +42,25 @@ test("Agent Bus client normalizes adapters and encodes ordered Session cursors",
     assert.match(requests[1].url, /agentId=claude\+code/);
     assert.match(requests[1].url, /cursor=8/);
     assert.match(requests[1].url, /streamId=stream%2Fold/);
-    assert.equal(requests.every((request) => request.signal instanceof AbortSignal), true);
+    const ctl = new AbortController();
+    ctl.abort();
+    await assert.rejects(fetchAgentBusStatus(ctl.signal), { name: "AbortError" });
+    assert.equal(requests.length, 2);
   } finally {
-    globalThis.fetch = previousFetch;
+    globalThis.window = previousWindow;
   }
+});
+
+
+test("cancelled Agent read never resolves with stale IPC data", async () => {
+  const previous = globalThis.window;
+  let resolve;
+  globalThis.window = { __TAURI_INTERNALS__: { invoke: () => new Promise(r => { resolve = r; }) } };
+  try {
+    const ctl = new AbortController();
+    const pending = fetchAgentBusStatus(ctl.signal);
+    ctl.abort();
+    resolve({ ok: true, adapters: [{ agentId: "stale" }] });
+    await assert.rejects(pending, { name: "AbortError" });
+  } finally { globalThis.window = previous; }
 });

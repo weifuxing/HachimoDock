@@ -21,7 +21,7 @@ pub fn operations(service:&str)->&'static [&'static str]{match service{
     "desktop-tasks"=>&["voice","details","previous","next"],
     "journey"=>&["depart","collection","previous","next"],
     "weather"=>&["refresh","todo","details","choose_city","previous","next"],
-    "notes"=>&["record","save","todo","delete","previous","next"],
+    "notes"=>&["record","save","todo","delete","previous","next","tasks","open","toggle","filter","up","down","row_a","row_b","row_c"],
     "todos"=>&["open","toggle","filter","previous","next","up","down","row_a","row_b","row_c","row_d","row_e"],
     "knowledge"=>&["speak","favorite","previous","next","random","category"],
     "books"=>&["previous","next","random","category"],
@@ -59,8 +59,11 @@ pub fn parse(bytes:&[u8],runtime:&Value)->Result<Declaration,String>{
     let news=d.engine=="pc-app-news-v1"&&d.service=="news";
     if d.auto_read&&!library&&!news{return Err(error());}
     if !library&&!calendar&&bytes.len()>16384{return Err(error());}
+    let vars_ok = runtime["vars"].as_object().is_some_and(|v| v.is_empty()
+        || (news && v.len() == 1 && v.contains_key("petui.wifi_data")
+            && crate::component_news::validate_device_headlines(runtime).is_ok()));
     if d.schema_version!=1||!matches!(d.engine.as_str(),"pc-app-services-v1"|"pc-app-services-v2"|"pc-app-services-v3"|"pc-app-calendar-v1"|"pc-app-books-v1"|"pc-app-news-v1")||d.engine=="pc-app-services-v3"&&!library||(d.engine=="pc-app-news-v1")!=news||(d.service=="news")!=news||(d.engine=="pc-app-calendar-v1")!=calendar||(d.service=="calendar")!=calendar||(d.engine=="pc-app-books-v1")!=books||(d.service=="books")!=books||operations(&d.service).is_empty()||runtime["host"]!=true||runtime["surface"]["engine"]!="p4-app-surface-v1"
-        ||runtime["vars"].as_object().is_none_or(|v|!v.is_empty())||runtime["tick"].as_array().is_some_and(|v|!v.is_empty())||runtime.get("persist").is_some(){return Err(error());}
+        ||!vars_ok||runtime["tick"].as_array().is_some_and(|v|!v.is_empty())||runtime.get("persist").is_some(){return Err(error());}
     if (d.engine=="pc-app-services-v2")!=d.location.is_some()||d.location.is_some()&&d.service!="weather"{return Err(error());}
     if let Some(p)=&d.location{p.validate()?;}
     if d.service=="weather"&&d.actions.values().any(|v|matches!(v.as_str(),"choose_city"|"previous"|"next")){
@@ -70,7 +73,7 @@ pub fn parse(bytes:&[u8],runtime:&Value)->Result<Declaration,String>{
     }
     let mut ops=HashSet::new();
     let input_v1=runtime["input"]["engine"]=="p4-input-v1";
-    if d.service=="todos"&&(!input_v1||d.actions.iter().any(|(a,op)|op=="toggle"&&runtime["input"]["confirm"][a].as_str().is_none_or(|s|s.trim().is_empty()))){return Err(error());}
+    if (d.service=="todos"||(d.service=="notes"&&d.actions.values().any(|o|o=="tasks")))&&(!input_v1||d.actions.iter().any(|(a,op)|op=="toggle"&&runtime["input"]["confirm"][a].as_str().is_none_or(|s|s.trim().is_empty()))){return Err(error());}
     if d.actions.is_empty()||d.actions.len()>if input_v1{16}else{8}||d.actions.iter().any(|(a,o)|a.strip_prefix("host.").is_none_or(|s|s.is_empty()||s.len()>32||!s.bytes().all(|c|c.is_ascii_lowercase()||c==b'_'))||!operations(&d.service).contains(&o.as_str())||!ops.insert(o)){return Err(error());}
     if !input_v1&&d.service=="soundscape"&&d.actions.values().any(|o|matches!(o.as_str(),"rain"|"sea"|"fire"|"insects")){return Err(error());}
     let rules=runtime["transitions"].as_array().ok_or_else(error)?;
@@ -123,7 +126,7 @@ pub fn permissions(d:&Declaration)->Value{
 if crate::component_composition::is_engine(&d.engine){return crate::component_composition::permissions(d);}let service=d.service.as_str();serde_json::json!({
     "storage":true,"networkHosts":if service=="weather"{d.location.as_ref().unwrap_or(crate::location_profile::legacy()).hosts()}else{vec![]},
     "microphone":service=="notes","speechProvider":matches!(service,"notes"|"knowledge"|"books"|"news"),"autoRead":d.auto_read,"newsGeneration":service=="news",
-    "deviceAudio":matches!(service,"knowledge"|"books"|"soundscape"|"news"),"todos":matches!(service,"notes"|"weather"|"todos"),"todoWrites":service=="todos",
+    "deviceAudio":matches!(service,"knowledge"|"books"|"soundscape"|"news"),"todos":matches!(service,"notes"|"weather"|"todos"),"todoWrites":service=="todos"||(service=="notes"&&d.actions.values().any(|o|o=="tasks")),
     "desktopReceipts":service=="desktop-tasks","startVoiceConversation":service=="desktop-tasks",
     "desktopInput":service=="hotkeys"
 })}

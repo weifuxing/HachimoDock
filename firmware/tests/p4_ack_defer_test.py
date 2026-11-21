@@ -74,7 +74,7 @@ def test_dispatcher_wrapper_and_worker_route_are_flag_gated(tmp_path):
     retired_end=worker.index('#if PET_P4_QUERY_REPLY_TRACE',retired)
     retired_guard=worker[retired:retired_end]
     assert '!pet_p4_native_usb_route_current(request.reply_ctx)' in retired_guard
-    assert 'free(request.line); continue;' in retired_guard
+    assert 'free(request.line); release_protocol_memory(request.charged_bytes); continue;' in retired_guard
     assert retired_end<worker.index('bool handled_debug')<worker.index('if (!handled_debug) {')
     dispatch=worker[worker.index('if (!handled_debug) {'):]
     assert dispatch.index('xSemaphoreGive(g_state_mutex);')<dispatch.index('if (query_reply.line) {')<dispatch.index('free(request.line);')

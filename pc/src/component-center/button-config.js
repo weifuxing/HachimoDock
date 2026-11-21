@@ -33,6 +33,13 @@ export const COMPONENT_CONTROL_OPTIONS = [
       help: `按下设备 ${control} 后触发这个组件动作。`,
     };
   }),
+  ...["SW1", "SW2", "SW3"].map((control, index) => ({
+    label: `${control} 双击`,
+    shortLabel: `${control} 双击`,
+    control,
+    event: `button.sw${index + 1}.double_press`,
+    help: `快速按两次 ${control} 后触发这个组件动作。`,
+  })),
   {
     label: "SW1 长按",
     shortLabel: "SW1 长按",
@@ -95,6 +102,9 @@ export const P4_COMPONENT_BUTTON_EVENTS = [
   "button.sw1.short_press",
   "button.sw2.short_press",
   "button.sw3.short_press",
+  "button.sw1.double_press",
+  "button.sw2.double_press",
+  "button.sw3.double_press",
   "button.encoder.short_press",
   "button.encoder.long_press",
   "knob.rotate_cw",
@@ -127,15 +137,19 @@ const GLOBAL_EXIT_CONTROL_LABELS = {
 export const DEVICE_BUTTON_CONFIG_STORAGE_KEY = "pet-manager.board-voice-config";
 export const DEVICE_BUTTON_CONFIG_MODEL_VERSION = 9;
 
-export function resolveGlobalExitEvents(response = {}) {
+export function resolveGlobalButtonEvents(response = {}, action = "page_back") {
   const boardConfig = response?.config && typeof response.config === "object"
     ? response.config
     : response;
   const bindings = Array.isArray(boardConfig?.bindings) ? boardConfig.bindings : [];
   return [...new Set(bindings
-    .filter((binding) => String(binding?.action || "").trim() === "page_back")
+    .filter((binding) => String(binding?.action || "").trim() === action)
     .map((binding) => String(binding?.event || "").trim())
     .filter((event) => P4_GLOBAL_BUTTON_EVENTS.has(event)))];
+}
+
+export function resolveGlobalExitEvents(response) {
+  return resolveGlobalButtonEvents(response);
 }
 
 export function globalExitControlLabel(event) {
@@ -153,7 +167,7 @@ const P4_V7_SHIPPED_DEFAULT_BINDINGS = {
   "button.sw2.long_press": "disabled",
   "button.sw2.hold": "disabled",
   "button.sw3.short_press": "page_enter",
-  "button.sw3.long_press": "disabled",
+  "button.sw3.long_press": "system_settings",
   "button.sw3.hold": "disabled",
   "button.encoder.short_press": "page_enter",
   "button.encoder.long_press": "disabled",

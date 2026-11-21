@@ -1,25 +1,43 @@
 [
   {
-    "action": "host.primary",
-    "label": "开始录制",
+    "action": "host.record",
+    "label": "录制 / 停止",
     "control": "SW1",
     "event": "button.sw1.short_press"
   },
   {
-    "action": "host.secondary",
-    "label": "保存笔记",
+    "action": "host.save",
+    "label": "保存 / 查看",
     "control": "SW2",
     "event": "button.sw2.short_press"
   },
   {
+    "action": "host.tasks",
+    "label": "想法 / 待办",
+    "control": "前方摇杆",
+    "event": "button.encoder.short_press"
+  },
+  {
+    "action": "host.up",
+    "label": "上一条",
+    "control": "前方摇杆",
+    "event": "joystick.up"
+  },
+  {
+    "action": "host.down",
+    "label": "下一条",
+    "control": "前方摇杆",
+    "event": "joystick.down"
+  },
+  {
     "action": "host.previous",
-    "label": "上一条笔记",
+    "label": "上一页",
     "control": "前方摇杆",
     "event": "knob.rotate_ccw"
   },
   {
     "action": "host.next",
-    "label": "下一条笔记",
+    "label": "下一页",
     "control": "前方摇杆",
     "event": "knob.rotate_cw"
   }

@@ -29,9 +29,8 @@ static inline void vSemaphoreDelete(SemaphoreHandle_t p){pthread_mutex_destroy(p
 #include <string.h>
 #include <stdlib.h>
 #include <pthread.h>
-#include "pet_p4_component_ext.h"
-#define PET_P4_CAPABILITY_EXT 1
 #define PET_P4_EVENTS 1
+#include "pet_p4_component_ext.h"
 #define EXT_RAM_BSS_ATTR
 #define PET_P4_MINIAPP_ACTION_MAX 48
 #define MINIAPP_VAR_INT 1

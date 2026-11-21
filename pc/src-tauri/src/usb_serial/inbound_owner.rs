@@ -59,7 +59,11 @@ impl Owner {
 }
 
 pub(super) fn requires_reprobe(payload:&serde_json::Value,framed:bool,nonce:Option<&str>)->bool {
-    if framed||nonce.is_none() {return false;}
+    nonce.is_some() && is_framing_offer(payload, framed)
+}
+
+pub(super) fn is_framing_offer(payload:&serde_json::Value,framed:bool)->bool {
+    if framed {return false;}
     let caps=&payload["capabilities"];
     if caps["serialControlOffer"]!=control_integrity::ENGINE||caps.get("serialControlIntegrity").is_some()
         ||caps.get("serialControlNonce").is_some(){return false;}

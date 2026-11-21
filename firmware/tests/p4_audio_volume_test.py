@@ -51,6 +51,7 @@ def test_actual_vendor_errors_cache_and_task_scoped_total_deadline(tmp_path):
                         f"-DESP_IDF_VERSION={sdk}", *[arg for p in includes for arg in ("-I", str(p))],
                         *map(str, sources), "-lm", "-o", str(exe)], check=True)
         subprocess.run([str(exe)], check=True, timeout=20)
+        subprocess.run([str(exe), "fresh"], check=True, timeout=20)
         subprocess.run([str(exe), "corrupt"], check=True, timeout=20)
         subprocess.run([str(exe), "out-of-range"], check=True, timeout=20)
         subprocess.run([str(exe), "boot-mute"], check=True, timeout=20)

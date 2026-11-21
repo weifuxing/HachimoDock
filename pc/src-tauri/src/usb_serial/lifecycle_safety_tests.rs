@@ -349,7 +349,8 @@ fn phase3_retirement_after_ready_never_writes_the_prepared_raw_body(){
     });
     let result=manager.with_appearance_attempt(BOARD,||manager.send_asset_raw_chunk_checked("raw-retired","p4/a.h264",b"prepared-body",0));
     ready.recv_timeout(Duration::from_secs(1)).unwrap();
-    {let c=manager.connection.lock().unwrap();assert!(!c.as_ref().unwrap().connected);assert_eq!(c.as_ref().unwrap().connection_id,1);}
+    assert!(manager.connection.lock().unwrap().is_none(), "uncertain raw must close the retired writer");
+    assert!(!manager.status().connected);
     assert!(result.is_err());assert!(body.lock().unwrap().is_empty());assert_eq!(trace.lock().unwrap().len(),1);
     release.send(()).unwrap();reader.join().unwrap();
 }
@@ -395,10 +396,12 @@ fn phase3_missing_ready_or_terminal_ack_blocks_notes_generic_and_probe_across_re
             let (mut manager,trace,raw)=manager(Mode::Drop);manager.appearance_journal=Arc::new(appearance_safety::Journal::open(directory.path()).unwrap());
             {let mut c=manager.connection.lock().unwrap();let c=c.as_mut().unwrap();c.port_name=port.into();c.capabilities["transport"]=json!({"rawAssetReadyAck":ready});}
             *manager.last_serial_baud.lock().unwrap()=Some((format!("{port}|1a86|55d4|owned-serial"),115200));
+            let cancel = manager.connection.lock().unwrap().as_ref().unwrap().cancel_reader.clone();
             let (_notes,_) = crate::component_notes::install_owned_capture_for_test(manager.clone(),BOARD,1,"raw-unknown-notes");
             let result=manager.with_appearance_attempt(BOARD,||manager.send_asset_raw_chunk_checked("unknown-raw","p4/a.h264",b"bounded",0));
             assert!(result.is_err());assert!(!manager.status().connected);assert!(!manager.inbound_owner.is_current(1));
-            assert!(manager.connection.lock().unwrap().as_ref().unwrap().cancel_reader.load(Ordering::Acquire));
+            assert!(cancel.load(Ordering::Acquire));
+            assert!(manager.connection.lock().unwrap().is_none(), "quarantined writer must be closed");
             crate::component_notes::stop_recording("raw-unknown-notes");
             std::thread::spawn(||{crate::component_notes::drain_control();crate::component_notes::drain_control();}).join().unwrap();
             assert!(manager.send("system/heartbeat",&json!({})).is_err());
@@ -466,4 +469,126 @@ fn phase3_one_quarantined_device_does_not_block_a_verified_different_raw_device(
     let disk:Value=serde_json::from_slice(&std::fs::read(directory.path().join("pending-v1.json")).unwrap()).unwrap();
     assert_eq!(disk["pending"].as_array().unwrap().len(),1);assert_eq!(disk["pending"][0]["board"],BOARD);
     assert_eq!(disk["quarantines"].as_array().unwrap().len(),1);assert_eq!(disk["quarantines"][0]["board"],BOARD);
+}
+
+#[test]
+fn verified_reset_releases_only_the_exact_raw_gate_and_retains_unknown_after_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let (mut manager, trace, _) = manager(Mode::Drop);
+    manager.appearance_journal = Arc::new(appearance_safety::Journal::open(directory.path()).unwrap());
+    let port = manager.connection.lock().unwrap().as_ref().unwrap().port_name.clone();
+    *manager.last_serial_baud.lock().unwrap() = Some((format!("{port}|1a86|55d4|owned-serial"), 115200));
+    assert!(manager.with_appearance_attempt(BOARD, || manager.send_asset_raw_chunk_checked(
+        "old-raw", "p4/a.h264", b"old", 0)).is_err());
+    let journal = &manager.appearance_journal;
+    assert!(journal.reset_required(BOARD).unwrap());
+    assert!(journal.raw_recovery_target(BOARD, &[usb_candidate("other")]).is_err());
+    assert!(journal.raw_recovery_target(BOARD, &[usb_candidate("owned-serial"), usb_candidate("owned-serial")]).is_err());
+    let (target, renamed_port) = journal.raw_recovery_target(BOARD, &[usb_candidate("owned-serial")]).unwrap();
+    assert_eq!(target.boot_id.as_deref(), Some("0123456789abcdef"));
+    assert_eq!(renamed_port, "memory-candidate");
+    journal.release_raw_after_reset(&target).unwrap();
+    assert!(journal.release_raw_after_reset(&target).is_err());
+    assert_eq!(trace.lock().unwrap().len(), 1);
+    drop(manager);
+    let reopened = appearance_safety::Journal::open(directory.path()).unwrap();
+    assert!(!reopened.reset_required(BOARD).unwrap());
+    assert!(reopened.needs_observation(BOARD).unwrap());
+    let intent = uuid::Uuid::new_v4().to_string();
+    assert!(reopened.pending_for_recovery(BOARD, &intent).is_ok());
+}
+
+#[test]
+fn firmware_ota_owns_background_reconnect_until_validation_returns() {
+    let manager = UsbSerialManager::new();
+    let ota = manager.firmware_reconnect_guard.lock().unwrap();
+    let background = manager.clone();
+    let skipped = std::thread::spawn(move || {
+        background.connect_for_auto("memory-port", |_, _| panic!("must not connect during OTA"))
+    });
+    assert!(!skipped.join().unwrap().unwrap());
+    drop(ota);
+    assert!(manager.firmware_reconnect_guard.try_lock().is_ok());
+}
+
+#[test]
+fn ota_rebind_reuses_writer_and_requires_new_boot_and_nonce() {
+    struct BindWriter(Arc<Mutex<Option<Value>>>);
+    impl Write for BindWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            *self.0.lock().unwrap() = Some(serde_json::from_slice(bytes).unwrap());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+
+    struct RebootReader {
+        pending: Cursor<Vec<u8>>,
+        bind: Arc<Mutex<Option<Value>>>,
+        answered: bool,
+    }
+    impl Read for RebootReader {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            let bytes = self.fill_buf()?;
+            let size = out.len().min(bytes.len());
+            out[..size].copy_from_slice(&bytes[..size]);
+            self.consume(size);
+            Ok(size)
+        }
+    }
+    impl BufRead for RebootReader {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            if self.pending.position() as usize == self.pending.get_ref().len() && !self.answered {
+                let binding = self.bind.lock().unwrap();
+                let request = binding.as_ref().expect("bind written to original port");
+                assert_eq!(request["topic"], "bind");
+                let nonce = request["payload"]["serialControl"]["nonce"].as_str().unwrap();
+                assert_ne!(nonce, NONCE);
+                let hello = |board: &str, boot: &str, nonce: &str| {
+                    frame("hello", json!({"boardDeviceId":board,"runtime":"esp-p4","capabilities":{
+                        "serialControlOffer":control_integrity::ENGINE,"serialControlIntegrity":control_integrity::ENGINE,
+                        "serialControlNonce":nonce,"debugBootId":boot}}), true)
+                };
+                let mut bytes = frame("protocol/ack",json!({"ok":true}),true);
+                bytes.extend(hello(BOARD,"fedcba9876543210",NONCE));
+                bytes.extend(hello("other-board","fedcba9876543210",nonce));
+                bytes.extend(hello(BOARD,"0123456789abcdef",nonce));
+                bytes.extend(hello(BOARD,"fedcba9876543210",nonce));
+                self.pending = Cursor::new(bytes);
+                self.answered = true;
+            }
+            self.pending.fill_buf()
+        }
+        fn consume(&mut self, n: usize) { self.pending.consume(n); }
+    }
+
+    for old_nonce in [Some(NONCE), None] {
+        let (manager, _, _) = manager(Mode::Ack);
+        let bind = Arc::new(Mutex::new(None));
+        {
+            let mut conn = manager.connection.lock().unwrap();
+            let c = conn.as_mut().unwrap();
+            c.writer = Box::new(BindWriter(bind.clone()));
+            cache_usb_status(&manager.status_snapshot, Some(c));
+        }
+        manager.next_connection_id.store(1, Ordering::SeqCst);
+        manager.ota_serial_rebind.lock().unwrap().original_generation = 1;
+        let offer = frame("hello", json!({"boardDeviceId":BOARD,"runtime":"esp-p4","capabilities":{
+            "serialControlOffer":control_integrity::ENGINE,"debugBootId":"fedcba9876543210"}}),false);
+        let seen = Mutex::new(Vec::new());
+        let (cancel, capture) = {
+            let conn = manager.connection.lock().unwrap();
+            let c = conn.as_ref().unwrap();
+            (c.cancel_reader.clone(), c.capture_active.clone())
+        };
+        manager.read_connected(RebootReader { pending: Cursor::new(offer), bind, answered: false },
+            1, 115200, cancel, capture, old_nonce.is_some(), old_nonce.map(str::to_owned), |topic,_| {
+            assert!(manager.inbound_owner.is_current(2));
+            assert!(!manager.inbound_owner.is_current(1));
+            assert_eq!(manager.status().boot_id,"fedcba9876543210");
+            seen.lock().unwrap().push(topic);
+        });
+        assert_eq!(seen.into_inner().unwrap(), vec!["hello"]);
+        assert_eq!(manager.ota_serial_rebind.lock().unwrap().rebound_generation, 2);
+    }
 }

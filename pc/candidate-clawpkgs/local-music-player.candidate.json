@@ -1,5 +1,5 @@
 {
-  "status": "CANDIDATE_STRUCTURE_VALID_SMOKE_BLOCKED",
+  "status": "SOURCE_CANDIDATE",
   "candidateExpectedOnly": true,
   "deviceEvidence": false,
   "published": false,
@@ -25,15 +25,11 @@
     "widgetQuota": "p4-quota-v2",
     "widgetMedia": "p4-media-v1"
   },
-  "realR158BridgeAvailable": false,
   "requiresFinalRealHelloBeforePublish": true,
   "candidateExpectedCapabilitiesFile": "local-music-player.expected-capabilities.json",
-  "candidateExpectedCapabilitiesSha256": "6e03a737583df8269d1c2cfb45cab6c63d960f222abab39d4f2c73926c68ba77",
+  "candidateExpectedCapabilitiesSha256": "b82996363fc62552838bca87f84373aa6c2a38ec7e33d498441aaa79fc95f9b3",
   "expectedCapabilitiesProvenance": {
-    "source": "private evidence; identified by sourceSha256, not distributed",
-    "sourceSha256": "765967a4788270d62ba34be783ed436183217a7fc98a0180d7e3a1ab8465f583",
-    "actualFirmware": "0.7.103-p4-r158",
-    "actualBuildId": "0.7.103-p4-r158+0773644d9b8e-dirty",
+    "source": "Offline fixture for the declared component capabilities.",
     "deviceBridgeEvidence": false,
     "expectedOnlyOverrides": [
       "widgetServiceBridge",
@@ -47,24 +43,5 @@
     "asset": "assets/vinyl.png",
     "dynamicAlias": "cover",
     "opaquePng": true
-  },
-  "focusedValidation": {
-    "expectedOnly": true,
-    "exitCode": 0,
-    "log": "private evidence; identified by logSha256, not distributed",
-    "logSha256": "aed98903fb939f68ae132e74511eaa6835d0b1b069bed4aa870e2b76f14024af",
-    "deviceVerified": false
-  },
-  "focusedSmoke": {
-    "exitCode": 1,
-    "log": "private evidence; identified by logSha256, not distributed",
-    "logSha256": "f28e2987043d72655e7a38e3cadb47edbfacc9272c7f502d946f3af0ff4a7085",
-    "blocker": "bounded_app.py host-contract smoke omits validated collection_view.actions",
-    "missingActions": [
-      "host.row0",
-      "host.row1"
-    ],
-    "hostServicesVerified": false,
-    "deviceVerified": false
   }
 }

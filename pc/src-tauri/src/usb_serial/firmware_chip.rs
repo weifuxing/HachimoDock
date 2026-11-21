@@ -4,8 +4,63 @@
  * [Sync] Update pc/.folder.md when changing this contract. */
 use serde_json::Value;
 
+pub(crate) const BOARD_MODEL_REQUIRED: &str = "firmware_board_selection_required";
+
 pub(crate) const V1_FIRMWARE_RESOURCE: &str = "firmware/esp32-p4/firmware.bin";
 pub(crate) const V3_FIRMWARE_RESOURCE: &str = "firmware/esp32-p4/firmware-v3.bin";
+
+const PICO_V1_FIRMWARE_RESOURCE: &str = "firmware/esp32-p4/firmware-pico-v1.bin";
+const PICO_V3_FIRMWARE_RESOURCE: &str = "firmware/esp32-p4/firmware-pico-v3.bin";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum P4BoardModel { Wifi6, Pico }
+
+impl P4BoardModel {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "wifi6" => Ok(Self::Wifi6),
+            "pico" => Ok(Self::Pico),
+            _ => Err("设备板型无效".into()),
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Wifi6 => "wifi6",
+            Self::Pico => "pico",
+        }
+    }
+
+    fn from_image_version(version: &str) -> Option<Self> {
+        match version.rsplit_once('-')?.1 {
+            "wifi6" => Some(Self::Wifi6),
+            "pico" => Some(Self::Pico),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn image_version_matches(self, version: &str) -> bool {
+        Self::from_image_version(version) == Some(self)
+    }
+}
+
+pub(crate) fn board_model_from_device(
+    capabilities: &Value,
+    confirmed: Option<&str>,
+) -> Result<P4BoardModel, String> {
+    // boardModel and the running image version describe the installed build.
+    // Only the device-bound, factory-provisioned record identifies the hardware.
+    let detected = capabilities.pointer("/firmwareUpdate/hardwareBoardModel")
+        .map(|value| P4BoardModel::parse(value.as_str().ok_or("设备板型记录无效")?))
+        .transpose()?;
+    let confirmed = confirmed.map(P4BoardModel::parse).transpose()?;
+    if let (Some(detected), Some(confirmed)) = (detected, confirmed) {
+        if detected != confirmed {
+            return Err("所选板型与设备的出厂板型记录不一致".into());
+        }
+    }
+    detected.or(confirmed).ok_or_else(|| BOARD_MODEL_REQUIRED.into())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum P4ChipTarget {
@@ -75,10 +130,12 @@ pub(crate) fn chip_target_from_device(
     Err("无法确认设备芯片版本，已阻止自动选择固件；请先使用匹配芯片的完整烧录包".into())
 }
 
-pub(crate) fn bundled_resource_for_chip(target: P4ChipTarget) -> &'static str {
-    match target {
-        P4ChipTarget::Revision(300..=399) => V3_FIRMWARE_RESOURCE,
-        _ => V1_FIRMWARE_RESOURCE,
+pub(crate) fn bundled_resource_for_device(board: P4BoardModel, target: P4ChipTarget) -> &'static str {
+    match (board, target) {
+        (P4BoardModel::Pico, P4ChipTarget::Revision(300..=399)) => PICO_V3_FIRMWARE_RESOURCE,
+        (P4BoardModel::Wifi6, P4ChipTarget::Revision(300..=399)) => V3_FIRMWARE_RESOURCE,
+        (P4BoardModel::Pico, _) => PICO_V1_FIRMWARE_RESOURCE,
+        (P4BoardModel::Wifi6, _) => V1_FIRMWARE_RESOURCE,
     }
 }
 
@@ -101,6 +158,25 @@ pub(crate) fn validate_firmware_chip(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn board_selection_uses_device_evidence_and_combines_with_chip_revision() {
+        let pico = json!({"firmwareUpdate":{"boardModel":"wifi6","hardwareBoardModel":"pico"}});
+        let wifi = json!({"firmwareUpdate":{"boardModel":"pico","hardwareBoardModel":"wifi6"}});
+        let legacy = json!({"firmwareUpdate":{"boardModel":"wifi6"}});
+        assert_eq!(board_model_from_device(&legacy, None).unwrap_err(), BOARD_MODEL_REQUIRED);
+        assert_eq!(board_model_from_device(&legacy, Some("pico")).unwrap(), P4BoardModel::Pico);
+        assert!(board_model_from_device(&legacy, Some("other")).is_err());
+        assert!(board_model_from_device(&pico, Some("wifi6")).is_err());
+        let invalid = json!({"firmwareUpdate":{"hardwareBoardModel":"other"}});
+        assert!(board_model_from_device(&invalid, Some("wifi6")).is_err());
+        for (cap, revision, expected) in [
+            (&pico, 100, PICO_V1_FIRMWARE_RESOURCE), (&pico, 302, PICO_V3_FIRMWARE_RESOURCE),
+            (&wifi, 100, V1_FIRMWARE_RESOURCE), (&wifi, 302, V3_FIRMWARE_RESOURCE),
+        ] {
+            let board = board_model_from_device(cap, None).unwrap();
+            assert_eq!(bundled_resource_for_device(board, P4ChipTarget::Revision(revision)), expected);
+        }
+    }
     fn image(min: u16, max: u16) -> Vec<u8> {
         let mut image = vec![0; 24];
         image[0] = 0xe9;
@@ -162,9 +238,9 @@ mod tests {
         assert_eq!(legacy, P4ChipTarget::LegacyV1);
         assert!(validate_firmware_chip(FirmwareChipRange { min: 300, max: 399 }, legacy).is_err());
         assert!(validate_firmware_chip(FirmwareChipRange { min: 1, max: 199 }, legacy).is_ok());
-        assert_eq!(bundled_resource_for_chip(legacy), V1_FIRMWARE_RESOURCE);
+        assert_eq!(bundled_resource_for_device(P4BoardModel::Wifi6, legacy), V1_FIRMWARE_RESOURCE);
         assert_eq!(
-            bundled_resource_for_chip(P4ChipTarget::Revision(302)),
+            bundled_resource_for_device(P4BoardModel::Wifi6, P4ChipTarget::Revision(302)),
             V3_FIRMWARE_RESOURCE
         );
     }

@@ -1,0 +1,1 @@
+{"dashboard":{"title":"2048","visualStyle":"clean","visualPalette":"ember","visualLayout":"scoreboard","note":"选一个方向，让整盘方块向那边滑。相同数字合并，合出 2048 达标，无路可走时本局结束。","visualSprite":"blocks"}}

@@ -6,6 +6,7 @@
  */
 
 use serde_json::Value;
+use sha2::{Digest,Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -83,6 +84,13 @@ fn diagnostic_details(details: &Value, depth: usize) -> Value {
     let mut clean = serde_json::Map::new();
     let Some(fields) = details.as_object() else { return Value::Object(clean); };
     for (key, value) in fields {
+        if matches!(key.as_str(),"transferId"|"transactionId"|"sha256"|"contentHash") {
+            if let Some(raw)=value.as_str().filter(|v|!v.is_empty()&&v.len()<=128){
+                let token=format!("{:x}",Sha256::digest(raw.as_bytes()));
+                clean.insert(format!("{key}Token"),Value::String(token[..16].to_owned()));
+            }
+            continue;
+        }
         let permitted_number = matches!(key.as_str(),
             "index" | "seq" | "sequence" | "offset" | "size" | "files" | "bytes" |
             "fileCount" | "totalBytes" | "rawBytes" | "chunkBytes" | "initialChunkBytes" |
@@ -90,16 +98,17 @@ fn diagnostic_details(details: &Value, depth: usize) -> Value {
             "baud" | "timeoutMs" | "elapsedMs" | "transactionElapsedMs" |
             "readyElapsedMs" | "rawWriteElapsedMs" | "effectiveBytesPerSecond" |
             "expectedBytes" | "actualBytes" | "occurrences" | "totalLines" |
-            "decodedBytes" | "nulChars" | "replacementChars" | "core" |
-            "lastAckNextSequence" | "lastAckReceivedBytes" | "protocolSchema");
+            "decodedBytes" | "decodedSize" | "fileIndex" | "chunkIndex" | "nulChars" | "replacementChars" | "core" |
+            "lastAckNextSequence" | "lastAckReceivedBytes" | "protocolSchema" |
+            "bootCountDelta" | "resetReasonCode" | "writtenBytes" | "retries" | "osError");
         let permitted_bool = matches!(key.as_str(),
             "ok" | "authenticated" | "resetProven" | "framed" | "rawBoundaryProven" |
             "rawBodyWritten" | "intentPersisted" | "automaticCleanup" | "automaticRetry" |
             "writeStarted" | "writeCompleted" | "mutationReplayed" | "newAttempt" |
-            "originalPayloadRetained" | "legacyRelease");
+            "originalPayloadRetained" | "legacyRelease" | "connectedAfter");
         if (permitted_number && value.as_u64().is_some()) || (permitted_bool && value.is_boolean()) {
             clean.insert(key.clone(), value.clone());
-        } else if value.is_string() && matches!(key.as_str(), "scope" | "phase" | "stage" | "outcome" | "kind" |
+        } else if value.is_string() && matches!(key.as_str(), "scope" | "phase" | "stage" | "outcome" | "kind" | "reason" |
             "errorKind" | "errorCode" | "lastAckPhase" | "transport" | "byteScope" | "ack" | "oldResult") {
             if let Some(label) = value.as_str() {
                 clean.insert(key.clone(), Value::String(safe_label(label).into()));
@@ -118,18 +127,31 @@ fn safe_label(label: &str) -> &str {
         "failure_metadata" | "transaction_started" | "transaction_failed" |
         "transaction_committed" | "native_transaction_started" | "native_transaction_committed" |
         "native_file_started" | "file_started" | "file_committed" | "builtin_activated" |
-        "begin_acknowledged" | "commit_acknowledged" | "chunk_attempt" | "chunk_attempt_failed" |
-        "validation_reconnected" | "validation_timeout" | "validation_failed" |
+        "begin_acknowledged" | "commit_acknowledged" | "chunk_attempt" | "chunk_attempt_failed" | "chunk_timeout_status_applied" | "chunk_timeout_status_retry" |
+        "validation_reconnected" | "validation_reconnect_started" | "validation_same_port_rebound" | "validation_timeout" | "validation_failed" |
+        "validation_reconnect_failed" | "validation_query_failed" | "validation_pending" |
+        "validation_rejected" | "validate" | "validate_boot" |
+        "ota_boot_count_missing" | "ota_runtime_missing" | "ota_rollback" |
+        "ota_version_mismatch" | "ota_partition_mismatch" |
+        "ota_image_state_missing" | "ota_image_state_invalid" |
         "abort_requested" | "raw_ready_rejected" | "raw_ready_ack" | "raw_chunk_send_failed" |
         "raw_chunk_ack" | "device_numeric_trace" | "unparsed_line" | "device_fault_hint" |
         "device_abort_site" | "control_integrity_rejected" | "diagnostic_failed_frame_capture" |
         "serial_read_ended" | "serial_write_failed" | "result_unknown_no_replay" |
-        "not_submitted" | "activation_failure" | "current_intent_observed_quiescent" |
-        "begin" | "chunk" | "raw-chunk" | "raw-ready" | "commit" | "abort" |
+        "live_write_failed" | "live_write_recovered" | "audio_chunk" |
+        "audio_partial_line_discarded" | "zero_progress_transient" | "hard_or_partial_or_unknown_write" |
+        "would_block" | "interrupted" | "broken_pipe" | "not_connected" | "write_progress_unknown" |
+        "not_submitted" | "activation_failure" | "current_intent_observed_quiescent" | "slot_query_failed" | "slot_query_busy" |
+        "slot_query_snapshot_changed" | "slot_query_other" | "checking_cache" |
+        "comparing_assets" | "preparing_slot" | "waiting_storage" |
+        "phase_started" | "phase_ack" | "phase_timed_out" | "phase_wait_disconnected" |
+        "phase_send_failed" | "phase_ack_invalid" | "transaction_completed" | "status" |
+        "commit_storage_deferred" | "commit_audio_busy" | "commit_storage_interrupted" |
+        "begin" | "chunk" | "raw-chunk" | "raw-ready" | "commit" | "abort" | "file" | "activate" | "slot-query" |
         "idle" | "unknown" | "pending" | "accepted" | "rejected" | "timeout" |
         "read" | "write" | "probe_hello" | "live" | "preparing_storage" | "transferring" |
         "preparing" | "activating" | "validating" | "completed" | "cancelled" |
-        "uart-raw-v1" | "json-base64-v1" | "native-usb" | "body" | "physical_line" |
+        "uart-raw-v1" | "json-base64-v1" | "native-usb" | "wifi" | "body" | "physical_line" |
         "header" | "length" | "hash" | "required_prefix" | "negotiation" | "utf8" |
         "admission" | "ack" | "response" | "admission_failed" | "write_failed" |
         "post_write_failed" | "ack_timeout" | "ack_channel_closed" | "ack_read_failed" |
@@ -233,6 +255,23 @@ mod tests {
     }
 
     #[test]
+    fn retains_ota_validation_reason_without_peer_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("transfer.jsonl");
+        append_record(&path, "firmware", "validation_rejected", serde_json::json!({
+            "phase": "validate", "stage": "validate_boot", "errorCode": "ota_rollback",
+            "diagnostics": {"firmware":"untrusted-version"}, "error":"untrusted-error",
+            "bootCountDelta":2, "resetReasonCode":1, "elapsedMs":34000
+        })).unwrap();
+        let row: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(row["event"], "validation_rejected");
+        assert_eq!(row["details"], serde_json::json!({
+            "phase": "validate", "stage": "validate_boot", "errorCode": "ota_rollback",
+            "bootCountDelta":2, "resetReasonCode":1, "elapsedMs":34000
+        }));
+    }
+
+    #[test]
     fn rotates_without_retaining_raw_details() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("transfer.jsonl");
@@ -246,4 +285,13 @@ mod tests {
         assert!(!text.contains("synthetic-private-error"));
         assert!(text.contains("elapsedMs"));
     }
+}
+
+/// Keep a stable, privacy-safe fault class across disconnects. Never log guest text.
+pub fn record_runtime_failure(failure:&Value) {
+    let text=failure["error"].as_str().unwrap_or("");
+    if text.is_empty(){return;}
+    let code=if text.contains("instruction"){1}else if text.contains("memory"){2}
+        else if text.contains("palette")||text.contains("sprite"){3}else if text.contains("save"){4}else{5};
+    record("widget","activation_failure",serde_json::json!({"index":code,"sha256":failure["wasmSha256"],"ok":false}));
 }

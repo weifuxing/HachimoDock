@@ -60,7 +60,7 @@ int main(void){
     render = function(source, "pet_p4_renderer_render")
     assert render.count("renderer_cancel_inactive_prepares(page);") == 1
     assert "cancel_pending_asset_prepares();" not in render
-    assert render.index("renderer_cancel_inactive_prepares(page);") < render.index("render_miniapp_page(state, now_ms);")
+    assert render.index("renderer_cancel_inactive_prepares(page);") < render.index("render_miniapp_page(state, now_ms,")
     # A hidden/absent clip still retires through its snapshot owner every frame.
     assert "return renderer_ext_clip_retire();" in function(source, "renderer_component_media_frame")
     assert "cancel_pending_asset_prepares();" in function(source, "pet_p4_renderer_render_transfer_status")

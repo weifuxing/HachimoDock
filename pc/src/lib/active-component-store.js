@@ -1,5 +1,5 @@
 /**
- * [Input] Browser storage plus an explicit USB boardDeviceId or SSH host target.
+ * [Input] Browser storage plus an explicit device ID or SSH host target.
  * [Output] Versioned, per-device active-component records with exact formal-library
  *          identity; legacy global and draft records remain readable compatibility data.
  * [Pos] shared component lifecycle store in pc/src/lib
@@ -18,9 +18,9 @@ function storageOrNull(storage) {
 
 export function normalizeActiveComponentTarget(target) {
   const transport = String(target?.transport || "").trim().toLowerCase();
-  if (transport === "usb") {
+  if (transport === "usb" || transport === "wifi") {
     const boardDeviceId = String(target?.boardDeviceId || "").trim();
-    return boardDeviceId ? { transport, boardDeviceId } : null;
+    return boardDeviceId ? { transport: "usb", boardDeviceId } : null;
   }
   if (transport === "ssh") {
     const sshHost = String(target?.sshHost || "").trim();
@@ -104,7 +104,7 @@ export function writeActiveComponentForTarget(component, target, storage) {
   const normalizedTarget = normalizeActiveComponentTarget(target);
   const targetKey = activeComponentTargetKey(normalizedTarget);
   if (!component?.id || !targetKey) {
-    throw new Error("启用组件必须绑定明确的 USB boardDeviceId 或 SSH 主机");
+    throw new Error("启用组件必须绑定明确的设备 ID 或 SSH 主机");
   }
   const current = loadActiveComponentStore(storage);
   const activeByTarget = current.version === ACTIVE_COMPONENT_STORE_VERSION

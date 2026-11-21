@@ -1,0 +1,9 @@
+{
+  "id": "cozy-pop-stars",
+  "name": "消星星",
+  "version": "1.1.0",
+  "wasmTouch": true,
+  "kind": "game",
+  "description": "消除至少两颗上下或左右相邻的同色星星，消得越多，得分越高。没有可消除的星星时结算。",
+  "author": "Tobey"
+}

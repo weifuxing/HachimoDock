@@ -19,8 +19,11 @@ for (const file of new Set(paths)) {
   // These two hand-written fixtures emulate the upstream package layout, not build output.
   const testFixture = /^pc\/src-tauri\/bridge\/packages\/agent-session-bus\/test\/fixtures\/fake-openclaw\/dist\/(?:index|plugin-sdk\/agent-runtime)\.js$/.test(file);
   if (!testFixture && /(?:^|\/)(?:node_modules|dist|target|generated-runtime|\.runtime-cache|\.vite|\.pio|managed_components|legacy|\.claude|\.codex)(?:\/|$)/.test(file)
-      || /(?:\.internal-build-|bundle-secrets\.env|\.p12$|\.pfx$|\.pem$|\.key$|\.log$|\.dmg$|\.exe$|\.msi$|\.jsonl$)/i.test(file)
+      || /(?:\.internal-build-|bundle-secrets\.env|\.p8$|\.p12$|\.pfx$|\.pem$|\.key$|\.kdbx$|\.sqlite(?:3)?(?:-wal|-shm)?$|toolchains\.local\.json$|\.log$|\.dmg$|\.exe$|\.msi$|\.jsonl$)/i.test(file)
       || /(?:^|\/)\.env(?:\.|$)/.test(file) && !file.endsWith('.env.example')) problems.push(`${file}: forbidden publication input`);
+  if (/^pc\/src-tauri\/firmware\/esp32-p4\/.*\.bin$/i.test(file)) {
+    problems.push(`${file}: generated application image must be staged from a release`);
+  }
   const absolute = resolve(root, file);
   if (lstatSync(absolute).isSymbolicLink()) { problems.push(`${file}: symlink requires review`); continue; }
   const bytes = readFileSync(absolute);
@@ -30,7 +33,13 @@ for (const file of new Set(paths)) {
   // Scan ASCII credential markers in binary assets as well as source text.
   // Null bytes in a generated firmware image must not bypass this check.
   const text = bytes.toString();
-  if (/-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/.test(text)
+  // mbedTLS embeds the PEM parser's delimiter strings as NUL-terminated
+  // literals. Keep rejecting all other delimiters, including PEM blocks.
+  const p4Image = /^pc\/src-tauri\/firmware\/esp32-p4\/firmware(?:-v3|-pico-v[13])?\.bin$/.test(file)
+    && bytes.length >= 32 && bytes[0] === 0xe9 && bytes.readUInt16LE(12) === 18;
+  const privateKey = [...text.matchAll(/-----BEGIN (?:RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----/g)]
+    .some((match) => !p4Image || text[match.index + match[0].length] !== '\0');
+  if (privateKey
       || /\b(?:ark-[a-f0-9-]{25,}|sk-[A-Za-z0-9_-]{24,}|gh[pousr]_[A-Za-z0-9]{24,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|glpat-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{30,})/.test(text)) {
     problems.push(`${file}: potential credential; value redacted`);
   }

@@ -67,6 +67,7 @@ export function normalizeUsbStatusPayload(status) {
     connectionId,
     bootId,
     connected: !!status?.connected,
+    boardWedged: !!status?.boardWedged,
     portName: status?.portName || "",
     baudRate: Number(status?.baudRate) || 0,
     boardDeviceId: status?.connected ? status?.boardDeviceId || "" : "",
@@ -86,6 +87,7 @@ export function usbStatusSnapshotsEqual(left, right) {
   if (left === right) return true;
   if (!left || !right) return false;
   return left.connected === right.connected
+    && (left.boardWedged ?? false) === (right.boardWedged ?? false)
     && left.portName === right.portName
     && left.baudRate === right.baudRate
     && left.boardDeviceId === right.boardDeviceId
@@ -102,8 +104,45 @@ export function usbStatusSnapshotsEqual(left, right) {
     && JSON.stringify(left.capabilities ?? null) === JSON.stringify(right.capabilities ?? null);
 }
 
-export function deriveDeviceReachability({ usb }) {
-  const deviceOnline = Boolean(usb?.connected);
-  const onlineBoardDeviceId = deviceOnline ? String(usb?.boardDeviceId || "").trim() : "";
+export function pairedWifiTarget(status) {
+  if (status?.wifiConnected !== true || !/^p4-[0-9a-f]{12}$/.test(status.boardDeviceId || "") ||
+    !/^[0-9a-f]{16}$/.test(status.bootId || "")) return null;
+  // Released WiFi6 builds such as R284 identify the dedicated system-settings
+  // firmware by version, but predate an explicit flag in their LAN status.
+  const wifi6SettingsFirmware = /^\d+\.\d+\.\d+-p4-r\d+-wifi6$/.test(status.firmware || "");
+  return {
+    boardDeviceId: status.boardDeviceId,
+    bootId: status.bootId,
+    address: status.address || "",
+    firmware: status.firmware || "",
+    bundledFirmwareVersion: status.bundledFirmwareVersion || "",
+    bundledFirmwareRollbackBlocked: status.bundledFirmwareRollbackBlocked === true,
+    wifiConnected: true,
+    clockSynchronized: status.clockSynchronized === true,
+    rebootSupported: status.rebootSupported === true,
+    trustedVolume: status.trustedVolume === true,
+    controlTrusted: status.controlTrusted === true,
+    wirelessOta: status.wirelessOta === true,
+    wirelessRealtime: status.wirelessRealtime === true,
+    wirelessVoiceInput: status.wirelessVoiceInput === true,
+    componentDelivery: status.componentDelivery === true,
+    appearanceCapacity: Number.isSafeInteger(status.appearanceCapacity) && status.appearanceCapacity > 0
+      ? status.appearanceCapacity : 0,
+    inputDoublePress: status.inputDoublePress === true,
+    systemSettings: status.systemSettings === true || (status.systemSettings == null && wifi6SettingsFirmware),
+    panelControl: status.panelControl === true,
+  };
+}
+
+export function pairedWifiTargetsEqual(left, right) {
+  if (left === right) return true;
+  return Boolean(left && right && Object.entries(right).every(([key, value]) => left[key] === value));
+}
+
+export function deriveDeviceReachability({ usb, wifi }) {
+  const deviceOnline = Boolean(usb?.connected || wifi);
+  const onlineBoardDeviceId = usb?.connected
+    ? String(usb.boardDeviceId || "").trim()
+    : wifi?.boardDeviceId || "";
   return { deviceOnline, onlineBoardDeviceId };
 }

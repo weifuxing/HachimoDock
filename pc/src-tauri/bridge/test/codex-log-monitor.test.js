@@ -839,19 +839,26 @@ test("only successful work belonging to the completed turn makes it audible", ()
   const push = (type, turn_id, item) =>
     monitor.processLine(JSON.stringify({ type: "event_msg", payload: { type, turn_id, item } }), entry);
   const edit = { type: "fileChange", status: "completed", changes: [{ kind: "update" }] };
+  const rolloutEdit = { type: "FileChange", status: "completed", changes: { "notes.txt": { type: "Update" } } };
 
   push("task_started", "question");
   push("item_completed", "question", { type: "mcpToolCall", status: "completed", readOnlyHint: true });
   push("item_completed", "earlier", edit);
+  push("item_completed", "question", { ...rolloutEdit, changes: {} });
   push("task_complete", "question");
 
   push("task_started", "task");
   push("item_completed", "task", edit);
   push("task_complete", "task");
 
+  push("task_started", "rollout-task");
+  push("item_completed", "rollout-task", rolloutEdit);
+  push("task_complete", "rollout-task");
+
   push("task_started", "next-question");
   push("item_completed", "next-question", { ...edit, status: "failed" });
+  push("item_completed", "next-question", { ...rolloutEdit, status: "failed" });
   push("task_complete", "next-question");
 
-  assert.deepEqual(states, ["reply_complete", "done", "reply_complete"]);
+  assert.deepEqual(states, ["reply_complete", "done", "done", "reply_complete"]);
 });

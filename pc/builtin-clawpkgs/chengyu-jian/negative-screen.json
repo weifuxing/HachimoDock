@@ -1,0 +1,11 @@
+{
+  "dashboard": {
+    "title": "成语笺",
+    "headline": "依释义选字，填全四字成语",
+    "note": "简单二十题，中等与困难各三十题。",
+    "footer": "开始闯关",
+    "visualStyle": "clean",
+    "visualPalette": "ember",
+    "visualLayout": "scoreboard"
+  }
+}

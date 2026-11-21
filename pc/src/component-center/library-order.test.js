@@ -12,6 +12,8 @@ import {
   sortComponentsByCreatedAt,
   mergeComponentCatalog,
   isComponentVisible,
+  legacyAudioInstallBlockedReason,
+  componentUsbInstallBlockedReason,
   isWithdrawnComponent,
   DEFAULT_COMPONENT_ORDER,
   sortComponentsByDefaultOrder,
@@ -33,29 +35,58 @@ test('promoted local-delights revisions use builtin placement, not recent-instal
 
 test("release hides builtin and already-installed music without deleting records", () => {
   const source = [{id:"stock-watchlist"}, {id:"music-player"}, {id:"wooden-fish"}];
-  assert.deepEqual(mergeComponentCatalog([], source).map(x => x.id), ["stock-watchlist", "wooden-fish"]);
-  assert.deepEqual(mergeComponentCatalog([{id:"music-player"}], source).map(x => x.id), ["stock-watchlist", "wooden-fish"]);
+  assert.deepEqual(mergeComponentCatalog([], source).map(x => x.id), ["wooden-fish", "stock-watchlist"]);
+  assert.deepEqual(mergeComponentCatalog([{id:"music-player"}], source).map(x => x.id), ["wooden-fish", "stock-watchlist"]);
   assert.equal(source.length, 3);
   assert.equal(isComponentVisible({id:"custom-player", mediaSource:"audio.player"}), false);
-  assert.equal(isComponentVisible({id:"upcoming-todos"}), true);
+  const imported = {id:"local_lyrics_player", isLocal:true, mediaSource:"audio.player"};
+  assert.equal(isComponentVisible(imported), true);
+  assert.ok(mergeComponentCatalog([imported], source).some(item => item.id === imported.id));
+  assert.match(legacyAudioInstallBlockedReason(imported), /audio\.player/);
+  assert.equal(legacyAudioInstallBlockedReason({id:"bridge-player"}), "");
+  assert.equal(isComponentVisible({id:"upcoming-todos"}), false);
   const center=readFileSync(new URL("../ComponentCenter.jsx", import.meta.url),"utf8");
   assert.ok(center.includes("isComponentVisible(activeComponentRecord)"));
   assert.ok(center.includes("isComponentVisible(item) && !catalogIds.has(item.id)"));
 });
 
+test("USB preflight checks the declared service requirements against the current board", () => {
+  const component = {syncRequirements:{usbCapabilities:{
+    widgetServiceBridge:"p4-service-bridge-v1",
+    widgetHostCollection:"p4-host-collection-v1",
+  }}};
+  assert.match(componentUsbInstallBlockedReason(component, {}), /连接 USB/);
+  const board = {connected:true, boardDeviceId:"p4-a", capabilities:{widgetServiceBridge:true}};
+  assert.match(componentUsbInstallBlockedReason(component, board), /widgetServiceBridge=.*widgetHostCollection=/);
+  board.capabilities = {...component.syncRequirements.usbCapabilities};
+  assert.equal(componentUsbInstallBlockedReason(component, board), "");
+  assert.equal(componentUsbInstallBlockedReason({id:"ordinary"}, {}), "");
+});
+
 test("PC and firmware share the curated default component order", () => {
   const factory = JSON.parse(readFileSync(new URL("../../../firmware/factory-config.json", import.meta.url)));
-  const firstTen=['city-radio','cloud-hop','stock-watchlist','wooden-fish','daily-news','book-pocket','block-combo','tomato-clock','fresh-fruit-slice','hachimi-sounds','snake-turn'];
-  assert.deepEqual(DEFAULT_COMPONENT_ORDER.slice(0,11),firstTen);
-  assert.deepEqual(factory.components.ids,DEFAULT_COMPONENT_ORDER);
-  assert.equal(new Set(DEFAULT_COMPONENT_ORDER).size,29);
+  const firstEntries=["city-radio", "inkline-gomoku", "wooden-fish", "stock-watchlist", "wasm-piano", "cozy-pop-stars", "xiangqi", "snake-turn"];
+  assert.deepEqual(DEFAULT_COMPONENT_ORDER.slice(0,firstEntries.length),firstEntries);
+  assert.deepEqual(factory.components.ids.filter(id => !factory.components.firmwareOnlyIds.includes(id)), DEFAULT_COMPONENT_ORDER);
+  assert.deepEqual(factory.components.firmwareOnlyIds, []);
+  assert.ok(!DEFAULT_COMPONENT_ORDER.includes('bloomfrog_companion'));
+  assert.equal(isComponentVisible({id:'bloomfrog_companion'}), true);
+  assert.equal(new Set(DEFAULT_COMPONENT_ORDER).size,27);
   assert.deepEqual(DEFAULT_COMPONENT_ORDER.slice(-3), ['decision-capsule','answer-book','hope-train']);
   assert.equal(factory.components.defaultActiveId,'city-radio');
-  assert.ok(!factory.components.ids.includes('music-player'));
-  const items=[{id:'custom-b'},...firstTen.toReversed().map(id=>({id})),{id:'custom-a'}];
+  for (const id of ['music-player','daily-news','hachimi-travel','hachimi-weather','daily-almanac','hachimi-home','hachimi-garden','hachimi-break']) {
+    assert.ok(!factory.components.ids.includes(id), id);
+    if (id !== 'music-player') assert.equal(isComponentVisible({id}), true);
+  }
+  const items=[{id:'custom-b'},...firstEntries.toReversed().map(id=>({id})),{id:'custom-a'}];
   const snapshot=[...items];
-  assert.deepEqual(sortComponentsByDefaultOrder(items).map(x=>x.id),[...firstTen,'custom-b','custom-a']);
+  assert.deepEqual(sortComponentsByDefaultOrder(items).map(x=>x.id),[...firstEntries,'custom-b','custom-a']);
   assert.deepEqual(items,snapshot);
+  const newerGomoku = {id:'inkline-gomoku', version:'2.0.0'};
+  const mixed = mergeComponentCatalog([{id:'custom-b'}, newerGomoku, {id:'custom-a'}], firstEntries.map(id=>({id, version:'1.0.1'})));
+  assert.deepEqual(mixed.map(item=>item.id), ['custom-b', 'inkline-gomoku', 'custom-a', ...firstEntries.filter(id=>id!=='inkline-gomoku')]);
+  assert.equal(mixed[1].version,'2.0.0');
+  assert.equal(mixed[1].sourceAlternatives[0],newerGomoku);
 });
 
 test("component library sorts mixed records by creation time newest first", () => {
@@ -94,7 +125,7 @@ test("recent installs precede curated defaults without losing custom source revi
 });
 
 test("renamed packages preserve identity and synchronize all display titles", () => {
-  for(const [id,name,version]of [['wooden-fish','静心木鱼','1.0.5'],['book-pocket','每天一本书','1.0.2']]){
+  for(const [id,name,version]of [['wooden-fish','静心木鱼','1.0.5'],['book-pocket','每天一本书','1.0.2'],['wasm-2046','2048','1.4.2']]){
     const root=new URL(`../../builtin-clawpkgs/${id}/`,import.meta.url);
     const read=file=>JSON.parse(readFileSync(new URL(file,root)));
     assert.deepEqual([read('component.json').id,read('component.json').name,read('component.json').version],[id,name,version]);
@@ -121,9 +152,9 @@ test("component library keeps source order for equal or missing creation times",
 
 test("catalog visibility is checked on active, preview, restore and creator UI routes", () => {
   const center=readFileSync(new URL("../ComponentCenter.jsx",import.meta.url),"utf8");
-  assert.match(center,/function openComponent\(component\) \{if\(!isComponentVisible\(component\)\)return/);
+  assert.match(center,/function openComponent\(component\)\s*\{\s*if\s*\(!isComponentVisible\(component\)\)\s*return/);
   assert.match(center,/previewComponent && isComponentVisible\(previewComponent\) &&/);
-  assert.match(center,/if \(!component \|\| !isComponentVisible\(component\)\) return false/);
+  assert.match(center,/if \(!component \|\| !isComponentVisible\(component\) \|\| localInstallBlockedReason\(component\)\) return false/);
   assert.match(center,/isComponentVisible\(activeComponentRecord\)/);
   assert.match(center,/isComponentVisible\(item\) && !catalogIds.has\(item.id\)/);
   const sidebar=readFileSync(new URL("../shell/ContextRail.jsx",import.meta.url),"utf8");

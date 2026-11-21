@@ -66,7 +66,8 @@ test("Volcano generation reads centralized credentials and keeps model selection
   assert.match(wizard, /VideoGenerationSettings/);
   assert.doesNotMatch(wizard, /自定义模型名称/);
   assert.match(wizard, /isVolcengine/);
-  assert.match(wizard, /!isVolcengine && \(/);
+  assert.match(wizard, /isCustom && \(\s*<FieldWithHelp label="Base URL"/);
+  assert.match(wizard, /isKling && <KlingVideoSettings/);
   assert.match(wizard, /providerCredentialsConfigured/);
   assert.match(wizard, /generation-api-status/);
   assert.match(wizard, /打开 API 配置/);

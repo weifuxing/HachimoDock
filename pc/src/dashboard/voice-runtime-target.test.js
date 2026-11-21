@@ -68,3 +68,19 @@ test('no native connection ID means waiting, not an invented local generation',a
  const disconnected=normalizeUsbStatusPayload({connected:false,connectionId:'7',bootId:'0011223344556677'});
  assert.equal(disconnected.connectionId,'');assert.equal(disconnected.bootId,'');
 });
+
+test("Wi-Fi PTT requires trusted firmware capability and yields to USB", async () => {
+  const wifi = {wifiConnected: true, controlTrusted: true, panelControl: true,
+    wirelessVoiceInput: true, boardDeviceId: "p4-0123456789ab", bootId: "0123456789abcdef"};
+  const first = voiceRuntimeTarget({}, "mimocode", wifi);
+  assert.equal(first.kind, "wifi");
+  assert.notEqual(first.key, voiceRuntimeTarget({}, "mimocode", {...wifi, bootId:"fedcba9876543210"}).key);
+  assert.equal(voiceRuntimeTarget({}, "mimocode", {...wifi, wirelessVoiceInput:false}).kind, "waiting");
+  assert.equal(voiceRuntimeTarget({}, "mimocode", {...wifi, controlTrusted:false}).kind, "waiting");
+  assert.equal(voiceRuntimeTarget({connected:true}, "mimocode", wifi).kind, "waiting");
+  const calls = [];
+  const poller = createVoiceRuntimePoller({target:first, isCurrent:()=>true,
+    invoke: async (...args)=>{calls.push(args); return {running:true};}, publish:()=>{}});
+  await poller.poll();
+  assert.deepEqual(calls, [["ensure_device_voice_runtime", {input:{interactive:false}}]]);
+});

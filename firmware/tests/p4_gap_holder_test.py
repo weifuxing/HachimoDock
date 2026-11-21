@@ -43,7 +43,7 @@ int main(void){
 
 def test_holder_instrumentation_is_flag_gated_and_placed_around_the_existing_locks(tmp_path):
     main=(ROOT/'main/pet_p4_main.c').read_text();renderer=(ROOT/'main/pet_p4_renderer.c').read_text();diag=(ROOT/'main/pet_p4_diagnostics.c').read_text()
-    loop=main[main.index('  while (true) {\n    bool render_frame = false;'):main.index('pet_p4_renderer_note_loop(')]
+    loop=main[main.rindex('  while (true) {', 0, main.index('    bool render_frame = false;')):main.index('pet_p4_renderer_note_loop(')]
     # Holder class and topic are sampled before the main loop's own take; attribution precedes note_loop.
     assert loop.index('loop_holder = xSemaphoreGetMutexHolder(g_state_mutex);')<loop.index('xSemaphoreTake(g_state_mutex, portMAX_DELAY);')
     assert loop.index('loop_wait_us = (uint32_t)')<loop.index('pet_p4_renderer_note_wait_holder(loop_wait_us, loop_holder_class, loop_holder_topic);')
@@ -72,7 +72,7 @@ def test_holder_instrumentation_is_flag_gated_and_placed_around_the_existing_loc
     assert idle.index('xSemaphoreTake(g_state_mutex,portMAX_DELAY)') < idle.index('worker_locked_begin();') < idle.index('pet_p4_asset_transfer_cleanup_worker(&g_state)') < idle.index('worker_locked_end();') < idle.index('xSemaphoreGive(g_state_mutex)')
     assert 'g_worker_locked_topic_hash=pet_topic_hash("asset/idle-cleanup"' in idle
     assert 'worker_locked_end();g_worker_locked_topic_hash=0;' in idle
-    assert main.replace(cursor,'').replace(idle,'').count('#if PET_P4_GAP_PEAK_HOLDER')==8
+    assert main.replace(cursor,'').replace(idle,'').count('#if PET_P4_GAP_PEAK_HOLDER')==10
     assert main.count('#if PET_P4_GAP_PEAK_CONTEXT')==6
     assert renderer.count('void pet_p4_renderer_note_wait_holder(')==1 and renderer.index('context.at_us=(uint64_t)ended_us;')<renderer.index('pet_render_gap_context_record(&g_metrics.lifetime,g_render_trace.gap_us,&context);')
     for key in ('"atUs"','"waitHolder"','"waitTopicHash"','"workerLocked"','"overBudgetSpans"'):assert key in diag

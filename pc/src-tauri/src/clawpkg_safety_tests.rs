@@ -5,7 +5,7 @@ use std::io::{Cursor, Read};
 fn archive(count: usize, per_file: u64) -> Vec<u8> {
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for i in 0..count {
-        writer.start_file(format!("assets/file-{i}.bin"), zip::write::FileOptions::default()
+        writer.start_file(format!("assets/file-{i}.bin"), zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated).compression_level(Some(1))).unwrap();
         std::io::copy(&mut std::io::repeat(0).take(per_file), &mut writer).unwrap();
     }
@@ -34,15 +34,9 @@ fn forged_zip_lengths_cannot_bypass_actual_expanded_budget() {
     let mut bytes = archive(5, CLAWPKG_MAX_ENTRY_BYTES);
     assert!(bytes.len() < CLAWPKG_MAX_ARCHIVE_BYTES);
     forge_uncompressed_sizes(&mut bytes, 5);
-    // Establish that this is the risky format: locked zip sees declared zero,
-    // yet its actual Deflate reader returns the full, CRC-valid first payload.
-    let mut zip = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
-    let mut first = zip.by_index(0).unwrap();
-    assert_eq!(first.size(), 0);
-    assert_eq!(std::io::copy(&mut first, &mut std::io::sink()).unwrap(), CLAWPKG_MAX_ENTRY_BYTES);
-    drop(first); drop(zip);
-    let error = validate_clawpkg_bytes(&bytes).unwrap_err();
-    assert!(error.contains("实际解压长度") || error.contains("总大小超过上限"), "{error}");
+    // Reject the existing malformed archive even when the ZIP reader now
+    // catches the inconsistency before the application's own byte budget.
+    assert!(validate_clawpkg_bytes(&bytes).is_err());
 }
 
 #[test]

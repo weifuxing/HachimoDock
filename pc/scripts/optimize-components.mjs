@@ -41,7 +41,8 @@ function button(action,text,x,y,w=100,color=63454,foreground=16970){
 function mapped(action,event,label){return{action,event,label,control:event.startsWith("button.sw2")?"SW2":"前方摇杆"};}
 function persist(r,vars,states,page=false){r.persist={version:r.persist?.version||1,vars,states:states||Object.fromEntries(r.states.map(s=>[s,s])),...(page?{page:true}:{})};}
 for(const [id,checks] of Object.entries(mechanisms)){
-  const from=fs.existsSync(path.join(source,id))?path.join(source,id):path.join(pc,"builtin-clawpkgs",id);
+  const from=[path.join(source,id),path.join(pc,"builtin-clawpkgs",id),path.join(pc,"optional-clawpkgs",id)].find(p=>fs.existsSync(p));
+  if(!from)throw Error(`Missing source for ${id}`);
   const root=path.join(out,"packages",id);
   if(fs.existsSync(root))throw Error(`Refusing to replace ${root}`);
   fs.cpSync(from,root,{recursive:true});

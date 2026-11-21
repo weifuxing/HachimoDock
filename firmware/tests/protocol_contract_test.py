@@ -70,10 +70,11 @@ def test_dsi_clock_uses_sdk_revision_specific_default():
 
 def test_v3_dpi_clock_keeps_compensated_front_porch_positive():
     bsp = read("components/esp32_p4_wifi6_touch_lcd_4_3/esp32_p4_wifi6_touch_lcd_4_3.c")
+    panel = read("components/esp32_p4_wifi6_touch_lcd_4_3/include/bsp/display.h")
     clock = re.search(
         r"#if CONFIG_ESP32P4_REV_MIN_FULL >= 300\s+.*?"
-        r"\.dpi_clock_freq_mhz = (\d+),\s+#else\s+"
-        r"\.dpi_clock_freq_mhz = (\d+),\s+#endif", bsp, re.S)
+        r"#define BSP_LCD_DPI_CLOCK_MHZ (\d+)\s+#else\s+"
+        r"#define BSP_LCD_DPI_CLOCK_MHZ (\d+)\s+#endif", panel, re.S)
     assert clock, "v3 must use an exact DPI divider without changing v1 timing"
     v3_clock, v1_clock = map(int, clock.groups())
     assert v1_clock == 25
@@ -681,7 +682,7 @@ def test_p4_component_packages_commit_through_validated_ab_catalog_snapshots():
     miniapp = read_required("main/pet_p4_miniapp.c")
     factory = read_required("tools/build_factory_image.py")
     protocol_doc = read("protocol.md")
-    commit_start = miniapp.index("bool pet_p4_miniapp_install_commit")
+    commit_start = miniapp.index("static bool install_commit_fenced")
     commit = miniapp[
         commit_start:
         miniapp.index("static bool remove_file_if_present", commit_start)
@@ -698,10 +699,10 @@ def test_p4_component_packages_commit_through_validated_ab_catalog_snapshots():
     assert '"widgetChecksum"' in miniapp
     assert '"buttonsChecksum"' in miniapp
     assert '"spritesChecksum"' in miniapp
-    assert "load_catalog_snapshot(0, snapshot0, NULL)" in miniapp
-    assert "load_catalog_snapshot(1, snapshot1, snapshot0)" in miniapp
+    assert "load_catalog_snapshot(0, snapshot0)" in miniapp
+    assert "load_catalog_snapshot(1, snapshot1)" in miniapp
     assert 'recovered ? " after per-component recovery" : ""' in miniapp
-    assert 'recover_catalog_items(selected, selected == snapshot0 ? snapshot1 : snapshot0)' in miniapp
+    assert 'recover_catalog_items(selected, backup)' in miniapp
     assert "package_generation = (uint8_t) (1 - next_catalog[catalog_index].package_generation)" in commit
     assert "next_catalog[catalog_index].widget_checksum = miniapp_checksum" in commit
     assert "next_catalog[catalog_index].buttons_checksum = miniapp_checksum" in commit
@@ -720,7 +721,7 @@ def test_p4_component_packages_commit_through_validated_ab_catalog_snapshots():
     assert '"packageGeneration": 0' in factory
     assert "fnv1a32_bytes(widget_bytes)" in factory
     assert "compile_component_sprites(package_dir, widget)" in factory
-    assert '"spritesChecksum": f"{sprite_pack_checksum(sprites):08x}"' in factory
+    assert '"spritesChecksum": f"{sprite_pack_checksum(sprites, wasm):08x}"' in factory
     assert "componentCatalogGeneration=true" in protocol_doc
 
 
@@ -732,29 +733,17 @@ def test_p4_ab_firmware_embeds_and_migrates_all_builtin_components():
     main = read_required("main/pet_p4_main.c")
     protocol_doc = read("protocol.md")
 
-    builtin_ids = [
-        "stock-watchlist",
-        "wooden-fish",
-        "upcoming-todos",
-        "computer-status",
-        "two-key-pong",
-        "bloomfrog_companion",
-        "flappy-bird",
-        "block-combo",
-        "snake-turn",
-        "tomato-clock",
-        "drink-reminder",
-        "token-usage",
-    ]
     assert bundle["version"] == 1
-    builtin_ids = json.loads(read("factory-config.json"))["components"]["ids"]
-    assert len(builtin_ids) == 29 and "music-player" not in builtin_ids
+    catalog = json.loads(read("factory-config.json"))["components"]
+    builtin_ids = catalog["ids"]
+    assert len(builtin_ids) == 27 and "music-player" not in builtin_ids
     assert builtin_ids[-3:] == ["decision-capsule", "answer-book", "hope-train"]
     assert [item["id"] for item in bundle["components"]] == builtin_ids
     for item in bundle["components"]:
         component_id = item["id"]
-        source = json.loads(read_workspace(f"pc/builtin-clawpkgs/{component_id}/runtime/widget.json"))
-        if item["resourcePackage"]:
+        root = "optional-clawpkgs" if component_id in catalog["firmwareOnlyIds"] else "builtin-clawpkgs"
+        source = json.loads(read_workspace(f"pc/{root}/{component_id}/runtime/widget.json"))
+        if item["resourcePackage"] and "hachiWasm" not in source:
             assert source["surface"]["images"]
             for key in ("images", "fonts", "typography", "interaction"):
                 source["surface"].pop(key, None)
@@ -770,13 +759,15 @@ def test_p4_ab_firmware_embeds_and_migrates_all_builtin_components():
                         entity["shape"]="character"
         assert item["widget"] == source
         assert item["buttons"] == json.loads(
-            read_workspace(f"pc/builtin-clawpkgs/{component_id}/buttons.json")
+            read_workspace(f"pc/{root}/{component_id}/buttons.json")
         )
         assert re.fullmatch(r"[0-9a-f]{8}", item["spritesChecksum"])
         assert isinstance(item["spriteFiles"], list)
-    frog = next(item for item in bundle["components"] if item["id"] == "bloomfrog_companion")
-    assert frog["resourcePackage"] is True
-    assert frog["spriteFiles"] == []  # Full art lives in factory/PC packages, not duplicated in OTA.
+    sources = read_required("main/pet_p4_builtin_components_data.c")
+    for component_id in catalog["factoryWasmIds"]:
+        assert f'"id":"{component_id}","resourcePackage":true,"factoryWasm":true'.replace('"', '\\"') in sources
+        assert f'wasm_{component_id.replace("-", "_")}[]' not in sources
+    assert 'cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(indexed, "factoryWasm"))' in miniapp
 
     assert '"pet_p4_builtin_components_data.c"' in cmake
     assert "build_builtin_bundle.py" in cmake
@@ -791,9 +782,9 @@ def test_p4_ab_firmware_embeds_and_migrates_all_builtin_components():
     assert "strlen(expected_marker)" in miniapp
     assert "cJSON_Parse(json)" in miniapp
     assert "tinfl_decompress_mem_to_mem(" not in miniapp
-    assert "tinfl_decompressor *inflater = calloc" in miniapp
+    assert "tinfl_decompressor *inflater = heap_caps_calloc" in miniapp
     assert "TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF" in miniapp
-    assert 'cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(package, "resourcePackage"))' in miniapp
+    assert 'cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(indexed, "resourcePackage"))' in miniapp
     assert "commit_builtin_package" in miniapp
     assert "new_component && !g_builtin_sync_in_progress" in miniapp
     assert "Bundle order is generated from the same factory-config.json used by the PC." in miniapp
@@ -1194,11 +1185,22 @@ def test_p4_conversation_queue_is_synced_and_rendered_with_pixel_ellipsis():
     assert "fill_round_rect(x + 4, y + 4, w - 8, h - 8" in renderer
     assert "is_selected ? 7 : 4" in renderer
     assert "rgb565(255, 255, 255)" in renderer
-    assert "draw_text_line_vcenter(text.title, x + 30, y + 10, 38, w - 82, ink, 2, true)" in renderer
+    from p4_render_trace_test import function
+    queue_draw = function(renderer, "draw_session_queue_uncached")
+    assert queue_draw.index("session_text(state->current_session_agent, item, now_ms, &text)") < queue_draw.index("draw_bubble_card_title(&text,")
+    title_draw = function(renderer, "draw_bubble_card_title")
+    assert title_draw.index("renderer_bubble_draw_pinned(view, PET_BUBBLE_TITLE") < title_draw.index("draw_bubble_large_line(view, PET_BUBBLE_TITLE, view->title")
+    assert "renderer_prefers_resident" not in queue_draw
+    assert "pet_bubble_pixels_release(&text)" in queue_draw
     assert "static void draw_card_body_lines(" in renderer
     assert "const char *second_line = draw_text_line_medium_vcenter(" in renderer
     assert "first_line_y + 27, 27" in renderer
-    assert "draw_card_body_lines(text.body, x + 30, y + 50, w - 60, muted, &text)" in renderer
+    assert "draw_card_body_lines(text.body, x + 30, y + 50, w - 60, muted, &text)" in queue_draw
+    selected_text = function(renderer, "session_text")
+    assert "item->content[0] ? item->content : item->state" in selected_text
+    body_draw = function(renderer, "draw_card_body_lines")
+    assert body_draw.index("renderer_bubble_draw_pinned") < body_draw.index("draw_text_line_medium_vcenter")
+    assert "renderer_prefers_resident" not in body_draw
     assert "static const char *draw_text_line_medium(" in renderer
     assert "static const char *draw_text_line_medium_vcenter(" in renderer
     assert "pet_p4_view_status_t marker_status = session_view_status(item->state)" in renderer
@@ -1212,19 +1214,25 @@ def test_p4_conversation_queue_is_synced_and_rendered_with_pixel_ellipsis():
     assert "box_y * 2 + box_h - 1 - top - bottom" in renderer
     assert "int first_ink_row = glyph.box_h" in renderer
     assert "glyph_alpha_at(bitmap, &glyph, x, y)" in renderer
-    assert "int first_ink_row = scaled_height" in renderer
+    medium_bounds = function(renderer, "medium_glyph_visual_bounds")
+    assert "int first_ink_row = glyph.box_h" in medium_bounds
+    assert "glyph_alpha_at(bitmap, &glyph, sx, sy)" in medium_bounds
+    assert "*top = glyph_top + first_ink_row * 3 / 2" in medium_bounds
+    assert "*bottom = glyph_top + ((last_ink_row + 1) * 3 + 1) / 2 - 1" in medium_bounds
+    assert medium_bounds.index("int glyph_top =") < medium_bounds.index("lv_font_glyph_release_draw_data")
+    assert "medium_glyph_coverage(" not in medium_bounds
     assert "if (!compact)" in renderer
     assert "int h = 56" in renderer
     assert "w = 72 + utf8_text_width(body, -1, 2)" in renderer
     assert "#define PET_P4_COMPACT_TEXT_OPTICAL_Y (-2)" in renderer
-    assert "text_y_in_box(body, 2, y, h) + PET_P4_COMPACT_TEXT_OPTICAL_Y" in renderer
+    assert "y + (h - 36) / 2 + PET_P4_COMPACT_TEXT_OPTICAL_Y" in renderer
     assert "draw_session_card_panel(x, y, w, h, PET_P4_SESSION_CARD_RADIUS, true, selection)" in renderer
     assert "int banner_w = utf8_text_width(label, -1, 1) + 48" in renderer
     assert "int banner_x = PET_P4_UI_WIDTH - banner_w - 20" in renderer
     assert "int banner_y = 18" in renderer
     assert "banner_w - 44" in renderer
     assert "pet_p4_state_host_connected(state, now_ms)" in renderer
-    assert 'label = "客户端未连接"' in renderer
+    assert 'draw_connection_banner_pixels("未连接客户端"' in renderer
     assert "app->state[0] && show_app_state" in renderer
 
 
@@ -1275,7 +1283,7 @@ def test_p4_protocol_replies_are_routed_back_to_the_command_origin():
     ]
     screenshot = source[
         source.index("/* Screenshot-only checked writes."):
-        source.index("static bool maybe_handle_debug_line")
+        source.index("bool maybe_handle_debug_line")
     ]
 
     assert "uart_write_all(line" in transport
@@ -1287,7 +1295,7 @@ def test_p4_protocol_replies_are_routed_back_to_the_command_origin():
     assert "reply_ctx" in screenshot
 
     handler = source[
-        source.index("static bool maybe_handle_debug_line"):
+        source.index("bool maybe_handle_debug_line"):
         source.index("static bool consume_byte")
     ]
     assert "xSemaphoreTake(g_render_mutex" in handler
@@ -1359,7 +1367,10 @@ def test_pc_uses_high_baud_for_p4_ch343_usb_uart():
     assert "DEFAULT_USB_SERIAL_BAUD: u32 = 921_600" in usb
     assert "serial_baud_candidates_for_device" in usb
     assert "probe_serial_port(port_name, &baud_candidates" in usb
-    assert "serialport::new(port_name, baud)" in usb
+    assert "serialport::new(&port_name, baud)" in usb
+    assert ".dtr_on_open(true)" in usb
+    assert "write_request_to_send(true)" in usb
+    assert "write_data_terminal_ready(true)" in usb
     assert "usb_uart_wire_bytes_per_sec(P4_USB_UART_BAUD)" in usb
     assert "P4_APPEARANCE_ASSET_CHUNK_SIZE: usize = 20_478" in usb
     assert "P4_RAW_APPEARANCE_ASSET_CHUNK_SIZE: usize = 64 * 1024" in usb
@@ -1398,9 +1409,16 @@ def test_p4_runtime_initializes_waveshare_lcd_bsp():
     assert "espressif__esp_lcd_touch_gt911" in cmake
     assert '#include "bsp/esp-bsp.h"' in lcd
     assert '#include "bsp/display.h"' in lcd
-    assert "bsp_display_new" in lcd
-    assert "bsp_display_backlight_on" in lcd
-    assert "esp_lcd_dpi_panel_set_pattern" in lcd
+    init = function(lcd, "pet_p4_lcd_init")
+    assert "bsp_display_new(" in init
+    assert ".on_refresh_done = lcd_refresh_done_callback" in init
+    assert "esp_lcd_dpi_panel_register_event_callbacks(" in init
+    assert "set_lcd_visible(false)" in init
+    assert "set_lcd_visible(true)" in function(lcd, "pet_p4_lcd_reveal")
+    visible = function(lcd, "set_lcd_visible")
+    assert "BSP_LCD_BACKLIGHT < 0" in visible
+    assert "esp_lcd_panel_disp_on_off(g_panel_handle, visible)" in visible
+    assert source.index("pet_p4_renderer_render_boot(") < source.index("pet_p4_lcd_reveal()")
     assert "pet_p4_lcd_init()" in source
     assert "debug/lcd" in source
     assert "pet_p4_lcd_backlight_status()" in source
@@ -1413,8 +1431,16 @@ def test_p4_lcd_matches_hd28091_st7701s_panel_geometry():
 
     assert "#define BSP_LCD_H_RES              (480)" in display
     assert "#define BSP_LCD_V_RES              (640)" in display
-    assert "#define BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS (500)" in display
-    assert "#define BSP_LCD_MIPI_DSI_LANE_NUM          (2)" in display
+    assert "#define BSP_LCD_MIPI_DSI_LANE_NUM CONFIG_BSP_LCD_DSI_DATA_LANES" in display
+    assert "#define BSP_LCD_MIPI_DSI_LANE_BITRATE_MBPS CONFIG_BSP_LCD_DSI_LANE_BITRATE_MBPS" in display
+    kconfig = read("components/esp32_p4_wifi6_touch_lcd_4_3/Kconfig")
+    lanes = kconfig.split("config BSP_LCD_DSI_DATA_LANES", 1)[1].split("config ", 1)[0]
+    assert "range 1 2" in lanes and "default 1" in lanes
+    lane_rate = kconfig.split("config BSP_LCD_DSI_LANE_BITRATE_MBPS", 1)[1].split("config ", 1)[0]
+    assert "range 480 550 if BSP_LCD_DSI_DATA_LANES = 2" in lane_rate
+    assert re.search(r"\brange 480 800\s*\n", lane_rate)
+    assert "default 500 if BSP_LCD_DSI_DATA_LANES = 2" in lane_rate
+    assert re.search(r"\bdefault 800\s*\n", lane_rate)
     assert ".h_size = BSP_LCD_H_RES" in bsp
     assert ".v_size = BSP_LCD_V_RES" in bsp
     assert "#define BSP_LCD_PIXEL_FORMAT        LCD_COLOR_PIXEL_FORMAT_RGB565" in display
@@ -1422,8 +1448,13 @@ def test_p4_lcd_matches_hd28091_st7701s_panel_geometry():
     assert ".pixel_format = BSP_LCD_PIXEL_FORMAT" in bsp
     assert ".bits_per_pixel = BSP_LCD_BITS_PER_PIXEL" in bsp
     assert ".rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB" in bsp
-    assert ".dpi_clock_freq_mhz = 25" in bsp
+    assert ".dpi_clock_freq_mhz = BSP_LCD_DPI_CLOCK_MHZ" in bsp
+    assert "#define BSP_LCD_DPI_CLOCK_MHZ 25" in display
+    assert "#define BSP_LCD_DPI_CLOCK_MHZ 20" in display
     assert ".hsync_front_porch = 328" in bsp
+    defaults = read("sdkconfig.defaults")
+    assert "CONFIG_BSP_LCD_DSI_DATA_LANES=2" in defaults
+    assert "CONFIG_BSP_LCD_DSI_LANE_BITRATE_MBPS=500" in defaults
     assert ".hsync_pulse_width = 4" in bsp
     assert ".hsync_back_porch = 20" in bsp
     assert ".vsync_front_porch = 14" in bsp
@@ -1519,7 +1550,11 @@ def test_p4_runtime_renders_pet_frames_to_lcd():
     assert "int panel_y = x" in renderer
     assert "PET_P4_PANEL_MOUNT_ROTATE_180" not in renderer
     assert "pet_p4_renderer_render(g_render_state, &render_view, now_ms)" in main
-    assert "PET_P4_MAIN_RENDER_INTERVAL_MS 50ULL" in main
+    assert "PET_P4_MAIN_RENDER_INTERVAL_MS CONFIG_PET_P4_MAIN_RENDER_INTERVAL_MS" in main
+    assert re.search(
+        r"config PET_P4_MAIN_RENDER_INTERVAL_MS\b[^#]*?\bdefault 50",
+        read("main/Kconfig.projbuild"),
+    )
     assert "PET_P4_MAIN_LOOP_DELAY_MS 1" in main
     assert 'now_ms - last_render_ms >= ((!strcmp(g_state.screen_page,"app") && (pet_p4_miniapp_slicing_active() || pet_p4_miniapp_media_surface_animated()))' in main
     assert '? 33ULL : PET_P4_MAIN_RENDER_INTERVAL_MS)' in main
@@ -1564,10 +1599,10 @@ def test_p4_behavior_rotates_native_families_without_per_frame_manifest_parsing(
     assert "selected_since_ms" in behavior_header
     assert "PET_P4_WELCOME_MAX_MS" not in behavior
     assert "PET_P4_TOUCH_REACTION_MAX_MS" not in touch
-    assert "playback_elapsed_ms" in renderer
     assert "playback_duration_ms = asset.duration_ms" in renderer
-    assert "cycle_elapsed_ms * (unsigned long long) asset.frames" in renderer
-    assert "now_ms - g_behavior.selected_since_ms" in renderer
+    assert "pet_p4_behavior_video_target_frame" in renderer
+    assert "behavior->first_video_frame_ms" in behavior
+    assert "pet_p4_behavior_presented_video_frame" in renderer
     assert "cJSON_Parse" not in renderer
     assert "#define PET_P4_ASSET_CACHE_SLOTS 2U" in renderer
     assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in renderer
@@ -1641,7 +1676,7 @@ def test_p4_h264_uses_the_v9_single_slice_full_duration_aspect_fit_contract():
     assert "ESP_H264_RAW_FMT_I420" in renderer
     assert "h264_stream_has_single_slice_access_units" in renderer
     assert "if (!stream->single_slice_valid) return false;" in renderer
-    assert "cycle_elapsed_ms = playback_elapsed_ms % playback_duration_ms" in renderer
+    assert "render_h264_asset_frame(&asset, fs_path, stream, target_frame)" in renderer
     assert "target_frame < g_h264_decoded_frame" in renderer
     assert "strcmp(g_h264_fs_path, fs_path) != 0" in renderer
     assert "rewriteH264Sps" in prebuilder
@@ -1681,7 +1716,7 @@ def test_p4_15fps_h264_assets_use_rgb565_and_ppa_render_scheduler():
     assert "P4_APPEARANCE_MAX_FRAMES: u32 = 225" in desktop
     assert "P4_APPEARANCE_ASSET_CHUNK_SIZE: usize = 20_478" in desktop
     assert "PET_P4_ASSET_MANIFEST_MAX 65536" in protocol_header
-    assert "PET_P4_MAIN_RENDER_INTERVAL_MS 50ULL" in main
+    assert "PET_P4_MAIN_RENDER_INTERVAL_MS CONFIG_PET_P4_MAIN_RENDER_INTERVAL_MS" in main
     assert "CONFIG_ESP_H264_DUAL_TASK=y" in sdkconfig
     assert "CONFIG_ESP_H264_DUAL_TASK_CORE=1" in sdkconfig
     assert 'PET_P4_H264_DECODER_MODE "software-dual"' in renderer
@@ -1744,7 +1779,8 @@ def test_p4_rgb565_output_uses_matching_rgb_panel_order():
 def test_p4_renderer_keeps_screen_visible_when_assets_are_unusable():
     renderer = read("main/pet_p4_renderer.c")
 
-    assert "bool drew_asset = component_media_idle&&render_asset_pet_frame(state, view, now_ms);" in renderer
+    assert "bool drew_asset = component_media_idle" in renderer
+    assert "&& render_asset_pet_frame(state, view, now_ms, &presented_video_frame, &prefetched_tail);" in renderer
     assert "if(!component_media_idle)g_asset_cache_pending=true;" in renderer
     assert "if (!drew_asset && !g_asset_cache_pending)" in renderer
     assert "g_asset_decode_blocked_until_ms" in renderer
@@ -1752,6 +1788,11 @@ def test_p4_renderer_keeps_screen_visible_when_assets_are_unusable():
     assert "g_framebuffer_initialized" in renderer
     assert "if (!g_framebuffer_initialized)" in renderer
     assert "draw_bubble(state, view, now_ms)" in renderer
+    from p4_render_trace_test import function
+    bubble = function(renderer, "draw_bubble")
+    assert bubble.index("if (view && !view->show_bubble) return;") < bubble.index("renderer_bubble_select(owner")
+    assert "renderer_prefers_resident" not in bubble
+    assert "pet_bubble_pixels_release(&text)" in bubble
     assert "draw_boot_diagnostic(now_ms)" in renderer
 
 
@@ -1883,7 +1924,11 @@ def test_p4_ab_firmware_ota_is_verified_acknowledged_and_exposed_by_pc():
     assert "fn best_effort_firmware_abort" not in desktop
     idle = desktop[desktop.index("fn ensure_firmware_transfer_idle("):
                    desktop.index("pub(crate) fn firmware_chip_target(")]
-    assert "query_firmware_status(expected_board_device_id, expected_connection_id)?" in idle
+    preflight = desktop[desktop.index("pub fn update_firmware<F, R>("):
+                        desktop.index("let begin_payload", desktop.index("pub fn update_firmware<F, R>("))]
+    assert preflight.count("self.query_firmware_status(") == 1
+    assert "Self::ensure_firmware_transfer_idle(&actual_ota_status)?" in preflight
+    assert "ensure_device_firmware_headroom(&actual_ota_status," in preflight
     assert 'status.get("active").and_then(serde_json::Value::as_bool)' in idle
     assert "Some(false) => Ok(())" in idle
     assert "Some(true) => Err(" in idle and "None => Err(" in idle
@@ -1915,7 +1960,8 @@ def test_p4_ab_firmware_ota_is_verified_acknowledged_and_exposed_by_pc():
     assert "已最新" in bundled_ui
     assert "pet_p4_lcd_prepare_boot" in main
     assert "pet_p4_lcd_reveal" in main
-    assert main.index("pet_p4_lcd_prepare_boot") < main.index("pet_p4_miniapp_sync_builtins")
+    app=function(main,"app_main")
+    assert app.index("pet_p4_lcd_prepare_boot") < app.index("boot_catalog_")
     assert main.index("pet_p4_renderer_render") < main.index("pet_p4_lcd_reveal")
     assert "bsp_display_backlight_off" in lcd
     assert "first complete" in lcd
@@ -2085,7 +2131,7 @@ def test_p4_asset_transfer_prepares_spiffs_and_raw_slot_without_rereads():
     ]
     file_body = source[
         source.index("static void handle_asset_file"):
-        source.index("static void handle_asset_topic")
+        source.index("void handle_asset_topic")
     ]
 
     assert "written = fwrite(data, 1, data_len, file)" in chunk_body
@@ -2411,13 +2457,13 @@ def test_p4_hardware_inputs_are_debounced_persistent_and_configurable():
     assert "pet_p4_miniapp_catalog_move(-event.delta)" not in input_source
     assert "pet_p4_miniapp_activation_request_selected" in input_source
     assert '#include "pet_p4_catalog_profile.h"' in read_required("main/pet_p4_miniapp.h")
-    assert "#define PET_P4_MINIAPP_CATALOG_MAX 32" in read_required("main/pet_p4_catalog_profile.h")
+    assert "#define PET_P4_MINIAPP_VISIBLE_MAX 40" in read_required("main/pet_p4_catalog_profile.h")
     assert "#if PET_PRIVATE_PARENT_CAPACITY_ACCEPTANCE" in read_required("main/pet_p4_catalog_profile.h")
     assert "MINIAPP_CATALOG_PATH" in read_required("main/pet_p4_miniapp.c")
     renderer = read_required("main/pet_p4_renderer.c")
-    assert 'draw_text_line("组件中心"' in renderer
-    assert '"已安装 %u 个"' in renderer
-    assert '"摇杆选择    确认键打开    全局键返回"' in renderer
+    assert 'center_draw_label("组件中心"' in renderer
+    assert 'center_draw_number(filter == PET_CENTER_ALL ? "已安装" : "此类", (unsigned)count, "个"' in renderer
+    assert '"摇杆选择 · 确认打开 · 长按摇杆切类 · 全局键返回"' in renderer
     # The page-dot overlay was intentionally removed; navigation still uses the native catalog.
     assert 'draw_page_indicator(' not in renderer
     assert "dispatch_component_binding_event" in input_source
@@ -2484,7 +2530,8 @@ def test_p4_device_ptt_stream_is_validated_and_relayed_by_pc():
     assert 'send_topic("audio/begin"' in audio
     assert 'cJSON_AddBoolToObject(payload, "sessionQueueEmpty", session_queue_empty)' in audio
     assert "g_capture_session_queue_empty" in audio
-    assert 'send_topic("audio/chunk"' in audio
+    assert 'send_topic_to_transport("audio/chunk", payload, processed && conversation_session[0])' in audio
+    assert "xQueueSend(g_usb_capture_tx_queue, &frame, 0)" in audio
     assert 'send_topic("audio/end"' in audio
     assert "PET_P4_AUDIO_MAX_CAPTURE_MS 30000ULL" in audio
     assert 'strcmp(binding->action, "voice_ptt") == 0' in input_source
@@ -2762,7 +2809,7 @@ def test_p4_dsh_approval_modal_is_single_shot_and_bounded():
         input_source.index("void pet_p4_input_process("):
         input_source.index("unsigned int pet_p4_input_dropped_events(")
     ]
-    assert "if (handle_approval_input(state, send_line, ctx, &event)) continue;" in input_process
+    assert "if (handle_approval_input(state, send_line, ctx, &event)) {" in input_process
     approval_input = input_source[
         input_source.index("static bool approval_decision_for_event("):
         input_source.index("static bool apply_local_action(")
@@ -2818,7 +2865,8 @@ def test_realtime_speaker_uses_full_scale_and_reports_readback():
     init=function(audio,'pet_p4_audio_init')
     assert init.index('pet_audio_volume_boot_load()')<init.index('pet_audio_volume_attach(g_speaker, g_stream_lock, i2c_bus)')
     boot=function(volume,'pet_audio_volume_boot_load')
-    assert 'uint8_t stored = 100;' in boot and 'nvs_get_u8(handle, MASTER_KEY, &stored)' in boot
+    assert '#define MASTER_DEFAULT_VOLUME 80U' in volume
+    assert 'nvs_get_u8(handle, MASTER_KEY, &stored)' in boot
     assert 'boot_volume = durable_volume = stored;' in boot and 'stored <= 100' in boot
     attach=function(volume,'pet_audio_volume_attach')
     assert attach.index('apply(boot_volume)')<attach.index('atomic_store_explicit(&ready,true,memory_order_release)')

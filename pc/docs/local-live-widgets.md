@@ -1,6 +1,6 @@
 # 电脑状态与近期待办
 
-这两个组件通过管理端获取本机数据，再经 USB 显示到设备。使用时保持客户端运行和设备连接；组件包不包含个人待办或电脑采样结果。
+这两个组件订阅管理端提供的本机数据。保持客户端运行，通过 USB 或已配对且获授权的 Wi-Fi 连接设备即可。两条连接都可用时优先走 USB。个人待办和电脑采样结果留在运行时数据中，组件包只声明来源。
 
 ## 电脑状态
 
@@ -23,7 +23,8 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `src-tauri/src/local_widget_data.rs` | 采样、快照和 USB 数据推送；音频忙时暂缓组件数据 |
+| `src-tauri/src/local_widget_data.rs` | 本机采样和快照生成，音频或传输忙时暂缓组件数据 |
+| `src-tauri/src/lan_agent/widget_data.rs` | USB 与配对 Wi-Fi 共用的快照发送入口 |
 | `src-tauri/src/local_tools.rs` | PC 与实时对话共用的工具入口 |
 | `src-tauri/src/todos.rs` | 有界本地待办存储、原子更新及版本检查 |
 | `src/component-center/LocalDataPanel.jsx` | PC 端详情与管理 |

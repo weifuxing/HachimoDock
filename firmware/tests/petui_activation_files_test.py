@@ -28,8 +28,8 @@ def test_actual_loader_preserves_input_metadata_on_io_and_checksum_errors(tmp_pa
 #define PET_WIDGET_TRACE_SCOPE(name,kind) int name __attribute__((unused))=0
 #define pet_widget_trace_scope_end(p) ((void)(p))
 typedef struct {uint8_t count;size_t size;uint8_t bytes[128];} pet_p4_miniapp_sprite_pack_t;
-typedef struct {char widget_id[48];unsigned slot,package_generation,widget_checksum,buttons_checksum,sprites_checksum,resource_state,image_count;} miniapp_catalog_item_t;
-typedef struct {char widget_id[48];bool active;pet_p4_miniapp_sprite_pack_t sprites;} miniapp_runtime_t;
+typedef struct {char widget_id[48];unsigned slot,package_generation,widget_checksum,buttons_checksum,sprites_checksum,resource_state,image_count,center_category;} miniapp_catalog_item_t;
+typedef struct {char widget_id[48];bool active;unsigned center_category;pet_p4_miniapp_sprite_pack_t sprites;} miniapp_runtime_t;
 static bool current=true,error_read,parse_fail;
 static unsigned opens,reads_count,closes,alloc_count,alloc_live,fail_alloc;
 static unsigned fault_file,fault_kind;

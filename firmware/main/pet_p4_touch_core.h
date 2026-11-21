@@ -22,6 +22,7 @@ typedef struct {
   bool down;
   bool long_press_emitted;
   bool moved;
+  bool anchor_tap; /* Set before a settings contact begins. */
   int start_x;
   int start_y;
   int current_x;

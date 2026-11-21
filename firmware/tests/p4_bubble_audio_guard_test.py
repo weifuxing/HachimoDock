@@ -22,12 +22,14 @@ static pause_state_t g_state;
 static const pause_state_t *state=&g_state;
 static bool pet_p4_audio_active(void) {return (mask&1U)!=0;}
 static bool pet_p4_audio_playback_active(void) {return (mask&2U)!=0;}
+static bool pet_p4_audio_stream_playing(void) {return (mask&64U)!=0;}
 static bool pet_p4_audio_conversation_active(void) {return (mask&4U)!=0;}
 static bool pet_p4_ota_active(void) {return (mask&8U)!=0;}
 static bool pet_p4_audio_music_active(void) {return (mask&32U)!=0;}
+static unsigned combine(bool paused, bool conversation) {return paused + 2U*conversation;}
 '''
     for name, predicate in zip(("protocol_paused", "main_paused"), predicates):
-        harness += "static bool " + name + "(void) {return " + predicate + ";}\n"
+        harness += "static unsigned " + name + "(void) {return combine(" + predicate + ");}\n"
     harness += r'''
 int main(void) {
   /* In music startup buffering/underrun all three old audio flags are false.
@@ -36,11 +38,13 @@ int main(void) {
   assert(!pet_p4_audio_active() && !pet_p4_audio_playback_active()
     && !pet_p4_audio_conversation_active());
   assert(protocol_paused() && main_paused());
-  /* Preserve idle admission plus every existing protection and combination. */
-  for(mask=0;mask<64;mask++) {
+  /* Conversation ownership has its own gate. Physical audio and update work
+   * must still pause every pixel format. */
+  for(mask=0;mask<128;mask++) {
     g_state.asset_transfer_active=(mask&16U)!=0;
-    assert(protocol_paused()==(mask!=0));
-    assert(main_paused()==(mask!=0));
+    unsigned expected=((mask&~4U)!=0)+2U*((mask&4U)!=0);
+    assert(protocol_paused()==expected);
+    assert(main_paused()==expected);
   }
 }
 '''

@@ -15,7 +15,8 @@ SUITE=json.loads(CONTRACT.read_text())
 @pytest.fixture(scope='module')
 def checker(tmp_path_factory):
     out=tmp_path_factory.mktemp('derived-writers');src=out/'check.c';exe=out/'check'
-    code=(FW/'main/pet_p4_miniapp.c').read_text()
+    # Compile the production parser bodies without the target code-size attribute.
+    code=(FW/'main/pet_p4_miniapp.c').read_text().replace('__attribute__((optimize("Oz"))) ', '')
     a=code.index('typedef enum {\n  MINIAPP_VAR_INT,');b=code.index('#if PET_P4_CELLS_V1\n/* p4-cells-v1 bounded ops',a)
     types=code[a:b]
     a=code.index('typedef struct {\n  int8_t from_state;');b=code.index('} miniapp_tick_t;',a)+len('} miniapp_tick_t;')

@@ -5,10 +5,14 @@
  *          SHA-256 verification, boot-slot switching, delayed validity
  *          confirmation, automatic rollback and chip-revision anti-misflash checks.
  * [Pos] ESP32-P4 firmware update node in firmware/main
- * [Sync] If this file changes, update firmware/protocol.md and .folder.md.
+ * [Sync] Keep firmware/protocol.md and .folder.md aligned with the public USB protocol.
+ *        See firmware/docs/wireless-ota-adapter.md for the typed wireless contract.
  */
 
+// This control path is paced by flash writes and transport acknowledgements.
+#pragma GCC optimize ("Oz")
 #include "pet_p4_ota.h"
+#include "pet_p4_wireless_ota.h"
 
 #include <limits.h>
 #include <math.h>
@@ -28,6 +32,7 @@
 #include "mbedtls/base64.h"
 #include "mbedtls/sha256.h"
 #include "pet_p4_diagnostics.h"
+#include "pet_p4_device_wifi.h"
 #include "pet_p4_boot_trace.h"
 #if PET_P4_OTA_METADATA_CACHED
 #include "esp_attr.h"
@@ -35,7 +40,7 @@
 
 #define PET_P4_OTA_TRANSFER_ID_MAX 64
 #define PET_P4_OTA_SHA256_HEX_LEN 64
-#define PET_P4_OTA_DECODED_CHUNK_MAX (4 * 1024)
+#define PET_P4_OTA_DECODED_CHUNK_MAX PET_P4_WIRELESS_OTA_CHUNK_BYTES
 #define PET_P4_OTA_VALIDATE_STABLE_MS 8000ULL
 #define PET_P4_OTA_VALIDATE_SAMPLE_GAP_MS 1000ULL
 #define PET_P4_OTA_VALIDATE_MIN_SAMPLES 20U
@@ -45,6 +50,7 @@
 
 typedef struct {
   bool valid;
+  bool wireless;
   char transfer_id[PET_P4_OTA_TRANSFER_ID_MAX];
   char target_partition[17];
   char version[sizeof(((esp_app_desc_t *) 0)->version)];
@@ -80,6 +86,10 @@ static unsigned long long g_last_activity_ms;
 static SemaphoreHandle_t g_ota_mutex;
 static bool g_initialized;
 static pet_p4_ota_commit_result_t g_commit_result;
+#if PET_P4_SYSTEM_WIFI
+static uint8_t g_wireless_owner[PET_P4_WIRELESS_OTA_OWNER_BYTES];
+static uint8_t g_wireless_installed_digest[PET_P4_WIRELESS_OTA_DIGEST_BYTES];
+#endif
 
 #if PET_P4_OTA_METADATA_CACHED
 /* Descriptor pointers are native boot data, stable until reboot, and are
@@ -326,6 +336,10 @@ static void clear_transfer(bool abort_write) {
   g_ota_handle = 0;
   g_update_partition = NULL;
   g_transfer_id[0] = '\0';
+#if PET_P4_SYSTEM_WIFI
+  memset(g_wireless_owner, 0, sizeof(g_wireless_owner));
+  memset(g_wireless_installed_digest, 0, sizeof(g_wireless_installed_digest));
+#endif
   g_expected_sha256[0] = '\0';
   g_expected_size = 0;
   g_received_size = 0;
@@ -363,72 +377,57 @@ static void digest_hex(const unsigned char digest[32], char output[65]) {
   output[64] = '\0';
 }
 
-static void handle_begin(const cJSON *payload, pet_p4_send_line_fn send_line, void *ctx) {
-  const char *transfer_id = json_string(payload, "transferId");
-  const char *sha256 = json_string(payload, "sha256");
-  unsigned long long size = json_u64(payload, "size", 0);
+static const char *begin_transfer(const char *transfer_id, const char *sha256,
+                                  unsigned long long size, bool check_revision,
+                                  unsigned long long min, unsigned long long max) {
   if (g_restart_at_ms) {
-    send_ack(send_line, ctx, transfer_id, "begin", false, "device is rebooting into committed firmware");
-    return;
+    return "device is rebooting into committed firmware";
   }
   if (pet_p4_diagnostics_reboot_pending()) {
-    send_ack(send_line, ctx, transfer_id, "begin", false, "device reboot is already scheduled");
-    return;
+    return "device reboot is already scheduled";
   }
   if (g_pending_verify) {
-    send_ack(send_line, ctx, transfer_id, "begin", false, "running firmware is still pending validation");
-    return;
+    return "running firmware is still pending validation";
   }
   if (g_state && g_state->asset_transfer_active) {
-    send_ack(send_line, ctx, transfer_id, "begin", false, "appearance asset transfer is active");
-    return;
+    return "appearance asset transfer is active";
   }
   if (g_active) {
-    send_ack(send_line, ctx, transfer_id, "begin", false, "another firmware transfer is active");
-    return;
+    return "another firmware transfer is active";
   }
   g_update_partition = esp_ota_get_next_update_partition(NULL);
   if (!transfer_id[0] || strlen(transfer_id) >= sizeof(g_transfer_id)
       || !sha256_text_valid(sha256) || size == 0 || !g_update_partition) {
-    send_ack(send_line, ctx, transfer_id, "begin", false, "invalid metadata or no inactive OTA partition");
     clear_transfer(false);
-    return;
+    return "invalid metadata or no inactive OTA partition";
   }
   if (size > g_update_partition->size) {
-    send_ack(send_line, ctx, transfer_id, "begin", false, "firmware image exceeds OTA partition");
     clear_transfer(false);
-    return;
+    return "firmware image exceeds OTA partition";
   }
-  const cJSON *revision_min = cJSON_GetObjectItemCaseSensitive(payload, "chipRevisionMin");
-  const cJSON *revision_max = cJSON_GetObjectItemCaseSensitive(payload, "chipRevisionMax");
-  if (revision_min || revision_max) {
-    unsigned long long min = json_u64(payload, "chipRevisionMin", UINT64_MAX);
-    unsigned long long max = json_u64(payload, "chipRevisionMax", UINT64_MAX);
+  if (check_revision) {
     esp_chip_info_t chip_info;
     esp_chip_info(&chip_info);
     if (min > UINT16_MAX || max > UINT16_MAX
         || !pet_p4_revision_range_valid((uint16_t) min, (uint16_t) max)
         || chip_info.revision < min || chip_info.revision > max) {
-      send_ack(send_line, ctx, transfer_id, "begin", false, "firmware chip revision mismatch");
       clear_transfer(false);
-      return;
+      return "firmware chip revision mismatch";
     }
   }
   esp_err_t err = esp_ota_begin(g_update_partition, (size_t) size, &g_ota_handle);
   if (err != ESP_OK) {
-    send_ack(send_line, ctx, transfer_id, "begin", false, esp_err_to_name(err));
     clear_transfer(false);
-    return;
+    return esp_err_to_name(err);
   }
   mbedtls_sha256_init(&g_sha256);
+  g_sha256_initialized = true;
   if (mbedtls_sha256_starts(&g_sha256, false) != 0) {
     snprintf(g_transfer_id, sizeof(g_transfer_id), "%s", transfer_id);
     g_active = true;
-    send_ack(send_line, ctx, g_transfer_id, "begin", false, "SHA-256 initialization failed");
     clear_transfer(true);
-    return;
+    return "SHA-256 initialization failed";
   }
-  g_sha256_initialized = true;
   snprintf(g_transfer_id, sizeof(g_transfer_id), "%s", transfer_id);
   snprintf(g_expected_sha256, sizeof(g_expected_sha256), "%s", sha256);
   for (size_t i = 0; g_expected_sha256[i]; i += 1) {
@@ -443,7 +442,40 @@ static void handle_begin(const cJSON *payload, pet_p4_send_line_fn send_line, vo
   g_active = true;
   ESP_LOGI(TAG, "OTA begin transfer=%s target=%s bytes=%llu", g_transfer_id,
            g_update_partition->label, g_expected_size);
-  send_ack(send_line, ctx, g_transfer_id, "begin", true, NULL);
+  return NULL;
+}
+
+static void handle_begin(const cJSON *payload, pet_p4_send_line_fn send_line, void *ctx) {
+  const char *id = json_string(payload, "transferId");
+  bool has_revision = cJSON_GetObjectItemCaseSensitive(payload, "chipRevisionMin")
+    || cJSON_GetObjectItemCaseSensitive(payload, "chipRevisionMax");
+  const char *error = begin_transfer(id, json_string(payload, "sha256"),
+    json_u64(payload, "size", 0), has_revision,
+    json_u64(payload, "chipRevisionMin", UINT64_MAX),
+    json_u64(payload, "chipRevisionMax", UINT64_MAX));
+  send_ack(send_line, ctx, id, "begin", error == NULL, error);
+}
+
+static const char *write_chunk(unsigned int sequence, const uint8_t *data, size_t size) {
+  if (g_received_size == 0) {
+    esp_chip_info_t chip_info;
+    esp_chip_info(&chip_info);
+    if (!pet_p4_image_header_matches(data, size, chip_info.revision)) {
+      clear_transfer(true);
+      return "firmware chip revision mismatch";
+    }
+  }
+  esp_err_t error = esp_ota_write(g_ota_handle, data, size);
+  if (error != ESP_OK || mbedtls_sha256_update(&g_sha256, data, size) != 0) {
+    clear_transfer(true);
+    return error != ESP_OK ? esp_err_to_name(error) : "SHA-256 update failed";
+  }
+  g_received_size += size;
+  g_last_chunk_sequence = sequence;
+  g_last_chunk_size = size;
+  g_last_chunk_valid = true;
+  g_next_sequence++;
+  return NULL;
 }
 
 static void handle_chunk(const cJSON *payload, pet_p4_send_line_fn send_line, void *ctx) {
@@ -573,39 +605,12 @@ static void handle_chunk(const cJSON *payload, pet_p4_send_line_fn send_line, vo
     );
     return;
   }
-  if (g_received_size == 0) {
-    esp_chip_info_t chip_info;
-    esp_chip_info(&chip_info);
-    if (!pet_p4_image_header_matches(decoded, actual_size, chip_info.revision)) {
-      free(decoded);
-      send_chunk_ack(send_line, ctx, request_transfer_id, false,
-        "firmware chip revision mismatch", sequence, 0, false);
-      clear_transfer(true);
-      return;
-    }
-  }
-  esp_err_t write_err = esp_ota_write(g_ota_handle, decoded, actual_size);
-  int sha_err = write_err == ESP_OK ? mbedtls_sha256_update(&g_sha256, decoded, actual_size) : -1;
+  const char *error = write_chunk(sequence, decoded, actual_size);
   free(decoded);
-  if (write_err != ESP_OK || sha_err != 0) {
-    send_chunk_ack(
-      send_line,
-      ctx,
-      request_transfer_id,
-      false,
-      write_err != ESP_OK ? esp_err_to_name(write_err) : "SHA-256 update failed",
-      sequence,
-      0,
-      false
-    );
-    clear_transfer(true);
+  if (error) {
+    send_chunk_ack(send_line, ctx, request_transfer_id, false, error, sequence, 0, false);
     return;
   }
-  g_received_size += actual_size;
-  g_last_chunk_sequence = sequence;
-  g_last_chunk_size = actual_size;
-  g_last_chunk_valid = true;
-  g_next_sequence += 1;
   send_chunk_ack(
     send_line,
     ctx,
@@ -618,70 +623,75 @@ static void handle_chunk(const cJSON *payload, pet_p4_send_line_fn send_line, vo
   );
 }
 
-static void handle_commit(const cJSON *payload, pet_p4_send_line_fn send_line, void *ctx) {
-  const char *request_transfer_id = json_string(payload, "transferId");
+static const char *commit_transfer(bool wireless, uint8_t *installed_digest) {
+#if !PET_P4_SYSTEM_WIFI
+  (void) installed_digest;
+#endif
   unsigned char digest[32];
   char actual_sha256[65];
   esp_app_desc_t image_desc;
   const esp_app_desc_t *running_desc = esp_app_get_description();
-  if (!g_active && g_commit_result.valid
-      && request_transfer_id[0]
-      && strcmp(request_transfer_id, g_commit_result.transfer_id) == 0) {
-    send_commit_ack(send_line, ctx);
-    return;
-  }
-  if (!transfer_matches(payload)) {
-    send_ack(send_line, ctx, request_transfer_id, "commit", false, "firmware transferId mismatch");
-    return;
-  }
   g_last_activity_ms = (unsigned long long) (esp_timer_get_time() / 1000ULL);
   if (g_received_size != g_expected_size) {
-    send_ack(send_line, ctx, g_transfer_id, "commit", false, "firmware byte total mismatch");
-    return;
+    return "firmware byte total mismatch";
   }
   if (mbedtls_sha256_finish(&g_sha256, digest) != 0) {
-    send_ack(send_line, ctx, g_transfer_id, "commit", false, "SHA-256 finalize failed");
     clear_transfer(true);
-    return;
+    return "SHA-256 finalize failed";
   }
   mbedtls_sha256_free(&g_sha256);
   g_sha256_initialized = false;
   digest_hex(digest, actual_sha256);
   if (strcmp(actual_sha256, g_expected_sha256) != 0) {
-    send_ack(send_line, ctx, g_transfer_id, "commit", false, "firmware SHA-256 mismatch");
     clear_transfer(true);
-    return;
+    return "firmware SHA-256 mismatch";
   }
   esp_err_t end_err = esp_ota_end(g_ota_handle);
   g_ota_handle = 0;
   if (end_err != ESP_OK) {
-    send_ack(send_line, ctx, g_transfer_id, "commit", false, esp_err_to_name(end_err));
     clear_transfer(false);
-    return;
+    return esp_err_to_name(end_err);
   }
   esp_err_t desc_err = esp_ota_get_partition_description(g_update_partition, &image_desc);
   if (desc_err != ESP_OK) {
-    send_ack(send_line, ctx, g_transfer_id, "commit", false, "firmware image description is invalid");
     clear_transfer(false);
-    return;
+    return "firmware image description is invalid";
   }
   if (!running_desc || !running_desc->project_name[0]
       || strcmp(image_desc.project_name, running_desc->project_name) != 0) {
-    send_ack(send_line, ctx, g_transfer_id, "commit", false, "firmware project identity mismatch");
     clear_transfer(false);
-    return;
+    return "firmware project identity mismatch";
   }
+#if PET_P4_SYSTEM_WIFI
+  if (wireless) {
+    const size_t n = strnlen(image_desc.version, sizeof(image_desc.version));
+    if (n < 6 || n == sizeof(image_desc.version) || memcmp(image_desc.version + n - 6, "-wifi6", 6)) {
+      clear_transfer(false);
+      return "wireless firmware requires a Wi-Fi 6 image";
+    }
+  }
+  // Read the validated target's native digest before changing boot metadata.
+  if (wireless && esp_partition_get_sha256(g_update_partition, installed_digest) != ESP_OK) {
+    clear_transfer(false);
+    return "firmware partition digest unavailable";
+  }
+  if (wireless && memcmp(installed_digest, g_wireless_installed_digest,
+                         sizeof(g_wireless_installed_digest)) != 0) {
+    clear_transfer(false);
+    return "firmware partition digest mismatch";
+  }
+#endif
   esp_err_t boot_err = esp_ota_set_boot_partition(g_update_partition);
 #if PET_P4_OTA_METADATA_CACHED
   observe_boot_result(boot_err,g_update_partition);
 #endif
   if (boot_err != ESP_OK) {
-    send_ack(send_line, ctx, g_transfer_id, "commit", false, esp_err_to_name(boot_err));
     clear_transfer(false);
-    return;
+    return esp_err_to_name(boot_err);
   }
   memset(&g_commit_result, 0, sizeof(g_commit_result));
   g_commit_result.valid = true;
+  g_commit_result.wireless = wireless;
   snprintf(g_commit_result.transfer_id, sizeof(g_commit_result.transfer_id), "%s", g_transfer_id);
   snprintf(g_commit_result.target_partition, sizeof(g_commit_result.target_partition), "%s",
            g_update_partition->label);
@@ -691,12 +701,25 @@ static void handle_commit(const cJSON *payload, pet_p4_send_line_fn send_line, v
   snprintf(g_commit_result.sha256, sizeof(g_commit_result.sha256), "%s", actual_sha256);
   g_commit_result.bytes = g_received_size;
   g_commit_result.next_sequence = g_next_sequence;
-  send_commit_ack(send_line, ctx);
   ESP_LOGI(TAG, "OTA verified transfer=%s target=%s version=%s; scheduling reboot",
            g_transfer_id, g_update_partition->label, image_desc.version);
   clear_transfer(false);
   g_restart_at_ms = (unsigned long long) (esp_timer_get_time() / 1000ULL)
     + PET_P4_OTA_RESTART_DELAY_MS;
+  return NULL;
+}
+
+static void handle_commit(const cJSON *payload, pet_p4_send_line_fn send_line, void *ctx) {
+  const char *id = json_string(payload, "transferId");
+  if (!g_active && g_commit_result.valid && !g_commit_result.wireless
+      && id[0] && strcmp(id, g_commit_result.transfer_id) == 0) {
+    send_commit_ack(send_line, ctx);
+    return;
+  }
+  const char *error = transfer_matches(payload)
+    ? commit_transfer(false, NULL) : "firmware transferId mismatch";
+  if (error) send_ack(send_line, ctx, id, "commit", false, error);
+  else send_commit_ack(send_line, ctx);
 }
 
 static void handle_abort(const cJSON *payload, pet_p4_send_line_fn send_line, void *ctx) {
@@ -755,6 +778,156 @@ esp_err_t pet_p4_ota_init(
   return supported ? ESP_OK : ESP_ERR_NOT_SUPPORTED;
 }
 
+#if PET_P4_SYSTEM_WIFI
+static bool wireless_owner_present(const uint8_t *owner) {
+  if (!owner) return false;
+  for (size_t i = 0; i < PET_P4_WIRELESS_OTA_OWNER_BYTES; i++) {
+    if (owner[i]) return true;
+  }
+  return false;
+}
+
+static bool wireless_admitted(const pet_p4_wireless_ota_peer_t *peer) {
+  return peer && peer->usb_verified && wireless_owner_present(peer->owner)
+    && pet_p4_is_wifi6_hardware();
+}
+
+static void wireless_id_hex(const uint8_t *id, char out[33]) {
+  static const char digits[] = "0123456789abcdef";
+  for (size_t i = 0; i < PET_P4_WIRELESS_OTA_OWNER_BYTES; i++) {
+    out[i * 2] = digits[id[i] >> 4];
+    out[i * 2 + 1] = digits[id[i] & 15];
+  }
+  out[32] = '\0';
+}
+
+static bool wireless_transfer_matches(const uint8_t *owner, const uint8_t *id) {
+  if (!g_active || !id || memcmp(owner, g_wireless_owner, sizeof(g_wireless_owner)) != 0) {
+    return false;
+  }
+  char text[33];
+  wireless_id_hex(id, text);
+  return strcmp(g_transfer_id, text) == 0;
+}
+
+static const char *wireless_boot_locked(pet_p4_wireless_ota_boot_t *out) {
+  const char *id = pet_p4_boot_identity();
+  if (!g_initialized || !id || !id[0] || strlen(id) >= sizeof(out->boot_id)) {
+    return "firmware boot identity unavailable";
+  }
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  if (!running || esp_partition_get_sha256(running, out->digest) != ESP_OK) {
+    return "running firmware digest unavailable";
+  }
+  esp_ota_img_states_t state;
+  out->valid = !g_pending_verify
+    && esp_ota_get_state_partition(running, &state) == ESP_OK && state == ESP_OTA_IMG_VALID;
+  out->address = running->address;
+  strcpy(out->boot_id, id);
+  return NULL;
+}
+
+const char *pet_p4_wireless_ota_boot(const pet_p4_wireless_ota_peer_t *peer,
+                                    pet_p4_wireless_ota_boot_t *out) {
+  if (!out) return "invalid firmware status output";
+  memset(out, 0, sizeof(*out));
+  if (!wireless_admitted(peer)) return "wireless firmware controller not trusted";
+  if (!g_ota_mutex || xSemaphoreTake(g_ota_mutex, portMAX_DELAY) != pdTRUE) {
+    return "firmware OTA unavailable";
+  }
+  const char *error = wireless_boot_locked(out);
+  xSemaphoreGive(g_ota_mutex);
+  return error;
+}
+
+const char *pet_p4_wireless_ota_begin(const pet_p4_wireless_ota_peer_t *peer,
+                                     const pet_p4_wireless_ota_offer_t *offer) {
+  if (!wireless_admitted(peer)) return "wireless firmware controller not trusted";
+  if (!offer || !wireless_owner_present(offer->transfer_id) ||
+      !memchr(offer->prior.boot_id, '\0', sizeof(offer->prior.boot_id))) {
+    return "invalid wireless firmware offer";
+  }
+  if (!g_ota_mutex || xSemaphoreTake(g_ota_mutex, portMAX_DELAY) != pdTRUE) {
+    return "firmware OTA unavailable";
+  }
+  pet_p4_wireless_ota_boot_t boot = {0};
+  const char *error = "firmware OTA busy";
+  if (!g_active && !g_restart_at_ms) {
+    error = wireless_boot_locked(&boot);
+    if (!error && (!boot.valid || !offer->prior.valid || boot.address != offer->prior.address
+        || strcmp(boot.boot_id, offer->prior.boot_id) != 0
+        || memcmp(boot.digest, offer->prior.digest, sizeof(boot.digest)) != 0)) {
+      error = "running firmware does not match validated boot";
+    }
+    if (!error) {
+      char id[33], sha256[65];
+      wireless_id_hex(offer->transfer_id, id);
+      digest_hex(offer->image_sha256, sha256);
+      error = begin_transfer(id, sha256, offer->image_bytes, true,
+        offer->revision_min, offer->revision_max);
+      if (!error) {
+        memcpy(g_wireless_owner, peer->owner, sizeof(g_wireless_owner));
+        memcpy(g_wireless_installed_digest, offer->installed_digest,
+          sizeof(g_wireless_installed_digest));
+      }
+    }
+  }
+  xSemaphoreGive(g_ota_mutex);
+  return error;
+}
+
+const char *pet_p4_wireless_ota_chunk(const pet_p4_wireless_ota_peer_t *peer,
+                                    const uint8_t transfer_id[PET_P4_WIRELESS_OTA_OWNER_BYTES], uint32_t sequence,
+                                    const uint8_t *data, size_t size) {
+  if (!wireless_admitted(peer)) return "wireless firmware controller not trusted";
+  if (!data || !size || size > PET_P4_WIRELESS_OTA_CHUNK_BYTES) {
+    return "invalid wireless firmware chunk";
+  }
+  if (!g_ota_mutex || xSemaphoreTake(g_ota_mutex, portMAX_DELAY) != pdTRUE) {
+    return "firmware OTA unavailable";
+  }
+  const char *error = "wireless firmware transfer owner mismatch";
+  if (wireless_transfer_matches(peer->owner, transfer_id)) {
+    error = "wireless firmware chunk sequence or size mismatch";
+    if (sequence == g_next_sequence && size <= g_expected_size - g_received_size) {
+      g_last_activity_ms = (unsigned long long) (esp_timer_get_time() / 1000ULL);
+      error = write_chunk(sequence, data, size);
+    }
+  }
+  xSemaphoreGive(g_ota_mutex);
+  return error;
+}
+
+const char *pet_p4_wireless_ota_commit(const pet_p4_wireless_ota_peer_t *peer,
+                                     const uint8_t transfer_id[PET_P4_WIRELESS_OTA_OWNER_BYTES],
+                                     pet_p4_wireless_ota_receipt_t *out) {
+  if (!out) return "invalid firmware commit output";
+  memset(out, 0, sizeof(*out));
+  if (!wireless_admitted(peer)) return "wireless firmware controller not trusted";
+  if (!g_ota_mutex || xSemaphoreTake(g_ota_mutex, portMAX_DELAY) != pdTRUE) {
+    return "firmware OTA unavailable";
+  }
+  const char *error = "wireless firmware transfer owner mismatch";
+  if (wireless_transfer_matches(peer->owner, transfer_id)) {
+    uint32_t address = g_update_partition->address;
+    error = commit_transfer(true, out->installed_digest);
+    if (error) memset(out, 0, sizeof(*out));
+    else out->address = address;
+  }
+  xSemaphoreGive(g_ota_mutex);
+  return error;
+}
+
+void pet_p4_wireless_ota_close(const uint8_t owner[PET_P4_WIRELESS_OTA_OWNER_BYTES]) {
+  if (!wireless_owner_present(owner) || !g_ota_mutex
+      || xSemaphoreTake(g_ota_mutex, portMAX_DELAY) != pdTRUE) return;
+  if (g_active && memcmp(owner, g_wireless_owner, sizeof(g_wireless_owner)) == 0) {
+    clear_transfer(true);
+  }
+  xSemaphoreGive(g_ota_mutex);
+}
+#endif
+
 bool pet_p4_ota_handle_topic(
   const char *topic,
   const cJSON *payload,
@@ -796,6 +969,23 @@ bool pet_p4_ota_handle_topic(
     xSemaphoreGive(g_ota_mutex);
     return handled;
   }
+#if PET_P4_SYSTEM_WIFI
+  if (g_active && wireless_owner_present(g_wireless_owner)) {
+    const char *id = json_string(payload, "transferId");
+    const char *error = "wireless firmware transfer owns OTA";
+    if (strcmp(topic, "firmware/chunk") == 0) {
+      send_chunk_ack(send_line, ctx, id, false, error, json_u64(payload, "seq", ULLONG_MAX), 0, false);
+      xSemaphoreGive(g_ota_mutex);
+      return true;
+    }
+    if (strcmp(topic, "firmware/begin") == 0 || strcmp(topic, "firmware/commit") == 0
+        || strcmp(topic, "firmware/abort") == 0) {
+      send_ack(send_line, ctx, id, topic + strlen("firmware/"), false, error);
+      xSemaphoreGive(g_ota_mutex);
+      return true;
+    }
+  }
+#endif
   if (strcmp(topic, "firmware/begin") == 0) {
     handle_begin(payload, send_line, ctx);
   } else if (strcmp(topic, "firmware/chunk") == 0) {
@@ -884,6 +1074,9 @@ void pet_p4_ota_process(unsigned long long now_ms) {
     esp_ota_mark_app_invalid_rollback_and_reboot();
   }
   if (restart) {
+#if PET_P4_SYSTEM_WIFI
+    if (!pet_device_wifi_prepare_reboot()) return;
+#endif
     ESP_LOGI(TAG, "restarting into verified OTA image");
     esp_restart();
   }

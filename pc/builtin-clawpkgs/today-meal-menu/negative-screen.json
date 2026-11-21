@@ -1,0 +1,11 @@
+{
+  "dashboard": {
+    "title": "今天吃点什么",
+    "headline": "今天，想做哪种自己？",
+    "note": "放纵一下 / 自律达人 / 健身达人 / 省心选手",
+    "footer": "摇杆选择，SW1 确认",
+    "visualStyle": "clean",
+    "visualPalette": "sunset",
+    "visualLayout": "tool"
+  }
+}

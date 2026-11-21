@@ -3,6 +3,7 @@ from pathlib import Path
 import os
 import shutil
 import subprocess
+from p4_render_trace_test import function
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,9 +19,11 @@ def test_lcd_adapter_visibility():
     visibility = lcd.split("static esp_err_t force_lcd_backlight_gpio", 1)[1]
     visibility = "static esp_err_t force_lcd_backlight_gpio" + visibility.split(
         "static bool IRAM_ATTR lcd_refresh_done_callback", 1)[0]
-    reveal = lcd.split("esp_err_t pet_p4_lcd_reveal(void)", 1)[1]
-    reveal = "esp_err_t pet_p4_lcd_reveal(void)" + reveal.split(
-        "esp_err_t pet_p4_lcd_show_color_bar", 1)[0]
+    reveal = (
+        function(lcd, "pet_p4_lcd_reveal")
+        + function(lcd, "pet_p4_lcd_backlight_status")
+        + function(lcd, "pet_p4_lcd_keep_awake")
+    )
     harness = r'''
 #include <assert.h>
 #include <stdbool.h>

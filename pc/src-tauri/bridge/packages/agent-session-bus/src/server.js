@@ -7,6 +7,7 @@
  */
 
 const crypto = require("crypto");
+const { createCapability } = require("./local-capability");
 const http = require("http");
 const { validateLocalRequest, isLoopback } = require("./http-boundary");
 const { isInternalCodexSession } = require("./util/codex-session-filter");
@@ -128,6 +129,7 @@ class AgentSessionBus {
     port = 8181,
     host = "127.0.0.1",
     registry,
+    capability = createCapability(),
     sessionStatusProvider,
     sessionEventProvider,
     log,
@@ -137,6 +139,7 @@ class AgentSessionBus {
     this.port = port;
     this.host = host;
     this.registry = registry;
+    this.capability = capability;
     this.sessionStatusProvider = typeof sessionStatusProvider === "function"
       ? sessionStatusProvider
       : null;
@@ -191,6 +194,8 @@ class AgentSessionBus {
     return this._actualPort;
   }
 
+  authorizationHeaders(role) { return this.capability.headers(role); }
+
   async _handle(req, res) {
     const boundaryError = validateLocalRequest(req, { allowAppOrigin: true });
     if (boundaryError) {
@@ -210,10 +215,14 @@ class AgentSessionBus {
       return;
     }
     const route = `${req.method} ${url.pathname}`;
+    if (route !== "GET /agent/health" && !this.capability.authorize(req, req.method === "GET" ? ["read", "control"] : ["control"])) {
+      sendJson(req, res, 401, { ok: false, code: "CAPABILITY_REQUIRED" });
+      return;
+    }
     try {
       switch (route) {
         case "GET /agent/health":
-          sendJson(req, res, 200, { ok: true, adapters: this.registry.ids(), activeRuns: this._activeRuns.size });
+          sendJson(req, res, 200, { ok: true, service: "agent-session-bus" });
           return;
         case "GET /agent/status":
           await this._handleStatus(req, res, url);
@@ -318,7 +327,7 @@ class AgentSessionBus {
           }
           return session;
         });
-        if (agentId === "claude-code" || agentId === "codex" || agentId === "mimocode" || agentId === "workbuddy") {
+        if (agentId === "claude-code" || agentId === "codex" || agentId === "mimocode" || agentId === "workbuddy" || agentId === "devin") {
           for (const status of Array.isArray(statuses) ? statuses : []) {
             const id = normalizeStatusId(status?.id);
             if (!id || seen.has(id)) continue;
@@ -329,7 +338,7 @@ class AgentSessionBus {
               : "";
             const title = agentId === "codex"
               ? [statusTitle, displayTitle].find((value) => value && value !== "Codex 会话") || ""
-              : statusTitle || displayTitle || (agentId === "workbuddy" ? "WorkBuddy 会话" : agentId === "mimocode" ? "MiMoCode 会话" : "Claude 会话");
+              : statusTitle || displayTitle || (agentId === "devin" ? "Devin 会话" : agentId === "workbuddy" ? "WorkBuddy 会话" : agentId === "mimocode" ? "MiMoCode 会话" : "Claude 会话");
             const resolvedDisplayTitle = agentId === "codex" && displayTitle === "Codex 会话"
               ? title
               : displayTitle || title;

@@ -21,7 +21,7 @@ fn files(s: &Value, base: &str, r: &Value) -> HashMap<String,Vec<u8>> {
 }
 fn zip_bytes(files: &HashMap<String,Vec<u8>>) -> Vec<u8> {
     let mut zip=zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    for (name,bytes) in files { zip.start_file(name,zip::write::FileOptions::default()).unwrap();zip.write_all(bytes).unwrap(); }
+    for (name,bytes) in files { zip.start_file(name,zip::write::SimpleFileOptions::default()).unwrap();zip.write_all(bytes).unwrap(); }
     zip.finish().unwrap().into_inner()
 }
 fn write_dir(path: &std::path::Path, files: &HashMap<String,Vec<u8>>) {

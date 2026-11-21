@@ -1,5 +1,5 @@
 /**
- * [Input] Tauri USB audio, transcript, and Agent-delivery events for device PTT utterances.
+ * [Input] Tauri audio, transcript, and Agent-delivery events for USB and Wi-Fi PTT utterances.
  * [Output] One monotonic, utterance-scoped draft-then-confirm voice flow with current-to-exact guarded route resolution plus audio relay activity callbacks.
  * [Pos] Dashboard device-voice routing state machine and event-listener boundary.
  * [Sync] If this file changes, update `pc/src/dashboard/.folder.md` and `pc/src/.folder.md`.
@@ -301,11 +301,14 @@ export function deviceVoiceRouterReducer(state, action) {
 }
 
 export function transcriptMessage(payload, phase, composerMode) {
-  const visibleAgentLabel = normalizeText(payload?.agentId).toLowerCase() === "deepseek-harness" ? "DeepSeek Harness" : normalizeText(payload?.agentId).toLowerCase() === "workbuddy" ? "WorkBuddy" : normalizeText(payload?.agentId).toLowerCase() === "claude-code"
-    ? "Claude"
-    : "ChatGPT（Codex）";
+  const agentId = normalizeText(payload?.agentId).toLowerCase();
+  const visibleAgentLabel = agentId === "deepseek-harness" ? "DeepSeek Harness"
+    : agentId === "workbuddy" ? "WorkBuddy"
+      : agentId === "devin" ? "Devin"
+        : agentId === "claude-code" ? "Claude"
+          : "ChatGPT（Codex）";
   if (phase === "listening") {
-    if (["WorkBuddy", "DeepSeek Harness"].includes(visibleAgentLabel)) {
+    if (["WorkBuddy", "DeepSeek Harness", "Devin"].includes(visibleAgentLabel)) {
       return `正在聆听；松开后将完整识别结果一次追加到 ${visibleAgentLabel} 输入框，不自动发送。`;
     }
     if (composerMode === "visible") {
@@ -317,7 +320,7 @@ export function transcriptMessage(payload, phase, composerMode) {
     return "正在聆听并实时识别。";
   }
   if (phase === "partial") {
-    if (["WorkBuddy", "DeepSeek Harness"].includes(visibleAgentLabel)) {
+    if (["WorkBuddy", "DeepSeek Harness", "Devin"].includes(visibleAgentLabel)) {
       return `正在实时识别；松开后一次写入 ${visibleAgentLabel}，写入确认前请保持目标对话在前台。`;
     }
     if (composerMode === "visible") {
@@ -377,7 +380,7 @@ function audioActivity(payload) {
   } else if (!ok) {
     message = `板端录音处理失败：${normalizeText(payload.error) || "音频流校验失败"}`;
   } else if (phase === "begin") {
-    message = "设备麦克风录音中，音频正通过 USB 转发...";
+    message = `设备麦克风录音中，音频正通过 ${payload.transport === "wifi" ? "Wi-Fi" : "USB"} 转发...`;
   } else if (phase === "streaming") {
     message = `设备麦克风录音中，已转发 ${(durationMs / 1000).toFixed(1)} 秒音频...`;
   } else if (phase === "end") {

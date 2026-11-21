@@ -17,6 +17,7 @@ import Button from "../shell/Button";
 import { buildComponentPlayGuide } from "./binding-labels";
 import { componentKindLabel, resolveComponentKind } from "./CandidateCard";
 import DeviceScreenPreview from "./DeviceScreenPreview";
+
 import StockWatchlist from "./StockWatchlist.jsx";
 import LocalDataPanel from "./LocalDataPanel.jsx";
 import MusicPlayer from "./MusicPlayer.jsx";
@@ -25,6 +26,8 @@ import ComponentAppPanel from "./ComponentAppPanel.jsx";
 import { LOCAL_SOURCES, AUTH_SOURCES } from "./local-widget-model.js";
 import AuthProviderPanel from "./AuthProviderPanel.jsx";
 import {ProgramBackgroundStart} from './ProgramBackground.jsx';
+
+const WasmComponentPreview = React.lazy(() => import("./WasmComponentPreview.jsx"));
 
 export default function ComponentPreviewModal({
   active = true,
@@ -40,6 +43,7 @@ export default function ComponentPreviewModal({
   installing,
   bindings = [],
   bindingConflict = "",
+  reservedEvents = [],
   globalExitControl = "SW1",
   getControlOptions,
   onBindingChange,
@@ -159,8 +163,18 @@ export default function ComponentPreviewModal({
           )}
           <div className="component-preview-modal__layout">
             <aside className="component-preview-modal__overview" aria-label="组件预览与说明">
-              {!component.pcApplication && !component.pcExtension && component.mediaSource !== "audio.player" && component.id !== "music-player" && <div className="component-preview-modal__screen">
-                <DeviceScreenPreview component={{...component,defaultBindings:bindings}} className="component-preview-modal__device" active={active} interactive />
+              {(component.wasmPreview || (!component.pcApplication && !component.pcExtension
+                && component.mediaSource !== "audio.player" && component.id !== "music-player")) && <div className="component-preview-modal__screen">
+                {component.wasmPreview ? (
+                  <React.Suspense fallback={<div role="status">正在加载 WASM 试玩</div>}>
+                    <WasmComponentPreview
+                      key={`${component.id}:${component.libraryPath || "builtin"}:${component.wasmPreview.sha256}`}
+                      component={component} bindings={bindings} active={active} reservedEvents={reservedEvents}
+                    />
+                  </React.Suspense>
+                ) : (
+                  <DeviceScreenPreview component={{...component,defaultBindings:bindings}} className="component-preview-modal__device" active={active} interactive />
+                )}
               </div>}
               <div className="component-preview-modal__summary">
                 <div className="component-preview-modal__summary-tags">

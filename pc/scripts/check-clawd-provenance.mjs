@@ -20,7 +20,7 @@ const auditedFiles = new Map([
   ],
   [
     "pc/src-tauri/bridge/hooks/codebuddy-install.js",
-    "e299f35a0c7998040d30dc46ddc2d562154bff1b41506adc7bad24097ffde812",
+    "9f94467bbdfdce7a8ff00794e43ceaa8a77bcb6883c66c6387d184fdba1af120",
   ],
   [
     "pc/src-tauri/bridge/hooks/cursor-install.js",
@@ -32,7 +32,7 @@ const auditedFiles = new Map([
   ],
   [
     "pc/src-tauri/bridge/hooks/server-config.js",
-    "21f2546c3e9e367b30de66b668fdcde7bf7db5cc08f52d68765e5d51e237761b",
+    "ef0cf30891573cfbeababec510d679ec04fdd63471869545e8146097e4d972b2",
   ],
 ]);
 
@@ -52,7 +52,7 @@ function fail(message) {
 for (const [relativePath, expectedSha256] of auditedFiles) {
   const absolutePath = resolve(repositoryRoot, relativePath);
   if (!existsSync(absolutePath)) {
-    fail(`audited MIT-era file is missing: ${relativePath}`);
+    fail(`audited MIT-derived file is missing: ${relativePath}`);
     continue;
   }
   const actualSha256 = createHash("sha256")
@@ -103,4 +103,4 @@ if (!existsSync(auditPath)) {
 }
 
 if (process.exitCode) process.exit(process.exitCode);
-console.log(`Clawd MIT provenance verified for ${auditedFiles.size} retained upstream files`);
+console.log(`Clawd MIT provenance verified for ${auditedFiles.size} audited bridge files`);

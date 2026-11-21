@@ -9,6 +9,7 @@
 
 #define MASTER_NAMESPACE "p4_audio"
 #define MASTER_KEY "master_v1"
+#define MASTER_DEFAULT_VOLUME 80U
 #define MASTER_DEBOUNCE_MS UINT64_C(1000)
 #define MASTER_WRITE_SPACING_MS UINT64_C(10000)
 #define MASTER_RETRY_MS UINT64_C(30000)
@@ -19,7 +20,7 @@ static SemaphoreHandle_t stream_mutex;
 static i2c_master_dev_handle_t readback;
 static uint8_t level_regs[101];
 /* Init owns this until ready release; then the single protocol worker owns it. */
-static unsigned boot_volume = 100, durable_volume, dirty_volume;
+static unsigned boot_volume = MASTER_DEFAULT_VOLUME, durable_volume, dirty_volume;
 static bool boot_loaded, durable_known, dirty, attempted;
 static uint64_t dirty_since, last_attempt, retry_at;
 static esp_err_t save_error;
@@ -30,14 +31,14 @@ unsigned pet_audio_volume_boot_load(void) {
   boot_loaded = true;
   nvs_handle_t handle;
   esp_err_t err = nvs_open(MASTER_NAMESPACE, NVS_READONLY, &handle);
-  uint8_t stored = 100;
+  uint8_t stored;
   if (err == ESP_OK) {
     err = nvs_get_u8(handle, MASTER_KEY, &stored);
     nvs_close(handle);
   }
   if (err == ESP_ERR_NVS_NOT_FOUND) {
-    durable_known = true; /* Absent key deterministically boots at 100. */
-    durable_volume = 100;
+    durable_known = true; /* The default is durable without writing a key. */
+    durable_volume = MASTER_DEFAULT_VOLUME;
   } else if (err == ESP_OK && stored <= 100) {
     boot_volume = durable_volume = stored;
     durable_known = true;

@@ -1,12 +1,12 @@
 # PC 客户端 / Desktop client
 
-当前源码版本 **0.1.199**，配套固件版本 **0.7.103-p4-r179**。`main` 可包含安装包发布后的修正；安装包与源码归档见 [0.1.199 Release](https://github.com/YizhengWw/HachimoDock/releases/tag/v0.1.199)。该归档对应 `v0.1.199` 标签。公开构建不提供服务 Key，运行时凭据由用户在 API 配置中保存。
+当前源码版本 **0.1.245**，配套固件 **0.7.107-p4-r292 / R292**。如需使用第三方服务，请在应用内配置自己的凭据。
 
 Pet Manager 用于连接设备、管理形象和组件，以及将 Agent 状态与语音输入同步到桌面小屏。支持 macOS arm64 与 Windows x64。
 
-Agent 能力及平台限制见 [接入矩阵](docs/agent-integration-audit.md)。当前源码支持 [WorkBuddy](docs/workbuddy.md)：独立形象绑定、状态与气泡同步、当前可见对话的按键语音草稿及组件生成 Skill 安装。历史会话需在 WorkBuddy 手动打开。已发布安装包的能力以对应版本为准。
+Agent 状态跟随、语音草稿、确认发送与对话切换是不同能力，应按实际平台与客户端能力核验。当前源码支持 [WorkBuddy](docs/workbuddy.md)：独立形象绑定、状态与气泡同步、当前可见对话的按键语音草稿及组件生成 Skill 安装。历史会话需在 WorkBuddy 手动打开。已发布安装包的能力以对应版本为准。
 
-直接使用请前往 [下载页面](https://github.com/YizhengWw/HachimoDock/releases/latest)。以下内容面向需要自行编译或修改客户端的开发者，技术栈为 Tauri 2 + React。
+直接使用请前往 [下载页面](https://github.com/ai-maker-lab/HachimoDock/releases/latest)。以下内容面向需要自行编译或修改客户端的开发者，技术栈为 Tauri 2 + React。
 
 ## 环境与测试 / Requirements and tests
 
@@ -79,30 +79,32 @@ node --test pc/scripts/test-framework-offline.test.mjs
 
 ## 完整客户端依赖 / Native runtime dependencies
 
-应用打包需要目标平台的可重定位 Node.js 和 FFmpeg 8.1.2、对应许可证与源码。默认会校验准备脚本记录的已审核 FFmpeg 构建哈希。准备方式见 [runtime-dependencies.md](docs/runtime-dependencies.md)。
+应用打包需要目标平台的可重定位 Node.js 和 FFmpeg 8.1.3、对应许可证与源码。默认会校验准备脚本记录的已审核 FFmpeg 构建哈希。准备方式见 [runtime-dependencies.md](docs/runtime-dependencies.md)。
 
 ```sh
 npm run prepare:desktop
 npm run dev
 ```
 
+从仓库根目录运行 `python pc/scripts/stage-release-firmware.py`，获取并校验与本版本匹配的四份 OTA 镜像。自行编译固件时，请按 [四板固件构建说明](../firmware/BUILD.md#配套桌面资源) 检查板型、版本和镜像。
+
 完整构建 / Build installers:
 
 ```sh
 # macOS arm64
-npm run build:mac:local
+npm run build:mac
 # Windows x64，在 Windows 开发终端执行 / on Windows
 npm run build:win
 ```
 
 Rust 检查需要先准备完整资源：`cargo test --manifest-path src-tauri/Cargo.toml --lib`。
-macOS 本地包采用 ad-hoc 签名，不等于 Developer ID 签名或公证。Windows 发布签名也需发行者自行配置。
+自行构建的包不自动继承官方安装包的签名与公证。macOS Developer ID 签名、Apple 公证及 Windows 签名由构建者另行配置；私钥、公证凭据和本机配置不属于公开源码。
 
 ## 目录说明 / Directory guide
 
 - `builtin-clawpkgs/` 保存内置组件源码，`../firmware/` 构建会读取这里。
 - `public/terrier-clips/` 是出厂形象及对应预转换素材。
-- `src-tauri/firmware/esp32-p4/` 保存配套升级镜像。macOS 与 Windows 共用同一份 4M UART 固件，不需要按电脑系统选择固件。
+- `src-tauri/firmware/esp32-p4/` 接收配套生成的 OTA 镜像；WiFi6/Pico 与芯片 v1/v3 必须分别构建，同一板型和芯片的镜像由 macOS 与 Windows 共用。
 - 使用语音识别或形象生成时，在客户端“API 配置”页填写自己的服务 Key。
 - 本机 bridge 仅绑定回环地址；不要通过代理、端口转发或公网监听暴露它。安全说明见 [SECURITY.md](../SECURITY.md)。
 
@@ -125,3 +127,21 @@ macOS 本地包采用 ad-hoc 签名，不等于 Developer ID 签名或公证。W
 预览运行时由同一份 C 核心生成。重建与 `--check` 使用 LLVM/LLD **20.1.8**，
 通过 `CLANG` 指定 clang；配套 wasm-ld 必须可用。编译器版本会影响输出字节，
 请使用固定工具链保留原有镜像一致性检查。普通客户端开发不需要重建这些已提交产物。
+
+### 按需预览加载回归（隔离 UI）
+
+先在一个终端启动已有的全模拟页面：
+
+```sh
+cd pc
+node node_modules/vite/bin/vite.js --config vite.app-surface.config.js --host 127.0.0.1 --port 4191
+```
+
+另一个终端从 `pc/` 运行；浏览器必须已安装，此命令不会自动下载：
+
+```sh
+PET_TEST_BROWSER_EXECUTABLE="/absolute/path/to/chrome" node tests/component-preview-loading.mjs
+```
+
+脚本使用独立浏览器上下文，阻止外网请求，不读取用户资料或连接设备；检查初始列表
+不加载预览模块、加载中 Escape 关闭、重新打开，以及没有设备变更调用。

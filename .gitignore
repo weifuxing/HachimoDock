@@ -39,6 +39,7 @@ bundle-secrets.env
 firmware/sdkconfig.*
 !firmware/sdkconfig.defaults
 !firmware/sdkconfig.v3.defaults
+!firmware/sdkconfig.wifi-settings.defaults
 pc/public/terrier-clips/p4-ready/*
 !pc/public/terrier-clips/p4-ready/v9-640x480-15fps-225f-h264-crf27/
 
@@ -54,3 +55,10 @@ pc/public/terrier-clips/p4-ready/*
 
 !firmware/sdkconfig.esp32_p4_evboard_v3
 !firmware/sdkconfig.esp32_p4_large_reply_parent
+
+# Shared dependency cache may be a symlink in integration worktrees.
+/firmware/managed_components
+
+# Verified OTA binaries staged from the matching release.
+/pc/src-tauri/firmware/esp32-p4/*.bin
+/pc/src-tauri/firmware/esp32-p4/.staging-*/

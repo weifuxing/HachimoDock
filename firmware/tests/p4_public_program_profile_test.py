@@ -102,7 +102,7 @@ def test_public_candidate_rides_the_verified_chain_and_undefines_only_the_unadmi
     assert lines[6:]==['-DPET_P4_PUBLIC_PROGRAM_PROFILE=1','-DPET_P4_CONVERSATION_VIDEO=1','-DPET_P4_UART_CONTROL_PACING=1','-DPET_SERVICE_BRIDGE_ENABLED=1','-DPET_HOST_COLLECTION_ENABLED=1']
     assert not any(v in flags for v in ('TASK_PRIORITY','F_CPU','BUDGET_US','WATCHDOG','AFFINITY'))
     for name in config.sections():
-        if name not in (PUBLIC,PUBLIC_V3,'env:esp32_p4_service_bridge_candidate'):
+        if name not in (PUBLIC,PUBLIC_V3,'env:esp32_p4_service_bridge_candidate','env:esp32_p4_pico_v1','env:esp32_p4_pico_v3','env:esp32_p4_wifi6_system_settings_v1','env:esp32_p4_wifi6_system_settings_v3'):
             assert 'PET_P4_PUBLIC_PROGRAM_PROFILE=1' not in config[name].get('build_flags','') and PUBLIC not in config[name].get('extends','')
     service=config['env:esp32_p4_service_bridge_candidate']
     assert service['extends']==PUBLIC

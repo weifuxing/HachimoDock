@@ -5,7 +5,12 @@ import {fileURLToPath} from "node:url";
 import {initialApp,appAction,appAdvance,appHit,appVisible} from "./app-runtime.js";
 import {createClassicCore} from "./classic-core.js";
 const root=process.env.PET_OPTIMIZED_PACKAGE_DIR||fileURLToPath(new URL('../../builtin-clawpkgs',import.meta.url));
-const load=id=>JSON.parse(fs.readFileSync(`${root}/${id}/runtime/widget.json`));
+const load=id=>{
+  const relative=`${id}/runtime/widget.json`;
+  const builtin=`${root}/${relative}`;
+  const optional=new URL(`../../optional-clawpkgs/${relative}`,import.meta.url);
+  return JSON.parse(fs.readFileSync(fs.existsSync(builtin)||process.env.PET_OPTIMIZED_PACKAGE_DIR?builtin:optional));
+};
 const fixture={skip:!root};
 test("frog caps bond, retains durable counters, every interaction still responds",fixture,()=>{
   const r=load("bloomfrog_companion");let s=initialApp(r);
@@ -39,7 +44,7 @@ test("tomato paused reset and skip do not restart, full completion counts exactl
   assert.equal(s.vars.completed_sessions,1);
 });
 test("touch targets preserve actions and reach all tool settings",fixture,()=>{
-  for(const id of ["computer-status","upcoming-todos","stock-watchlist"]){
+  for(const id of ["computer-status","hachimi-notes","stock-watchlist"]){
     const r=load(id);
     for(const n of r.surface.elements.filter(n=>n.action)){
       assert.ok(n.w>=44&&n.h>=44);

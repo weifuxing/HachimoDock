@@ -1,0 +1,38 @@
+[
+  {
+    "action": "lab.left",
+    "control": "前方摇杆",
+    "event": "knob.rotate_ccw",
+    "label": "向左选卡"
+  },
+  {
+    "action": "lab.right",
+    "control": "前方摇杆",
+    "event": "knob.rotate_cw",
+    "label": "向右选卡"
+  },
+  {
+    "action": "lab.up",
+    "control": "前方摇杆",
+    "event": "joystick.up",
+    "label": "向上选卡"
+  },
+  {
+    "action": "lab.down",
+    "control": "前方摇杆",
+    "event": "joystick.down",
+    "label": "向下选卡"
+  },
+  {
+    "action": "lab.a",
+    "control": "SW1",
+    "event": "button.sw1.short_press",
+    "label": "确认或换一桌"
+  },
+  {
+    "action": "lab.b",
+    "control": "SW2",
+    "event": "button.sw2.short_press",
+    "label": "重选身份"
+  }
+]

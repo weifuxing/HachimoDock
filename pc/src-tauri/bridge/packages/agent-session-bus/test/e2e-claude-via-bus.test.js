@@ -57,7 +57,7 @@ test("end-to-end: bus → ClaudeCodeAdapter → fake-claude → SSE", async () =
   try {
     const resp = await fetch(`http://127.0.0.1:${port}/agent/inject`, {
       method: "POST",
-      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      headers: { ...bus.authorizationHeaders("control"), "content-type": "application/json", accept: "text/event-stream" },
       body: JSON.stringify({ agentId: "claude-code", sessionId: "auto", text: "ping" }),
     });
     assert.equal(resp.status, 200);

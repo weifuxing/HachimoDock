@@ -1,0 +1,9 @@
+menu "HachimoDock display rendering"
+    config PET_P4_MAIN_RENDER_INTERVAL_MS
+        int "Normal render interval in milliseconds"
+        range 33 50
+        default 50
+        help
+            The minimum interval between normal render attempts. Use 33
+            for 30 fps evaluation. Asset cadence and LCD timings are separate.
+endmenu

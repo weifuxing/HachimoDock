@@ -399,6 +399,11 @@ impl UsbAudioRelay {
         };
         if sequence != current.next_sequence {
             let expected = current.next_sequence;
+            crate::realtime_chat_log::record("", "usb_audio_chunk_rejected", json!({
+                "stage": "usb_audio_chunk_rejected", "errorKind": "audio_sequence_mismatch",
+                "seq": sequence, "expectedSeq": expected, "priorChunks": expected,
+                "priorBytes": current.total_bytes,
+            }));
             return Some(self.fail_current(
                 "chunk",
                 &format!("audio sequence mismatch: expected {expected}, got {sequence}"),
@@ -406,12 +411,18 @@ impl UsbAudioRelay {
             ));
         }
 
-        let decoded = match STANDARD.decode(string_field(payload, "data")) {
+        let encoded = string_field(payload, "data");
+        let decoded = match STANDARD.decode(encoded) {
             Ok(decoded) => decoded,
-            Err(error) => {
-                    return Some(self.fail_current(
+            Err(_) => {
+                crate::realtime_chat_log::record("", "usb_audio_chunk_rejected", json!({
+                    "stage": "usb_audio_chunk_rejected", "errorKind": "audio_base64_invalid",
+                    "seq": sequence, "declaredBytes": u64_field(payload, "bytes"),
+                    "base64CharCount": encoded.len(), "priorBytes": current.total_bytes,
+                }));
+                return Some(self.fail_current(
                     "chunk",
-                    &format!("invalid audio base64: {error}"),
+                    "设备音频分片编码校验失败，本段已停止。请重新长按录音。",
                     &session_id,
                 ));
             }
@@ -719,6 +730,32 @@ mod tests {
             assert_eq!(late["terminalAlreadyReported"], true);
             assert_eq!(late["errorKind"], kind);
         }
+    }
+
+    #[test]
+    fn invalid_padding_retires_only_its_own_capture() {
+        let mut relay = UsbAudioRelay::default();
+        relay.configure(true, DEFAULT_PCM_RELAY_PORT, false);
+        relay.handle("audio/begin", &begin_payload("bad-capture"));
+        let bad = json!({"sessionId":"bad-capture", "seq":0, "bytes":2, "data":"YWI"});
+        let event = relay.handle("audio/chunk", &bad).unwrap();
+        assert_eq!(event["ok"], false);
+        assert!(relay.take_validated_chunk().is_none());
+        assert!(relay.take_completed().is_none());
+
+        relay.handle("audio/begin", &begin_payload("new-capture"));
+        let late = relay.handle("audio/end", &json!({"sessionId":"bad-capture"})).unwrap();
+        assert_eq!(late["terminalAlreadyReported"], true);
+        let pcm = b"ab";
+        let checksum = format!("{:016x}", fnv1a64_update(FNV1A64_OFFSET, pcm));
+        let event = relay.handle("audio/chunk", &json!({"sessionId":"new-capture", "seq":0,
+            "bytes":pcm.len(), "data":STANDARD.encode(pcm), "checksum":checksum})).unwrap();
+        assert_eq!(event["ok"], true);
+        assert_eq!(relay.take_validated_chunk().unwrap().pcm, pcm);
+        let end = relay.handle("audio/end", &json!({"sessionId":"new-capture", "chunks":1,
+            "bytes":pcm.len(), "checksum":checksum})).unwrap();
+        assert_eq!(end["ok"], true);
+        assert_eq!(relay.take_completed().unwrap().pcm, pcm);
     }
 
     #[test]

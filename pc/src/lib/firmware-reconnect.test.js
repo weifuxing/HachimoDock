@@ -9,7 +9,7 @@ test("OTA validation preserves a working serial handle and bounds reopen after b
   assert.match(body,/started\.elapsed\(\) < Duration::from_secs\(20\)/);
   assert.ok(body.indexOf("Duration::from_secs(20)") < body.indexOf("reconnect()"));
   assert.ok(body.indexOf("Duration::from_secs(20)") < body.indexOf("self.query_diagnostics"));
-  assert.match(body,/validation_query_failed[\s\S]*force_reconnect = true;/);
+  assert.match(body,/validation_query_failed[\s\S]*force_reconnect = query_failed_on_connection == Some\(connection_id\);\s*query_failed_on_connection = Some\(connection_id\);/);
   assert.match(body,/evaluate_firmware_validation/);
 });
 

@@ -2,5 +2,5 @@
  * MiSans glyph bitmap; retain its source header and license. */
 #pragma once
 #define PET_FONT_BITMAP_BYTES 554086U
-#define PET_FONT_BITMAP_PACKED_BYTES 463438U
+#define PET_FONT_BITMAP_PACKED_BYTES 459247U
 #define PET_FONT_BITMAP_ADLER UINT32_C(0x492ed992)

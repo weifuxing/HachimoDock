@@ -111,10 +111,11 @@ static bool pet_p4_handle_line(pet_p4_runtime_state_t*s,const char*line,pet_p4_s
 static bool enqueue_probe(const char*line,pet_p4_send_line_fn sender,void*route,void*context){(void)line;(void)context;enqueue_calls++;observed_ingress_route=route;CHECK(sender==native_sender);return true;}
 #define PET_P4_NATIVE_KIND_JSON 1
 @@FALLBACK@@
-typedef struct {char*line;pet_p4_send_line_fn send_line;void*reply_ctx;}queue_request_t;
+typedef struct {char*line;pet_p4_send_line_fn send_line;void*reply_ctx;size_t charged_bytes;}queue_request_t;
+static void release_protocol_memory(size_t n){CHECK(n==128);}
 static void drop_queue_line(void *p){queue_line_frees++;free(p);}
 static void queue_probe(pet_p4_send_line_fn sender,void*route){
- queue_request_t request={malloc(128),sender,route};CHECK(request.line);strcpy(request.line,"{\"topic\":\"control/screen-page\",\"payload\":{\"page\":\"main\"}}");
+ queue_request_t request={malloc(128),sender,route,128};CHECK(request.line);strcpy(request.line,"{\"topic\":\"control/screen-page\",\"payload\":{\"page\":\"main\"}}");
  for(unsigned once=0;once<1;once++){
 #define free drop_queue_line
 @@QUEUE_GUARD@@

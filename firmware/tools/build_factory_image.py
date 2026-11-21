@@ -18,6 +18,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import wave
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -26,6 +27,7 @@ TOOLS_DIR = Path(__file__).resolve().parent
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 
+from build_builtin_bundle import read_component_wasm
 from p4_component_sprites import compile_component_sprites, sprite_pack_checksum
 from p4_image_compat import image_revision_range, factory_revision_range
 
@@ -534,6 +536,8 @@ def build_builtin_component_tree(
 ) -> dict:
     component_config = config["components"]
     packages_dir = (project_dir / component_config["packagesDir"]).resolve()
+    firmware_only = set(component_config.get("firmwareOnlyIds", []))
+    firmware_only_dir = (project_dir / component_config["firmwareOnlyPackagesDir"]).resolve() if firmware_only else packages_dir
     widget_max = parse_int(component_config["widgetMaxBytes"])
     buttons_max = parse_int(component_config["buttonsMaxBytes"])
     max_installed = parse_int(component_config["maxInstalled"])
@@ -547,17 +551,20 @@ def build_builtin_component_tree(
         )
     if len(set(component_ids)) != len(component_ids):
         raise ValueError("factory components.ids contains duplicates")
+    if not firmware_only.issubset(component_ids):
+        raise ValueError("factory firmwareOnlyIds must be a subset of ids")
     if active_id not in component_ids:
         raise ValueError("factory components.defaultActiveId must be present in ids")
 
     catalog_items = []
     package_bytes = 0
     sprite_file_count = 0
+    wasm_file_count = 0
     for slot, widget_id_value in enumerate(component_ids):
         widget_id = str(widget_id_value)
         if not re.fullmatch(r"[a-z][a-z0-9_-]{0,46}", widget_id):
             raise ValueError(f"invalid P4 component id: {widget_id}")
-        package_dir = packages_dir / widget_id
+        package_dir = (firmware_only_dir if widget_id in firmware_only else packages_dir) / widget_id
         component_path = package_dir / "component.json"
         widget_path = package_dir / "runtime" / "widget.json"
         buttons_path = package_dir / "buttons.json"
@@ -594,15 +601,22 @@ def build_builtin_component_tree(
             )
             package_bytes += len(sprite["data"])
             sprite_file_count += 1
+        wasm = read_component_wasm(package_dir, widget)
+        if wasm is not None:
+            write_spiffs_root_file(spiffs_tree, f"p4s{slot:02d}-0-254.bin", wasm)
+            package_bytes += len(wasm)
+            wasm_file_count += 1
         catalog_items.append(
             {
                 "widgetId": widget_id,
                 "title": title,
+                "packageVersion": component["version"],
+                "packageKind": component["kind"],
                 "slot": slot,
                 "packageGeneration": 0,
                 "widgetChecksum": f"{fnv1a32_bytes(widget_bytes):08x}",
                 "buttonsChecksum": f"{fnv1a32_bytes(buttons_bytes):08x}",
-                "spritesChecksum": f"{sprite_pack_checksum(sprites):08x}",
+                "spritesChecksum": f"{sprite_pack_checksum(sprites, wasm):08x}",
             }
         )
 
@@ -616,7 +630,7 @@ def build_builtin_component_tree(
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
-    if len(catalog_bytes) >= 16384:
+    if len(catalog_bytes) >= 32 * 1024:
         raise ValueError("generated P4 component catalog exceeds the firmware buffer")
     write_spiffs_root_file(spiffs_tree, MINIAPP_CATALOG_FILE, catalog_bytes)
     package_bytes += len(catalog_bytes)
@@ -624,8 +638,9 @@ def build_builtin_component_tree(
         "count": len(catalog_items),
         "ids": component_ids,
         "defaultActiveId": active_id,
-        "physicalFiles": len(catalog_items) * 2 + sprite_file_count + 1,
+        "physicalFiles": len(catalog_items) * 2 + sprite_file_count + wasm_file_count + 1,
         "spriteFiles": sprite_file_count,
+        "wasmFiles": wasm_file_count,
         "payloadBytes": package_bytes,
     }
 
@@ -886,10 +901,40 @@ def validate_segments(segments: list[tuple[int, Path]], flash_size: int) -> None
         )
 
 
-def project_version(project_dir: Path) -> str:
-    cmake = (project_dir / "CMakeLists.txt").read_text(encoding="utf-8")
-    match = re.search(r'set\s*\(\s*PROJECT_VER\s+"([^"]+)"', cmake)
-    return match.group(1) if match else "unknown"
+def generate_board_identity_nvs(
+    directory: Path, generator: Path, board: str, device_id: str, size: int
+) -> Path:
+    if board not in ("pico", "wifi6") or not re.fullmatch(r"p4-[a-f0-9]{12}", device_id):
+        raise ValueError("factory identity requires a verified board model and P4 device ID")
+    record = directory / "board.csv"
+    record.write_text(
+        "key,type,encoding,value\n"
+        "pet_factory,namespace,,\n"
+        f"board_v1,data,string,{device_id}:{board}\n",
+        encoding="ascii",
+    )
+    image = directory / "factory-board-nvs.bin"
+    run_checked([sys.executable, str(generator), "generate", str(record), str(image), hex(size)])
+    if image.stat().st_size != size:
+        raise ValueError("generated factory board identity must fill the NVS partition")
+    return image
+
+
+def application_version(build_dir: Path) -> str:
+    app = (build_dir / "firmware.bin").read_bytes()
+    if len(app) < 112 or app[32:36] != bytes.fromhex("3254cdab"):
+        raise ValueError("factory application has no valid ESP app descriptor")
+    version = app[48:80].split(b"\0", 1)[0].decode("ascii")
+    if not re.fullmatch(r"[0-9A-Za-z._-]+", version):
+        raise ValueError("invalid factory application version")
+    return version
+
+
+def application_board_model(build_dir: Path):
+    # Artifact identity comes from the actual application, not a mutable CMake label.
+    # This does not identify the physical board; the flashing guide requires that check.
+    version = application_version(build_dir)
+    return next((board for board in ("pico", "wifi6") if version.endswith("-" + board)), None)
 
 
 def build_factory_image(
@@ -904,6 +949,7 @@ def build_factory_image(
     raw_appearance_offset: int,
     esptool: Path,
     output: Path,
+    board_identity_nvs: Path | None = None,
 ) -> dict:
     layout = validate_factory_partition_layout(project_dir, build_dir)
     if (spiffs_offset != CURRENT_DATA_LAYOUT["storage"][0]
@@ -919,6 +965,11 @@ def build_factory_image(
     flash_size = parse_flash_size(str(settings["flash_size"]))
     segments.append((spiffs_offset, spiffs_image.resolve()))
     segments.append((raw_appearance_offset, raw_appearance_image.resolve()))
+    if board_identity_nvs is not None:
+        nvs = layout["partitions"]["nvs"]
+        if board_identity_nvs.stat().st_size != nvs["bytes"]:
+            raise ValueError("factory identity NVS image has the wrong size")
+        segments.append((parse_int(nvs["offset"]), board_identity_nvs.resolve()))
     segments.sort(key=lambda item: item[0])
     validate_segments(segments, flash_size)
     if output.exists():
@@ -944,6 +995,9 @@ def build_factory_image(
 
     if factory_revision_range(output.read_bytes()) != chip_bounds:
         raise ValueError("merged factory image has inconsistent chip revision bounds")
+    if board_identity_nvs is not None:
+        if sha256_region(output, parse_int(nvs["offset"]), nvs["bytes"]) != sha256_file(board_identity_nvs):
+            raise ValueError("merged factory image does not contain the expected board identity")
 
     if sha256_region(output, spiffs_offset, spiffs_image.stat().st_size) != sha256_file(
         spiffs_image
@@ -976,7 +1030,8 @@ def build_factory_image(
         "chipRevisionMax": chip_bounds[1],
         "chipFamily": "v3" if chip_bounds[0] >= 300 else "v1",
         "project": "pet_manager_p4_runtime",
-        "version": project_version(project_dir),
+        "version": application_version(build_dir),
+        "boardModel": application_board_model(build_dir),
         "chip": str(flasher.get("extra_esptool_args", {}).get("chip", "esp32p4")),
         "flashOffset": "0x0",
         "flashSize": str(settings["flash_size"]),
@@ -1034,7 +1089,14 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--output")
     parser.add_argument("--flash-port")
     parser.add_argument("--flash-baud", type=int, default=921600)
-    return parser.parse_args(argv)
+    parser.add_argument("--verified-board-model", choices=("pico", "wifi6"))
+    parser.add_argument("--verified-device-id", help="P4 device ID recorded during physical board inspection")
+    parser.add_argument("--nvs-generator", type=Path, help="ESP-IDF nvs_partition_gen.py")
+    args = parser.parse_args(argv)
+    identity_args = (args.verified_board_model, args.verified_device_id, args.nvs_generator)
+    if any(identity_args) and (not all(identity_args) or args.flash_port):
+        parser.error("board identity requires all three provisioning options and an offline factory build")
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1078,19 +1140,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         build_dir,
         appearance,
     )
-    summary = build_factory_image(
-        project_dir,
-        build_dir,
-        config,
-        appearance,
-        components,
-        spiffs_image,
-        spiffs_offset,
-        raw_appearance_image,
-        raw_appearance_offset,
-        esptool,
-        output,
-    )
+    with tempfile.TemporaryDirectory(prefix="pet-factory-board-") as staging:
+        board_identity_nvs = None
+        if args.verified_board_model:
+            descriptor = (build_dir / "firmware.bin").read_bytes()[48:80].split(b"\0", 1)[0]
+            if not descriptor.endswith(f"-{args.verified_board_model}".encode("ascii")):
+                raise ValueError("factory application and physically verified board model disagree")
+            _, nvs_size = partition_entry(project_dir / "partitions.csv", "nvs")
+            board_identity_nvs = generate_board_identity_nvs(
+                Path(staging), args.nvs_generator.resolve(), args.verified_board_model,
+                args.verified_device_id, nvs_size,
+            )
+        summary = build_factory_image(
+            project_dir,
+            build_dir,
+            config,
+            appearance,
+            components,
+            spiffs_image,
+            spiffs_offset,
+            raw_appearance_image,
+            raw_appearance_offset,
+            esptool,
+            output,
+            board_identity_nvs,
+        )
     print(f"[factory] image={output}")
     print(f"[factory] bytes={summary['bytes']}")
     print(f"[factory] sha256={summary['sha256']}")

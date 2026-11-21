@@ -4,6 +4,21 @@ const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 const SYSTEM = 'S-1-5-18', FULL = 2032127
 const OPERATIONS = new Set(['prepare-directory', 'create-file', 'protect-file', 'verify-directory', 'verify-file'])
+const STAGES = new Set(['input', 'reparse', 'attributes', 'get-acl', 'owner', 'access-rules', 'raw-dacl', 'validate', 'acl-build', 'existing-owner', 'set-acl', 'create-directory', 'create-file'])
+const CAUSES = new Set(['other', 'owner', 'acl', 'reparse', 'kind', 'path', 'user', 'operation', 'local-fixed-volume-required'])
+function aclFailure(operation, result) {
+  let reason = result.error?.code === 'ETIMEDOUT' ? 'timeout' : 'helper_failed'
+  const diagnostic = /^DSH_ACL_REJECTED:(\{[^\r\n]+\})$/m.exec(result.stderr || '')
+  if (diagnostic) {
+    try {
+      const { stage, cause } = JSON.parse(diagnostic[1])
+      if (STAGES.has(stage) && CAUSES.has(cause)) reason = `${stage}/${cause}`
+    } catch { /* Do not expose the raw PowerShell output. */ }
+  }
+  const error = new Error(`Windows capability ACL verification failed (${operation}: ${reason})`)
+  error.code = 'WINDOWS_CAPABILITY_ACL_REJECTED'
+  return error
+}
 function windowsPath(value) {
   if (typeof value !== 'string' || value.length > 2048 || !/^[A-Za-z]:\\/.test(value) || /[\x00-\x1f]/.test(value) || value.slice(2).includes(':') || value.includes('/')) throw new Error('invalid Windows capability path')
   const parts = value.slice(3).split('\\')
@@ -40,7 +55,7 @@ function windowsAcl(operation, target, options = {}) {
     env: { SystemRoot: systemRoot, WINDIR: systemRoot, PSModulePath: path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules'), HACHIMODOCK_DSH_ACL_OPERATION: operation, HACHIMODOCK_DSH_ACL_PATH: target },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
-  if (result.error || result.signal || result.status !== 0 || result.stderr?.trim() || typeof result.stdout !== 'string' || Buffer.byteLength(result.stdout) > 32768) throw new Error('Windows capability ACL verification failed')
+  if (result.error || result.signal || result.status !== 0 || result.stderr?.trim() || typeof result.stdout !== 'string' || Buffer.byteLength(result.stdout) > 32768) throw aclFailure(operation, result)
   let receipt
   try { receipt = JSON.parse(result.stdout.replace(/^\uFEFF/, '').trim()) } catch { throw new Error('invalid Windows ACL receipt') }
   return validateAclReceipt(receipt, operation, target)

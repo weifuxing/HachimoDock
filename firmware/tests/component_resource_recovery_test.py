@@ -17,9 +17,9 @@ def test_boot_batch_finishes_every_physical_validation_before_each_yield(tmp_pat
     _run_partial_catalog_recovery(tmp_path,True,True)
 
 def _run_partial_catalog_recovery(tmp_path,native_cache,batch=False):
-    code = (ROOT / 'main/pet_p4_miniapp.c').read_text()
-    recovery = code[code.index('static bool recover_catalog_items('):code.index('static bool catalog_item_visible(')]
-    validate = code[code.index('static bool catalog_reuse_verified_item('):code.index('static bool load_catalog_snapshot(')]
+    code = (ROOT / 'main/pet_p4_miniapp.c').read_text().replace('__attribute__((optimize("Oz"))) ', '')
+    recovery = code[code.index('static bool recover_catalog_items('):code.index('static bool catalog_id_visible(')]
+    validate = code[code.index('static bool catalog_needs_backup_item('):code.index('static bool load_catalog_snapshot(')]
     source = r'''
 #include <stdbool.h>
 #include <stdint.h>
@@ -81,38 +81,31 @@ int main(void){
  older.items[0].slot=4;assert(!recover_catalog_items(&latest,&older));
  older.items[0].slot=0;older.parsed=false;assert(!recover_catalog_items(&latest,&older));
  older.parsed=true;latest.count=0;assert(!recover_catalog_items(&latest,&older));assert(latest.count==0);
- // Real boot sequence. Only matching successful physical validations are
- // shareable, even when the first bank also contains a damaged package.
- miniapp_catalog_snapshot_t bank0={.parsed=true,.count=32,.sequence=30},bank1={0};
- for(int i=0;i<32;i++){
-  snprintf(bank0.items[i].widget_id,48,"package-%d",i);
-  bank0.items[i].slot=i;bank0.items[i].widget_checksum=i?10u:999u;
-  bank0.items[i].buttons_checksum=20;bank0.items[i].sprites_checksum=30;
+ // Boot validates the newest membership, then only eligible backup files.
+ miniapp_catalog_snapshot_t current={.parsed=true,.count=5,.sequence=31};
+ miniapp_catalog_snapshot_t backup={.parsed=true,.count=32,.sequence=30};
+ for(size_t i=0;i<backup.count;i++){
+  miniapp_catalog_item_t *item=&backup.items[i];
+  snprintf(item->widget_id,48,"component-%zu",i);
+  item->slot=i;item->widget_checksum=10+i;item->buttons_checksum=20+i;item->sprites_checksum=30+i;
  }
- bank0.items[3].sprites_checksum=0; // Verified bootstrap remains a bootstrap.
- bank1=bank0;bank1.sequence=31;
- strcpy(bank1.items[1].title,"new title");
- bank1.items[4].package_generation=1;
- bank1.items[5].widget_checksum=0;
- bank1.items[6].buttons_checksum=21;
- bank1.items[7].sprites_checksum=31;
- strcpy(bank1.items[8].widget_id,"different-id");
- bank1.items[9].slot=10;bank1.items[10].slot=9;
- unsigned before=physical_loads,first_loads=0,second_loads=0;
- assert(!validate_catalog_snapshot(&bank0,NULL,&first_loads));
- assert(!validate_catalog_snapshot(&bank1,&bank0,&second_loads));
- assert(first_loads==32&&second_loads==8&&physical_loads==before+40);
- assert(yields==physical_loads&&bank1.needs_upgrade);
- assert(bank1.items[0].resource_state==3&&!recover_catalog_items(&bank1,&bank0));
- assert(bank1.items[1].resource_state==1&&bank1.items[1].image_count==3);
- assert(!strcmp(bank1.items[1].title,"new title")&&bank1.sequence==31&&bank1.count==32);
- assert(bank1.items[3].resource_state==2&&bank1.items[3].image_count==0);
- // Slot order is independent of catalog order.
- miniapp_catalog_item_t swapped=bank1.items[1];
- bank1.items[1]=bank1.items[2];bank1.items[2]=swapped;
- assert(catalog_reuse_verified_item(&bank1.items[1],&bank0));
- bank0.parsed=false;
- assert(!catalog_reuse_verified_item(&bank1.items[1],&bank0));
+ memcpy(current.items,backup.items,current.count*sizeof(current.items[0]));
+ current.items[0].widget_checksum=999; // Recover this one.
+ current.items[1].sprites_checksum=0;backup.items[1].sprites_checksum=0; // Identical bootstrap.
+ current.items[2].sprites_checksum=0; // Recover full resources from backup.
+ current.items[3].widget_checksum=999;backup.items[3].slot=15; // Wrong slot.
+ strcpy(backup.items[4].widget_id,"removed-component");
+ unsigned before=physical_loads,current_loads=0,backup_loads=0;
+ assert(!validate_catalog_snapshot(&current,NULL,&current_loads));
+ assert(validate_catalog_snapshot(&backup,&current,&backup_loads));
+ assert(current_loads==5&&backup_loads==2&&physical_loads==before+7);
+ assert(yields==physical_loads&&recover_catalog_items(&current,&backup));
+ assert(current.count==5&&current.sequence==31);
+ assert(current.items[0].widget_checksum==10&&current.items[2].sprites_checksum==32);
+ assert(current.items[1].resource_state==2&&current.items[3].resource_state==3);
+ before=physical_loads;
+ assert(validate_catalog_snapshot(&backup,&current,NULL));
+ assert(physical_loads==before);
  return 0;
 }
 '''
@@ -165,12 +158,12 @@ int main(int argc,char**argv){(void)argc;FILE*f=fopen(argv[1],"rb");assert(f);ch
 cJSON_ArrayForEach(p,cJSON_GetObjectItemCaseSensitive(j,"components")){
  const char*id=cJSON_GetObjectItemCaseSensitive(p,"id")->valuestring;
  char*w=cJSON_PrintUnformatted(cJSON_GetObjectItemCaseSensitive(p,"widget"));uint32_t h=2166136261u;for(char*c=w;*c;c++)h=(h^(uint8_t)*c)*16777619u;
- bool external=cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(p,"resourcePackage"));
+ bool external=cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(p,"resourcePackage")) && !cJSON_HasObjectItem(cJSON_GetObjectItemCaseSensitive(p,"widget"),"hachiWasm");
  assert(pet_p4_builtin_is_bootstrap(id,h)==external);assert(!pet_p4_builtin_is_bootstrap("unrelated",h));assert(!pet_p4_builtin_is_bootstrap(id,h^1));free(w);
 }cJSON_Delete(j);free(b);return 0;}
 ''')
     vendor=ROOT/'tests/vendor/cjson';exe=tmp_path/'identity'
-    subprocess.run(['cc','-std=c11','-fsanitize=address,undefined','-I',str(vendor),str(source),str(data),str(vendor/'cJSON.c'),'-o',str(exe)],check=True)
+    subprocess.run(['cc','-std=c11','-fsanitize=address,undefined','-I',str(vendor),'-I',str(ROOT/'main'),str(source),str(data),str(vendor/'cJSON.c'),'-o',str(exe)],check=True)
     subprocess.run([str(exe),str(fixture)],check=True)
 
 def test_navigation_and_invalid_catalog_never_trigger_destructive_reseed():
@@ -198,7 +191,7 @@ def test_navigation_and_invalid_catalog_never_trigger_destructive_reseed():
 
 def test_damaged_package_repair_requires_exact_committed_payload(tmp_path):
     code=(ROOT/'main/pet_p4_miniapp.c').read_text()
-    helper=code[code.index('static bool resource_repair_package_matches('):code.index('bool pet_p4_miniapp_install_commit(')]
+    helper=function(code,'resource_repair_package_matches')
     source=tmp_path/'repair_identity.c'
     source.write_text('''#include <stdint.h>
 #include <stdbool.h>
@@ -223,18 +216,20 @@ int main(void){
 
 
 def test_boot_yield_boundary_is_normal_task_code_after_both_snapshot_loads():
-    code = (ROOT / 'main/pet_p4_miniapp.c').read_text()
+    code = (ROOT / 'main/pet_p4_miniapp.c').read_text().replace('__attribute__((optimize("Oz"))) ', '')
     validate = code[code.index('static bool validate_catalog_snapshot('):code.index('static bool load_catalog_snapshot(')]
     assert validate.count('vTaskDelay(1)') == 1
     assert validate.count('continue;') == 1
-    assert validate.index('catalog_reuse_verified_item(') < validate.index('pet_storage_cache_work_step(')
+    assert validate.index('catalog_needs_backup_item(') < validate.index('pet_storage_cache_work_step(')
     assert 'IRAM_ATTR' not in validate
     assert 'cache lease cleanup' in validate.split('vTaskDelay(1)')[0]
     # These production call sites have no enclosing model/storage/state lock.
     init = code[code.index('esp_err_t pet_p4_miniapp_init(void)'):]
     prefix = init[:init.index('selected=catalog_latest_snapshot(')]
-    assert prefix.count('load_catalog_snapshot(0, snapshot0, NULL)') == 1
-    assert prefix.count('load_catalog_snapshot(1, snapshot1, snapshot0)') == 1
+    assert prefix.count('load_catalog_snapshot(0, snapshot0)') == 1
+    assert prefix.count('load_catalog_snapshot(1, snapshot1)') == 1
+    assert init.index('validate_catalog_snapshot(selected, NULL') < init.index(
+        'validate_catalog_snapshot(backup, selected') < init.index('recover_catalog_items(selected, backup)')
     retire = 'miniapp_runtime_lock();component_program_retire_locked();miniapp_runtime_unlock();'
     assert retire in prefix
     prefix = prefix.replace(retire, '')

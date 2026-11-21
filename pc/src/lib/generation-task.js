@@ -4,7 +4,7 @@
  *   survives navigation, distinguishes reference-image moderation and skipped actions,
  *   identifies unavailable models by request stage and actual model ID,
  *   replaces conversion progress with a truthful terminal summary, and guards
- *   terminal-result acknowledgement by completion epoch.
+ *   terminal-result acknowledgement by completion epoch, with exclusive checkpoint transitions.
  * [Pos] lib node in pc/src/lib
  * [Sync] If this file changes, update this header and any UI component subscribing
  *   via `subscribeGenerationTask` (currently App.jsx + AppearanceGallery.jsx).
@@ -52,6 +52,8 @@ let activeController = null;
 let gateResolve = null;
 let initialization = null;
 let resumeTimer = null;
+// Reserve checkpoint transitions before their first await, including writes.
+let sessionTransitionPending = false;
 function scheduleResume(session) {
   clearTimeout(resumeTimer);
   if(!canAutoResume(session))return;
@@ -97,28 +99,42 @@ export function initializeGenerationRecovery() {
 }
 
 export async function resumeGenerationTask(key = "current", { automaticResume = false } = {}) {
-  if (isGenerationRunning()) return;
-  const session = await loadGenerationSession(key);
-  if (!session || session.finished || session.dismissed) return;
-  if (!["volcengine", "kling"].includes(session.config.provider)) throw new Error("自定义接口任务暂不支持跨重启恢复，避免将旧任务发送到不同服务；请在原服务核对结果。");
-  const provider = session.config.provider;
-  const saved = loadProviderConfig(provider);
-  const imageFile=session.original?.bytes?.byteLength
-    ? new File([session.original.bytes],session.original.filename||'reference.png',{type:session.original.mime||'image/png'})
-    : session.imageFile;
-  startGenerationTask({ imageFile, appearanceName: session.appearanceName,
-    personality: session.personality, styleDescription: session.styleDescription || '', skipProcessing: session.skipProcessing, session, restoreArchived: key !== "current",
-    manualReview: session.automatic !== true,
-    retryReview: !automaticResume,
-    providerConfig: { ...saved, ...session.config, imageEdit: resumeGenerationImageEdit(session, loadArkImageConfig()) },
-  });
+  if (isGenerationRunning() || sessionTransitionPending) return;
+  sessionTransitionPending = true;
+  let restoredInput;
+  try {
+    const session = await loadGenerationSession(key);
+    if (!session || session.finished || session.dismissed) return;
+    if (!["volcengine", "kling"].includes(session.config.provider)) throw new Error("自定义接口任务暂不支持跨重启恢复，避免将旧任务发送到不同服务；请在原服务核对结果。");
+    const provider = session.config.provider;
+    const saved = loadProviderConfig(provider);
+    const imageFile=session.original?.bytes?.byteLength
+      ? new File([session.original.bytes],session.original.filename||'reference.png',{type:session.original.mime||'image/png'})
+      : session.imageFile;
+    restoredInput = { imageFile, appearanceName: session.appearanceName,
+      personality: session.personality, styleDescription: session.styleDescription || '', skipProcessing: session.skipProcessing, session, restoreArchived: key !== "current",
+      manualReview: session.automatic !== true,
+      retryReview: !automaticResume,
+      providerConfig: { ...saved, ...session.config, imageEdit: resumeGenerationImageEdit(session, loadArkImageConfig()) },
+    };
+  } finally {
+    sessionTransitionPending = false;
+  }
+  // No await between releasing the reservation and claiming the running state.
+  if (restoredInput) startGenerationTask(restoredInput);
 }
 
 export async function dismissGenerationSession() {
-  if (isGenerationRunning()) return;
-  const session = await loadGenerationSession();
-  if (session) { session.dismissed = true; await saveGenerationSession(session); }
-  setState({ status: "idle", resumable: false, progress: null, error: "" });
+  if (isGenerationRunning() || sessionTransitionPending) return;
+  sessionTransitionPending = true;
+  clearTimeout(resumeTimer);
+  try {
+    const session = await loadGenerationSession();
+    if (session) { session.dismissed = true; await saveGenerationSession(session); }
+    setState({ status: "idle", resumable: false, progress: null, error: "" });
+  } finally {
+    sessionTransitionPending = false;
+  }
 }
 
 /** @type {Set<(s: GenerationTaskState) => void>} */
@@ -194,6 +210,9 @@ export function startGenerationTask(input) {
     throw new Error("已有生成任务在进行中，请等待完成后再开始新的生成。");
   }
 
+  if (sessionTransitionPending) {
+    throw new Error("任务记录正在更新，请稍候再开始新的生成。");
+  }
   activeController = new AbortController();
   clearTimeout(resumeTimer);
   setState({
@@ -278,6 +297,13 @@ export function normalizeGenerationErrorMessage(error) {
 
   if (/Model do not support image input|do not support image input/i.test(primary)) {
     return "文字分析模型不支持图片输入：请使用 Doubao 2.0 多模态 Responses 模型生成 prompt，不要把 Seedance 或 DeepSeek 文本模型作为图片分析模型。";
+  }
+
+  if (/可灵 AI|kling/i.test(primary)) {
+    if (/HTTP 401|Unauthorized/i.test(primary)) return "可灵 AI Key 无效或已过期，请在可灵开发者控制台检查后更新客户端配置。";
+    if (/HTTP 403|Forbidden/i.test(primary)) return "可灵 AI 账号没有访问权限，请检查所选模型的服务权限。";
+    if (/HTTP 429|RateLimit/i.test(primary)) return "可灵 AI 请求受限，请在可灵开发者控制台查看并发限制、额度和余额。";
+    return truncateMessage(primary);
   }
 
   if (/HTTP 401|Unauthorized|InvalidAuthentication|invalid api key|api key/i.test(primary)) {

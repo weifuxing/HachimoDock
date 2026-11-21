@@ -28,6 +28,8 @@ static void mount_new(spiffs*fs,spiffs_config*c){config(fs,c);int r=SPIFFS_mount
 static void format_new(spiffs*fs,spiffs_config*c){memset(image,255,sizeof(image));config(fs,c);int r=SPIFFS_mount(fs,c,work,fds,sizeof(fds),cache,sizeof(cache),NULL);assert(r!=0);assert(!SPIFFS_format(fs));mount_new(fs,c);}
 
 #include "cJSON.h"
+#include "pet_p4_component_metadata.h"
+#include "pet_p4_center_layout.h"
 #define PET_P4_COMMIT_LEAN_IO 1
 #define PET_P4_MINIAPP_CATALOG_MAX 32
 #define PET_P4_MINIAPP_WIDGET_ID_MAX 48

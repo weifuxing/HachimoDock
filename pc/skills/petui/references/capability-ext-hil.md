@@ -1,17 +1,8 @@
-# Track C 私有一轮新能力验收
+# 组件媒体、事件与闹钟的设备验收
 
-本轮仅准备源目录与离线验证；**未安装、未打包、未跑设备、未取得 HIL 通过证据**。不得以旧 1200-query 或仅 hello/query 成功代替下面的真实输入、声音、画面与释放证据。
+使用 [设备测试夹具](../../../../firmware/tests/fixtures/track_c_private/manifest.json)。生成器 [prepare_track_c_private_fixtures.py](../../../../firmware/tests/prepare_track_c_private_fixtures.py) 将共享契约和已有素材写入新的测试目录，拒绝覆盖现有目标。夹具不依赖账号，不修改已安装组件。
 
-源目录：`firmware/tests/fixtures/track_c_private/`。`manifest.json` 给出每个目录、素材来源/SHA-256 和完整 Python 校验结果。生成器 `firmware/tests/prepare_track_c_private_fixtures.py` 只从 contract 与现有 assets 生成独立私有目录，不修改正式 library，不启动任何连接；为防覆盖，目标已存在会拒绝重新生成。
-
-所有 fixture 是工具包，采用契约默认画布、原生文字和最小计数显示；无新增美术。只使用 `SW1/SW2` 和摇杆；全局退出不在包中绑定。计数表示收到的命令/动作，不能冒充声卡或 decoder 的实际完成状态。互斥的媒体能力分包；事件发送/接收要同时保留在设备目录中。
-
-## 统一构建前硬前提
-
-- 完成 audit 文档列出的 checked publish、view generation 与持续 clip retire hook。
-- 实际候选 hello 必须协商相关 capability。不能把本地 `DEFAULT_CAPABILITIES` 当作实体设备报告。
-- 当前 7 包全部通过完整 Python 校验。C / Python / Rust 按已注册 subscriber / 精确 alarm target 作用域豁免内部动作；普通动作仍要求物理或既有 touch 路径。14 组共享正负例与真实包回归已添加，未造假绑定或放宽能力门禁。Rust 完整包执行由主代理统一完成。
-- 完成候选专属资源观察接口后才能运行释放验收。下面字段是源码 API/私有结构名，**不是已有 wire 字段**；字段缺失记 BLOCKED，不以固定 sleep 或 query 成功补齐。
+这些夹具只使用 SW1、SW2 和摇杆。保留设备的全局退出动作；事件发送与接收夹具应同时可用。先读取目标设备的实际能力声明。界面计数可帮助定位输入，声音、画面和资源释放须独立观察。没有可用观测项时记录未验证。
 
 ## 一轮动作与期望
 
@@ -23,12 +14,12 @@
 | 4 `big` | 初始看左上；SW2 `bottom`；摇杆右/左/上/下；SW1 origin | 复用现有 640×480 PNG，320×240 可视窗口，6 个 tile。显示内容随 offset 改变，最大实际偏移 (320,240)，负值/超大值被夹住；跨 tile 边界无缺块/越界 | 每帧至多一个缺失 tile load；generation 改变不能取新包数据填旧 node；退出后 table_alloc_bytes 回到基线 |
 | 5 `event-recv` + `event-send` | 两者完成安装后先打开 recv；SW1 clear；切 send；连续发送 10 次；返回 recv | 只由 send 的 SW1 发 `done`。recv 未绑定假物理 event。队列上限 8，孤立测试时 delivered 8、dropped 2；返回后 rx 增加 8。需记录实际 emitted/delivered/dropped 与 rx，不以 UI 计数单独证明总线 | 删除 recv 清订阅/队列；再次发无旧订阅 delivery；不触发隐藏程序执行 |
 | 6 `alarm` | SW1 set（60000 ms）；切到 big 等待；分别测试本 boot 通知策略 false/true；回到 alarm；SW2 cancel | 一次性计时不是 epoch deadline。隐藏仍到期；未授权保留 pending，授权后补发一次通知，无隐藏 action/program 执行。可见时才走 ring transition 增加计数。cancel 后不再次到期 | 记录 armed/pending/last_var/deadline 与通知归属 id；明确取消清同一 alarm 待通知；删除清 parked/notice/subscription |
-| 7 `alarm` reboot/负向 | arm 后约 20 秒 checkpoint；重启未校时恢复；再次观察同一 delay var；取消 checkpoint 后再重启 | UTC 路径由 A 完成：先在有效 UTC 下 arm/checkpoint，再重启未校时应保留 waiting pending，不误触发；再次校准后按原 UTC deadline 比较，到期只通知一次，未到期不能重置为新 60 秒。取消 checkpoint 后重启不得复活。须由统一实机轮次补证，不能把 A 的 host 结果称为 HIL 通过 | 记录 UTC snapshot valid/calibration generation、utc_deadline_ms/waiting_for_clock 和 hidden checkpoint 的 durable 状态；不得把 boot uptime 当 epoch；A 的定向证据归 A，不计入本线结果 |
+| 7 `alarm` reboot/负向 | arm 后约 20 秒 checkpoint；重启未校时恢复；再次观察同一 delay var；取消 checkpoint 后再重启 | 在有效 UTC 下设定并保存。重启后尚未校时时保留待处理状态；校准后按原 UTC 截止点比较，到期只通知一次，未到期不重新倒计时。已保存的取消状态在重启后仍有效 | 记录 UTC snapshot valid/calibration generation、utc_deadline_ms/waiting_for_clock 和 hidden checkpoint 的 durable 状态；不得把 boot uptime 当 epoch |
 | 8 合并切换 | sequence→sample（播放中）→clip（worker 工作中）→big→event/alarm→主页，重复有界轮数；最后等待物理 cleanup | 无 stale snapshot 触发新包 sample，无旧 clip 源提前 free，无 ABBA 卡死；bank/token 数不随轮数增长 | 回到主页且 cleanup 完成后，store 的 live_banks/live_tokens/bank_pins 和三类 allocation 都归零；broker 回到进入测试前基线；不以全局 heap 瞬时差为唯一证明 |
 
 当前 one-shot 样例没有周期取消按钮，不伪造未实现的 alarm_cancel runtime op。周期 catch-up/取消已有 host core 回归；需要专门物理周期验收时，应另建纯 periodic 契约候选并接明确取消入口，不能拿 one-shot 验收冒充。
 
-## 资源观察表（由主代理接入私有候选接口）
+## 资源观测
 
 `pet_cmedia_stats()` 已在 owned store 实现，main lane 调用同时 collect deferred releases：
 
@@ -39,12 +30,12 @@
 
 renderer 需要同一观察点：`g_h264_prefetch_lifetime.phase/cancelled`、`g_clip_entry.decoder_readers`、`g_clip_lease.token/generation`、`g_clip_entry.buffer_lease` 的 broker current/finish 状态，以及 retire 返回值。不要在 worker 仍占有时强制读/改 descriptor。
 
-音频 Track C 需要在已有 stream lock 所有者下观察：`g_cext_sample_queued`、`g_cext_voice_tokens[]`、sampler.voice active、sequencer playing/started；只读记录不增加录音/AEC 路径等待。
+音频状态应在已有 stream lock 的保护下观察：`g_cext_sample_queued`、`g_cext_voice_tokens[]`、sampler.voice active、sequencer playing/started；只读记录不增加录音/AEC 路径等待。
 
-事件/闹钟记录 bus emitted/delivered/dropped、目标 queue.count/dropped；alarm 的 widget/id、armed/pending/last_var/deadline_ms、通知策略与 notice_pending/归属。源码私有字段尚未公开时必须明确标记未观测。
+事件/闹钟记录 bus emitted/delivered/dropped、目标 queue.count/dropped；alarm 的 widget/id、armed/pending/last_var/deadline_ms、通知策略与 notice_pending/归属。这些 C 调试字段和计数只用于有相应观测接口的目标。
 
 ## 证据文件要求
 
-每轮至少记录：实际候选固件 identity/flags、真实 hello、fixture 源与素材 hash、输入时序、独立声学/视频证据、切换前/中/后的资源快照、cleanup 完成点。事件/闹钟必须含 sender→bus→receiver 或 arm→due→notification 的关联记录。
+每轮至少记录：实际固件构建标识与启用能力、设备握手、fixture 源与素材 hash、输入时序、独立声学/视频证据、切换前/中/后的资源快照、cleanup 完成点。事件/闹钟必须含 sender→bus→receiver 或 arm→due→notification 的关联记录。
 
-`manifest.json` 的 `deviceEvidence=false` 在离线交付阶段保持不变。通过 host parser/结构校验不修改它。失败、BLOCKED 和未覆盖项分别保留，不能统一写成全部支持。
+离线夹具不记录设备验收结果。分别记录设备上的失败、因缺少观测受阻以及未覆盖的项目。

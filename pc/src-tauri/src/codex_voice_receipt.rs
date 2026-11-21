@@ -18,7 +18,8 @@ fn read_events(client: &reqwest::blocking::Client, stream: Option<&str>, cursor:
     if let Some(stream) = stream {
         query.extend([("streamId", stream.to_string()), ("cursor", cursor.to_string())]);
     }
-    let response = client.get("http://127.0.0.1:8181/agent/session-events").query(&query)
+    let cap = crate::bridge_capability::load("read")?;
+    let response = client.get(format!("{}/agent/session-events", cap.base_url)).bearer_auth(&cap.token).query(&query)
         .send().and_then(|r| r.error_for_status()).map_err(|_| "本地消息回执服务暂不可用")?;
     let mut bytes = Vec::new();
     response.take(256 * 1024 + 1).read_to_end(&mut bytes).map_err(|_| "消息回执读取失败")?;

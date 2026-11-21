@@ -8,3 +8,11 @@ dependencies:
   espressif/tinyusb: "*"
   waveshare/esp32_p4_wifi6_touch_lcd_4_3:
     override_path: ../components/esp32_p4_wifi6_touch_lcd_4_3
+  espressif/esp_hosted:
+    version: "2.12.11"
+    rules:
+      - if: '${PET_P4_SYSTEM_WIFI} == 1'
+  espressif/esp_wifi_remote:
+    version: "1.6.3"
+    rules:
+      - if: '${PET_P4_SYSTEM_WIFI} == 1'

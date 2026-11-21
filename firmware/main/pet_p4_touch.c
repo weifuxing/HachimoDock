@@ -1,4 +1,5 @@
 #include "pet_p4_touch.h"
+#include "pet_p4_system_settings.h"
 #include "pet_p4_conversation.h"
 
 #include <stdatomic.h>
@@ -66,6 +67,11 @@ typedef struct {
 static bool g_test_stroke;
 static bool g_component_stroke;
 static bool g_app_stroke;
+#if PET_P4_SYSTEM_WIFI
+enum { TOUCH_GENERAL, TOUCH_SETTINGS_ENTRY, TOUCH_SETTINGS_PAGE };
+static atomic_int g_touch_context;
+static bool g_account_stroke;
+#endif
 
 void pet_p4_touch_health(pet_p4_touch_health_t *out) {
   if (!out) return;
@@ -361,7 +367,16 @@ static void touch_task(void *arg) {
     }
     if (sample.has_pointer && sample.pointer.kind == PET_P4_POINTER_CANCEL)
       pet_p4_touch_decoder_init(&decoder, PET_P4_TOUCH_SWIPE_THRESHOLD, PET_P4_TOUCH_LONG_PRESS_MS);
-    else sample.has_gesture = pet_p4_touch_decoder_update(&decoder, pressed, ui_x, ui_y, now, &sample.gesture);
+    else {
+#if PET_P4_SYSTEM_WIFI
+      if (pressed && !decoder.down) {
+        const int context = atomic_load_explicit(&g_touch_context, memory_order_relaxed);
+        decoder.anchor_tap = context == TOUCH_SETTINGS_PAGE ||
+          (context == TOUCH_SETTINGS_ENTRY && pet_center_settings_hit(ui_x, ui_y));
+      }
+#endif
+      sample.has_gesture = pet_p4_touch_decoder_update(&decoder, pressed, ui_x, ui_y, now, &sample.gesture);
+    }
     queue_sample(&sample, &decoder, &pointer);
     if (!g_touch_interrupt_mode) vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(PET_P4_TOUCH_SAMPLE_MS));
   }
@@ -396,6 +411,9 @@ static esp_err_t identify_register_touch(void) {
   return err;
 }
 
+#if PET_P4_COLD_INIT_SIZE && defined(__GNUC__) && !defined(__clang__)
+__attribute__((noinline, optimize("Oz")))
+#endif
 esp_err_t pet_p4_touch_init(void) {
   if (g_ready) return ESP_OK;
   g_address = 0;
@@ -661,14 +679,35 @@ static void process_touch_event(
       pet_p4_conversation_move(state, 1, event->ts_ms);
     return;
   }
+#if PET_P4_SYSTEM_WIFI
+  if (pet_settings_active(state)) {
+    if (event->gesture == PET_P4_TOUCH_TAP)
+      pet_settings_touch(state, event->x, event->y, event->ts_ms);
+    else if (event->gesture == PET_P4_TOUCH_SWIPE_UP || event->gesture == PET_P4_TOUCH_SWIPE_DOWN)
+      pet_settings_wifi_swipe(state, event->x - event->dx, event->y - event->dy,
+                              event->gesture == PET_P4_TOUCH_SWIPE_UP, event->ts_ms);
+    return;
+  }
+#endif
   bool handled_locally = false;
   char action[PET_P4_MINIAPP_ACTION_MAX] = {0};
   if(state&&!strcmp(state->screen_page,"components")) {
-    const size_t count=pet_p4_miniapp_catalog_count();
-    const size_t selected=pet_p4_miniapp_catalog_selected();
+#if PET_P4_SYSTEM_WIFI
+    if (event->gesture == PET_P4_TOUCH_TAP && pet_center_settings_hit(event->x, event->y) &&
+        pet_p4_is_wifi6_hardware()) {
+      (void)pet_settings_open(state, event->ts_ms);
+      return;
+    }
+#endif
+    const size_t count=pet_p4_miniapp_center_count();
+    const size_t selected=pet_p4_miniapp_center_selected();
     if(event->gesture==PET_P4_TOUCH_TAP) {
+      int tab=pet_center_tab_hit(event->x,event->y);
       int hit=pet_center_hit(event->x,event->y,selected,count);
-      if(hit>=0&&pet_p4_miniapp_catalog_select((size_t)hit)) {
+      if(tab>=0) {
+        handled_locally=pet_p4_miniapp_center_set_filter((pet_center_filter_t)tab);
+        snprintf(action,sizeof(action),"component_filter");
+      } else if(hit>=0&&pet_p4_miniapp_center_select((size_t)hit)) {
         pet_p4_miniapp_activation_request_t activation=pet_p4_miniapp_activation_request_selected();
         if(activation!=PET_MINIAPP_ACTIVATION_REJECTED) {
           if(activation==PET_MINIAPP_ACTIVATION_READY) {
@@ -680,7 +719,7 @@ static void process_touch_event(
       }
     }else if(event->gesture==PET_P4_TOUCH_SWIPE_LEFT||event->gesture==PET_P4_TOUCH_SWIPE_RIGHT) {
       size_t next=pet_center_page(selected,count,event->gesture==PET_P4_TOUCH_SWIPE_LEFT?1:-1);
-      handled_locally=count>0&&pet_p4_miniapp_catalog_select(next);
+      handled_locally=count>0&&pet_p4_miniapp_center_select(next);
       snprintf(action,sizeof(action),"component_select");
     }
     if(handled_locally)state->last_update_ms+=1;
@@ -737,12 +776,40 @@ void pet_p4_touch_process(
 ) {
   touch_sample_t sample;
   if (!g_touch_queue) return;
+#if PET_P4_SYSTEM_WIFI
+  int context = TOUCH_GENERAL;
+  if (state && !pet_p4_conversation_active(state)) {
+    if (pet_settings_active(state)) context = TOUCH_SETTINGS_PAGE;
+    else if (!strcmp(state->screen_page, "components") && pet_p4_is_wifi6_hardware())
+      context = TOUCH_SETTINGS_ENTRY;
+  }
+  atomic_store_explicit(&g_touch_context, context, memory_order_relaxed);
+#endif
   while (xQueueReceive(g_touch_queue, &sample, 0) == pdTRUE) {
     bool test = state && !pet_p4_conversation_active(state) && !strcmp(state->screen_page, "touch_test");
     bool component = state && !pet_p4_conversation_active(state) && !strcmp(state->screen_page,"app")
       && pet_p4_miniapp_slicing_active();
     bool application = state && !pet_p4_conversation_active(state) && !strcmp(state->screen_page,"app")
       && pet_p4_miniapp_pointer_active();
+#if PET_P4_SYSTEM_WIFI
+    if (sample.has_pointer && sample.pointer.kind == PET_P4_POINTER_DOWN) {
+      g_account_stroke = state && !strcmp(state->screen_page, "app") &&
+        pet_account_button_hit(sample.pointer.x, sample.pointer.y) &&
+        !pet_p4_conversation_active(state) && !pet_p4_miniapp_activation_pending() &&
+        pet_p4_miniapp_private_feed(NULL, NULL);
+    }
+    if (g_account_stroke) {
+      if (sample.has_gesture && sample.gesture.gesture == PET_P4_TOUCH_TAP &&
+          pet_account_button_hit(sample.gesture.x, sample.gesture.y) &&
+          state && !strcmp(state->screen_page, "app") && !pet_p4_conversation_active(state) &&
+          !pet_p4_miniapp_activation_pending()) {
+        (void)pet_settings_open(state, sample.gesture.ts_ms);
+      }
+      if (sample.has_pointer && (sample.pointer.kind == PET_P4_POINTER_UP ||
+                                 sample.pointer.kind == PET_P4_POINTER_CANCEL)) g_account_stroke = false;
+      continue;
+    }
+#endif
     // Timer-driven long presses can arrive without a new pointer report.
     bool captured = g_test_stroke || g_component_stroke || g_app_stroke;
     if (sample.has_pointer) {

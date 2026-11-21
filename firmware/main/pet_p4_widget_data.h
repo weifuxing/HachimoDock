@@ -12,6 +12,10 @@ typedef struct {
 } pet_p4_data_row_t;
 typedef struct {
   bool enabled, received, stale;
+#if PET_P4_SYSTEM_WIFI
+  uint64_t age_ms;
+  bool restored;
+#endif
   uint8_t count, page, pages;
   char status[8], message[91], date[11];
   pet_p4_data_row_t rows[PET_P4_DATA_PAGE_ROWS];
@@ -20,6 +24,17 @@ typedef struct {uint8_t page,pages;} pet_p4_data_paging_t;
 /* Optional JSON bool clearOnExpire defaults false. When true, stale views
  * expose an empty list and a generic expiry message, without prior row/date text. */
 bool pet_p4_widget_data_apply(const cJSON *payload, uint64_t now_ms);
+bool pet_p4_widget_data_apply_lan(const cJSON *payload, uint64_t now_ms);
+/* Desktop streams received this boot, with freshness and accepted frame counts only. */
+cJSON *pet_p4_widget_data_diagnostics(uint64_t now_ms);
+#if PET_P4_SYSTEM_WIFI
+bool pet_p4_widget_data_apply_local(const cJSON *payload, uint64_t now_ms, uint64_t watchlist_revision);
+/* Retires the volatile snapshot for this exact feed. */
+void pet_p4_widget_data_clear_feed(const char *source);
+bool pet_p4_widget_data_revalidate_feed(const char *source, uint64_t now_ms);
+/* Restores a built-in snapshot as stale and leaves an existing local snapshot in place. */
+bool pet_p4_widget_data_restore_local(const cJSON *payload, uint64_t now_ms, uint64_t watchlist_revision);
+#endif
 void pet_p4_widget_data_view(const char *source, int32_t page, uint64_t now_ms, pet_p4_data_view_t *out);
 /* Same source/count/modulo snapshot under the provider mux. Eligibility needs
  * no row strings, heap allocation, freshness renewal or full view on stack. */

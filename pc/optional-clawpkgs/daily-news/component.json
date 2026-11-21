@@ -1,0 +1,7 @@
+{
+  "id": "daily-news",
+  "name": "每日新鲜事",
+  "version": "1.0.2",
+  "kind": "tool",
+  "description": "在支持设备直连的 WiFi6 固件上可查看 Hacker News 科技头条。连接 PC 时可使用原有九条资讯及播报服务，支持换条、翻页和停止。"
+}

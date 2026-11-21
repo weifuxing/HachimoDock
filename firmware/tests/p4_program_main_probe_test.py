@@ -103,7 +103,7 @@ def test_actual_main_binding_and_process_run_outside_ui_lock(tmp_path):
     # hook, and compile the unmodified real boundary under all four gates.
     hook='#if PET_P4_RESET_PHASE_TRACE\n    pet_reset_phase_leave(&main_state_phase);\n#endif\n'
     assert app.count(hook)==1
-    assert 'xSemaphoreGive(g_state_mutex);\n#if PET_COMPONENT_PROGRAM_ENABLED\n    pet_p4_program_main_probe_process();' in app.replace(hook,'')
+    assert 'xSemaphoreTake(' not in app[app.rindex('xSemaphoreGive(g_state_mutex);',0,app.index('pet_p4_program_main_probe_process();')):app.index('pet_p4_program_main_probe_process();')]
     call=app.index('pet_p4_program_main_probe_process();')
     begin=app.rindex('xSemaphoreGive(g_state_mutex);',0,call)
     end=app.index('\n#endif',call)+len('\n#endif')

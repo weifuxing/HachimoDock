@@ -1,1 +1,20 @@
-{"schemaVersion":1,"engine":"pc-app-services-v1","service":"notes","actions":{"host.primary":"record","host.secondary":"save","host.previous":"previous","host.next":"next","host.todo":"todo","host.delete":"delete"}}
+{
+  "schemaVersion": 1,
+  "engine": "pc-app-services-v1",
+  "service": "notes",
+  "actions": {
+    "host.record": "record",
+    "host.save": "save",
+    "host.todo": "todo",
+    "host.tasks": "tasks",
+    "host.toggle": "toggle",
+    "host.filter": "filter",
+    "host.previous": "previous",
+    "host.next": "next",
+    "host.up": "up",
+    "host.down": "down",
+    "host.row_a": "row_a",
+    "host.row_b": "row_b",
+    "host.row_c": "row_c"
+  }
+}

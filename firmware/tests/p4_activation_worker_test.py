@@ -136,7 +136,7 @@ def test_internal_work_never_enters_json_parser_or_replays_wire_request():
     assert worker.index('if (request.activation_token)') < worker.index('maybe_handle_transport_audit(')
     branch = worker.split('if (request.activation_token)', 1)[1].split('bool handled_debug', 1)[0]
     assert 'run_component_activation(request.activation_token)' in branch and 'continue;' in branch
-    assert main.index('pet_p4_miniapp_activation_configure(') < main.index('ESP_ERROR_CHECK(init_usb())')
+    assert main.index('pet_p4_miniapp_activation_configure(') < main.index('BaseType_t usb_rx_created')
     for name in ('pet_p4_input.c', 'pet_p4_touch.c'):
         source = (ROOT / 'main' / name).read_text()
         assert 'pet_p4_miniapp_catalog_activate_selected()' not in source

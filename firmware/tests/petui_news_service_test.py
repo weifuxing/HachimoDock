@@ -6,7 +6,7 @@ sys.path.insert(0,str(ROOT/'pc/skills/petui/scripts'))
 from app_services import application_errors
 
 def test_bounded_news_declaration_rejects_extra_actions_urls_and_categories():
-    root=ROOT/'pc/builtin-clawpkgs/daily-news'
+    root=ROOT/'pc/optional-clawpkgs/daily-news'
     d=json.loads((root/'pc/application.json').read_text())
     r=json.loads((root/'runtime/widget.json').read_text())
     assert not application_errors(d,r)

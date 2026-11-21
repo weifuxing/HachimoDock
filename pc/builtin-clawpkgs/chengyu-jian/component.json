@@ -1,0 +1,9 @@
+{
+  "id": "chengyu-jian",
+  "name": "成语笺",
+  "version": "1.0.0",
+  "kind": "game",
+  "wasmTouch": true,
+  "description": "根据释义逐字补全成语，三关分别收录二十、三十、三十题，每关多留一处空白。填完八十张笺即通关。",
+  "author": "Fancy"
+}

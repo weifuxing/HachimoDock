@@ -43,7 +43,7 @@ function validateProfileMetadataReceipt(receipt, operation, target, nonce) {
       || receipt.ancestorsNoReparse !== true) reject()
   const item = receipt.item
   exactKeys(item, ['directory', 'reparse', 'ownerSid', 'daclPresent', 'protected', 'aceCount', 'aces'])
-  if (item.directory !== (operation === 'verify-directory') || item.reparse !== false || item.ownerSid !== receipt.currentSid
+  if (item.directory !== (operation === 'verify-directory') || item.reparse !== false || ![receipt.currentSid, SYSTEM, ADMINS].includes(item.ownerSid)
       || item.daclPresent !== true || typeof item.protected !== 'boolean' || !Number.isInteger(item.aceCount)
       || item.aceCount < 0 || item.aceCount > 128 || !Array.isArray(item.aces) || item.aces.length !== item.aceCount) reject()
   for (const ace of item.aces) {

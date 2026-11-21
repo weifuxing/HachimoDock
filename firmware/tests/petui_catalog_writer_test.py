@@ -25,6 +25,7 @@ def _catalog_writer_case(tmp_path,acceptance):
 #include <stdlib.h>
 #include <string.h>
 #include "cJSON.h"
+#include "pet_p4_component_metadata.h"
 #include "pet_p4_catalog_profile.h"
 #define MINIAPP_CATALOG_VERSION 3
 #define MINIAPP_CATALOG_JSON_MAX 16384
@@ -32,7 +33,7 @@ def _catalog_writer_case(tmp_path,acceptance):
 #define pet_widget_trace_scope_end(name) ((void)(name))
 #define vTaskDelay(ticks) ((void)(ticks))
 #define pdMS_TO_TICKS(ms) (ms)
-typedef struct {char widget_id[48],title[64];uint8_t slot,package_generation;uint32_t widget_checksum,buttons_checksum,sprites_checksum;} miniapp_catalog_item_t;
+typedef struct {char widget_id[48],title[64];uint8_t slot,package_generation;uint32_t widget_checksum,buttons_checksum,sprites_checksum,center_title_checksum;pet_p4_component_metadata_t package_metadata;} miniapp_catalog_item_t;
 typedef struct {uint8_t generation;uint32_t sequence;} miniapp_catalog_commit_t;
 static char g_storage_failure[128];
 static unsigned allocations,fail_allocation,live,writes,renames;

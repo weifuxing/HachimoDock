@@ -32,6 +32,7 @@ export default function CandidateCard({
   isInstalled,
   isEnabled,
   deviceState,
+  unavailableReason = "",
   onClick,
   onDeviceAction,
   onDelete,
@@ -71,13 +72,14 @@ export default function CandidateCard({
           </header>
           {component.goal && <p className="candidate-card__goal" title={component.goal}>{component.goal}</p>}
           {component.author && <p className="candidate-card__play-guide">by {component.author}</p>}
-          {deviceState&&<p className="candidate-card__play-guide" role="status">{deviceState.label}{isEnabled?' · 正在使用':''}{!component.isDeviceOnly&&` · 本机 ${component.version||'版本未知'}`}</p>}
+          {unavailableReason && <p className="candidate-card__play-guide" role="status">{unavailableReason}</p>}
+          {!unavailableReason&&deviceState&&<p className="candidate-card__play-guide" role="status">{deviceState.label}{isEnabled?' · 正在使用':''}{!component.isDeviceOnly&&` · 本机 ${component.version||'版本未知'}`}</p>}
           {component.sourceAlternatives?.length>1&&<p className="candidate-card__play-guide">存在本地与内置两个来源，可在详情选择；不会删除本地创作。</p>}
           {playGuide && <p className="candidate-card__play-guide" title={playGuide}>点击查看玩法与按键</p>}
         </div>
       </button>
       <footer className="candidate-card__actions">
-        {onDeviceAction && (
+        {onDeviceAction && !unavailableReason && (
           <Button
             variant={isInstalled ? "secondary" : "primary"}
             size="small"

@@ -14,6 +14,7 @@
 #include "pet_p4_protocol.h"
 #include "pet_p4_view.h"
 #include "pet_p4_render_lifetime.h"
+#include "pet_p4_render_cache_memory.h"
 #ifndef PET_P4_H264_PREFETCH
 #define PET_P4_H264_PREFETCH 0
 #endif
@@ -23,6 +24,7 @@ extern "C" {
 #endif
 
 esp_err_t pet_p4_renderer_init(void);
+pet_render_cache_memory_t pet_p4_renderer_cache_memory(void);
 typedef struct {
   uint32_t last_us, p95_us, max_us, last_decode_us;
   uint32_t window_samples, submitted_frames, unchanged_frames;
@@ -43,6 +45,14 @@ pet_p4_render_metrics_t pet_p4_renderer_metrics(void);
  * NEW program slices defer while the secondary codec physically owns a job. */
 bool pet_p4_renderer_program_window_begin(void);
 void pet_p4_renderer_program_window_end(void);
+/* Main task, while the backlight is still off. Reports whether the
+ * successfully submitted boot frame contains the selected appearance. */
+esp_err_t pet_p4_renderer_render_boot(
+  const pet_p4_runtime_state_t *state,
+  const pet_p4_view_model_t *view,
+  bool *pet_visible
+);
+void pet_p4_renderer_finish_boot(void);
 esp_err_t pet_p4_renderer_render(
   const pet_p4_runtime_state_t *state,
   const pet_p4_view_model_t *view,

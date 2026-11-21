@@ -9,10 +9,9 @@ from p4_alarm_utc_test import ROOT, _run_utc_test
 def test_coldboot_hidden_alarm_grant_atomicity_and_no_hidden_execution(tmp_path):
     prefix = r'''
 #include "pet_p4_storage_lane.h"
-#define PET_P4_MINIAPP_CATALOG_MAX 32
 typedef struct {char widget_id[48];char title[64];uint8_t resource_state;uint32_t checksum;} miniapp_catalog_item_t;
 typedef enum {PET_APP_STORE_EMPTY,PET_APP_STORE_VALUE,PET_APP_STORE_BUSY,PET_APP_STORE_UNAVAILABLE} pet_app_store_status_t;
-static miniapp_catalog_item_t g_catalog[32];static size_t g_catalog_count;
+static miniapp_catalog_item_t g_catalog[PET_P4_MINIAPP_CATALOG_MAX];static size_t g_catalog_count;
 static uint32_t g_catalog_sequence;static bool g_catalog_recovery_blocked;
 static pet_storage_lane_t lane;
 static unsigned g_storage_resource_lease=1,package_reads,disk_reads;
@@ -94,7 +93,8 @@ static void boot_lifecycle(void){
  boot_reset();g_catalog_count=1;strcpy(g_catalog[0].widget_id,"hidden");g_catalog[0].resource_state=3;assert(grant(true)&&!disk_reads&&!ext_alarm_entry("hidden",false)); /* disabled/damaged skipped */
  boot_reset();g_ext_alarm_serial=UINT64_MAX;assert(!grant(true)&&!g_ext_background_notify&&!ext_alarm_entry("hidden",false));
  boot_reset();for(unsigned i=0;i<PET_CEV_COMPONENTS;i++){char id[48];snprintf(id,sizeof id,"retained-%u",i);assert(ext_alarm_entry(id,true));}
- assert(!grant(true)&&!g_ext_background_notify&&!ext_alarm_entry("hidden",false)&&ext_alarm_entry("retained-31",false));
+ char last[48];snprintf(last,sizeof last,"retained-%u",(unsigned)PET_CEV_COMPONENTS-1);
+ assert(!grant(true)&&!g_ext_background_notify&&!ext_alarm_entry("hidden",false)&&ext_alarm_entry(last,false));
  assert(!updates&&!dispatches); /* boot prepare never writes a default/save, dispatches, or changes active selection */
  boot_reset();memset(g_ext_alarms,0,sizeof g_ext_alarms);g_catalog_count=0;memset(&g_runtime,0,sizeof g_runtime);
 }

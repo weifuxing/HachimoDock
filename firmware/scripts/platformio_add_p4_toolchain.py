@@ -8,9 +8,10 @@ import atexit
 
 project_dir = env.subst("$PROJECT_DIR")
 # Keep exact per-environment SDK compilation contexts available to host checks.
-env.Replace(COMPILATIONDB_INCLUDE_TOOLCHAIN=True,
+env.Replace(COMPILATIONDB_INCLUDE_TOOLCHAIN=False,
             COMPILATIONDB_PATH=os.path.join(env.subst("$BUILD_DIR"), "platformio_compile_commands.json"))
 env["ENV"]["PET_P4_PROJECT_DIR"] = project_dir
+env["ENV"]["PET_P4_SYSTEM_WIFI"] = env.GetProjectOption("custom_p4_system_wifi", "0")
 env["ENV"]["PET_P4_CHIP_FAMILY"] = env.GetProjectOption("custom_p4_chip_family", "v1")
 env["ENV"]["PET_P4_PROJECT_VER_OVERRIDE"] = env.GetProjectOption(
     "custom_p4_project_version", "0.7.57-p4"
@@ -19,10 +20,22 @@ env["ENV"]["PET_P4_UART_BAUD_OVERRIDE"] = env.GetProjectOption(
     "custom_p4_uart_baud", "4000000"
 )
 
+# Use a linker that can resolve the vendor hardware-loop relocations in the
+# pre-v3 H.264 archives. Keep the v1 SDK and compiler for all compilation.
+if env["PIOENV"] == "esp32_p4_wifi6_system_settings_v1":
+    linker_dir = os.environ.get("PET_P4_PRE_V3_LINKER_DIR", "")
+    if not os.path.isabs(linker_dir) or not os.access(os.path.join(linker_dir, "ld"), os.X_OK):
+        raise RuntimeError("Set PET_P4_PRE_V3_LINKER_DIR to the compatible linker directory")
+    env.Append(LINKFLAGS=[f"-B{linker_dir}/"])
+
 
 def normalize_component_lock(source, target, env):
     """Restore only this project's local component source paths, not versions."""
-    lock_name = "dependencies.v3.lock" if env.GetProjectOption("custom_p4_chip_family", "v1") == "v3" else "dependencies.lock"
+    family = env.GetProjectOption("custom_p4_chip_family", "v1")
+    if env.GetProjectOption("custom_p4_system_wifi", "0") == "1":
+        lock_name = f"dependencies.wifi-{family}.lock"
+    else:
+        lock_name = "dependencies.v3.lock" if family == "v3" else "dependencies.lock"
     lock_path = os.path.join(project_dir, lock_name)
     if not os.path.isfile(lock_path):
         return

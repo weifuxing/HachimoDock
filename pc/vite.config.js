@@ -7,6 +7,7 @@
 
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { wasmPreviewFontPlugin } from "./scripts/wasm-preview-font.mjs";
 import { componentUiMetadataPlugin } from "./scripts/component-ui-metadata.mjs";
 
 export default defineConfig({
@@ -14,5 +15,5 @@ export default defineConfig({
     rollupOptions: { input: { diagnostic: "composer-diagnostic.html" } },
   } : {},
   server: {host: "127.0.0.1", proxy: {'/community/':'http://127.0.0.1:4300'}},
-  plugins: [componentUiMetadataPlugin(), react()],
+  plugins: [componentUiMetadataPlugin(), wasmPreviewFontPlugin(), react()],
 });

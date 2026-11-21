@@ -28,7 +28,9 @@ export function versionState(work, local, inventory) {
       ? inventory.items?.find((item) => item.id === work?.id)
       : null;
   const difference = compareVersions(local?.version, work?.version);
-  const contentConflict = Boolean(local?.versionHash && work?.contentHash && difference === 0 && !work.contentHash.startsWith(local.versionHash));
+  const differentContent = Boolean(local?.versionHash && work?.contentHash && difference === 0 && !work.contentHash.startsWith(local.versionHash));
+  const officialBundled = work?.official === true && local?.isBundledCopy === true;
+  const contentConflict = differentContent && !officialBundled;
   return {
     localLabel: local ? `本机 ${local.version || "版本未知"}` : "尚未下载",
     deviceLabel:
@@ -37,7 +39,7 @@ export function versionState(work, local, inventory) {
         : installed
           ? `设备 ${installed.version || "版本未核验"}`
           : "未安装到设备",
-    updateAvailable: Boolean(local && difference === -1),
+    updateAvailable: Boolean(local && (difference === -1 || (differentContent && officialBundled))),
     localNewer: Boolean(local && difference === 1),
     contentConflict,
     versionUnknown: Boolean(local && difference === null),

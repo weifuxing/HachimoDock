@@ -144,6 +144,9 @@ mod transport {
             h = (h ^ u64::from(b)).wrapping_mul(1099511628211);
         }
         let f = BubbleFrame {
+            body_masks: false,
+            glyph_cells: false,
+            wifi: false,
             board_device_id: "board".into(),
             connection_id: "1".into(),
             boot_id: "1234567890abcdef".into(),

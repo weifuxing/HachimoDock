@@ -37,6 +37,28 @@ never included in application resources, browser storage, URLs or logs. Legacy
 explicit-ticket endpoints and isolated input-consumer helpers remain for older
 callers; they are not part of the Desktop voice-input workflow.
 
+### Follow installation and recovery
+
+Selecting DeepSeek for follow installs the managed bridge through the persistent
+desktop App owner, including LAN-only follow. Opening the voice panel is not
+required. Installation success means the profile was configured, not that the
+host has loaded it. On an installation error the device interaction/connection
+page offers **重试连接**; a host with configuration HMR disabled needs a restart.
+
+The installer and native discovery resolve `DSH_HOME` (including `~` prefixes),
+otherwise the OS home plus `.dsh/profiles/desktop`. On Windows the OS home is
+`USERPROFILE`, not a Git Bash `HOME`. Only this profile's non-secret manifest and
+patch are inspected; no credential or session files are read. UTF-8 BOM and CRLF
+are preserved. The host's `lock` file is never opened, claimed or removed:
+the official web profile supports YAML configuration HMR. The installer retains
+its separate exclusive lock, before-write byte checks, owned-package hashes,
+private backups and exact rollback. Foreign bridge rows or changed installed
+files still refuse replacement.
+
+References: [home-paths contract](https://github.com/deepseek-ai/deepseek-harness/blob/ce7073d51254c26cd63b22a60835b8f948deb447/packages/util/home-paths/src/index.ts),
+[profile HMR checks](https://github.com/deepseek-ai/deepseek-harness/blob/ce7073d51254c26cd63b22a60835b8f948deb447/apps/cli/tests/profile-hmr.spec.ts).
+These are pinned source contracts, not validation of a user's installed binary.
+
 The OS adapter freezes the target application/window/editor for each recording.
 An unavailable or ambiguous input, changed target, or unknown write result stops
 that operation without choosing a historical session or replaying text. Existing
@@ -58,9 +80,11 @@ The PowerShell child receives only operation/path and minimal Windows environmen
 no token goes into command arguments, child environment or output. Its bounded
 metadata receipt is checked independently by Node/native; errors/timeouts fail
 closed. Distributed scripts are byte-identical and native embeds the same script.
-The ACL operations use [Get-Acl](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/get-acl?view=powershell-5.1),
-[Set-Acl](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.security/set-acl?view=powershell-5.1)
-and [protected access rules](https://learn.microsoft.com/en-us/dotnet/api/system.security.accesscontrol.objectsecurity.setaccessruleprotection?view=netframework-4.8.1).
+Creation sets the owner and protected DACL together. Updates to an existing entry
+verify its owner and persist only its access rules through the .NET Framework
+[Directory.SetAccessControl](https://learn.microsoft.com/en-us/dotnet/api/system.io.directory.setaccesscontrol?view=netframework-4.8.1)
+and [File.SetAccessControl](https://learn.microsoft.com/en-us/dotnet/api/system.io.file.setaccesscontrol?view=netframework-4.8.1)
+APIs. The bridge does not need the Windows audit privilege.
 POSIX retains uid/0700-directory/0600-file/O_NOFOLLOW checks. Windows OS/PowerShell
 execution is **NOT_RUN** on the available macOS host; mock policy tests and static
 API checks are not presented as a physical Windows validation pass.
@@ -134,3 +158,35 @@ inputs omitted for this code-only check; it is not a package validation. A small
 native test harness compiles the actual DSH source modules with cached dependencies
 and only the disconnected USB boundary stubbed. These checks do not certify the
 installed DSH ABI or actual Windows/PowerShell behavior.
+
+### Headless follow snapshots
+
+The desktop bridge polls the authenticated live `/sessions` endpoint in an
+isolated Worker when DeepSeek is enabled. It does not subscribe to approval
+SSE, inspect transcript history, or inject tasks. Windows ACL validation remains
+mandatory on every poll. Polls never overlap: the normal interval is at least
+1.5 seconds after the previous request finishes; failures back off to 30 seconds.
+Worker failure retries after 5 seconds without resetting parent-side dedup.
+Disabling/restarting the managed bridge stops the Worker and fences late results.
+
+Only active states heartbeat (25 seconds). Initial historical terminal rows are
+silent; a completion is published once after activity observed within the last minute, with no terminal
+heartbeat or expiry-based replay. Per-session records coexist while an active
+session owns the source-level snapshot. Current live snapshots remain authoritative
+over the slower metrics cache. Epoch and revision survive the event feed.
+The plugin clears answer previews at an accepted new turn and rejects replies
+from older turns or replaced Session objects. A turn completed entirely between
+polls may have no completion notification; it cannot safely be invented from a
+historical terminal snapshot. The current live state remains queryable.
+
+Offline synthetic regression commands (no DSH install, model, device or history):
+
+```sh
+node --test pc/src-tauri/bridge/test/dsh-status-monitor.test.js
+node --test integrations/dsh-hachimodock/test/follow-monitor.test.js
+node --test pc/src-tauri/bridge/packages/agent-session-bus/test/dsh-adapter.test.js
+```
+
+Tests use temporary private descriptors and loopback fixture servers. Packaging
+already includes `bridge/agents` and explicit DSH runtime files; tests, handoff
+patches and fixture data are not runtime resources.

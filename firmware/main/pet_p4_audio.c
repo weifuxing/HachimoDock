@@ -1,5 +1,10 @@
+#include "pet_p4_wasm_trial.h"
 #include "pet_p4_audio_patch.h"
 #include "pet_p4_audio.h"
+#if PET_P4_SYSTEM_WIFI
+#include "pet_p4_lan.h"
+#endif
+#include "pet_p4_wdt_deadlock.h"
 #include "pet_p4_audio_volume.h"
 #include "pet_p4_fs_activity.h"
 #include "pet_p4_instrument_core.h"
@@ -7,6 +12,7 @@
 #include "pet_p4_system_cues.h"
 #include "pet_p4_completion_cue_guard.h"
 #include "pet_p4_component_features.h"
+#include "pet_p4_media_codec.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -26,6 +32,9 @@
 #include "freertos/task.h"
 #include "pet_p4_resources_device.h"
 #include "mbedtls/base64.h"
+#if PET_P4_SYSTEM_WIFI
+#include "mbedtls/platform_util.h"
+#endif
 
 #include "pet_p4_behavior.h"
 
@@ -59,9 +68,42 @@ static TaskHandle_t g_audio_task;
 static TaskHandle_t g_playback_task;
 static QueueHandle_t g_playback_queue;
 static SemaphoreHandle_t g_stream_lock;
+/* Lock order: stream -> ingress. Ingress never waits on codec, TX, or stream.
+ * It serializes producers with begin/flush; the consumer retains its existing
+ * acquire/release SPSC ring and physical codec ownership under stream. */
+static SemaphoreHandle_t g_stream_ingress_lock;
 static pet_p4_send_line_fn g_send_line;
 static void *g_send_ctx;
 static portMUX_TYPE g_send_lock = portMUX_INITIALIZER_UNLOCKED;
+
+#define PET_USB_CAPTURE_TX_DEPTH 8
+typedef struct {
+  char *line;
+  pet_p4_send_line_fn send;
+  void *context;
+} pet_usb_capture_tx_frame_t;
+static QueueHandle_t g_usb_capture_tx_queue;
+static atomic_uint g_usb_capture_tx_pending;
+
+static void usb_capture_tx_task(void *context) {
+  (void)context;
+  pet_usb_capture_tx_frame_t frame;
+  while (xQueueReceive(g_usb_capture_tx_queue, &frame, portMAX_DELAY) == pdTRUE) {
+    frame.send(frame.line, frame.context);
+    cJSON_free(frame.line);
+    atomic_fetch_sub(&g_usb_capture_tx_pending, 1);
+  }
+  vTaskDelete(NULL);
+}
+
+static void usb_capture_tx_init(void) {
+  g_usb_capture_tx_queue = xQueueCreate(PET_USB_CAPTURE_TX_DEPTH, sizeof(pet_usb_capture_tx_frame_t));
+  if (g_usb_capture_tx_queue && xTaskCreatePinnedToCore(usb_capture_tx_task, "pet_usb_audio_tx",
+      4096, NULL, 17, NULL, 0) != pdPASS) {
+    vQueueDelete(g_usb_capture_tx_queue);
+    g_usb_capture_tx_queue = NULL;
+  }
+}
 
 void pet_p4_audio_set_transport(pet_p4_send_line_fn send_line, void *ctx) {
   if (!send_line) return;
@@ -75,6 +117,9 @@ static atomic_bool g_ready;
 static atomic_bool g_enabled;
 static atomic_bool g_capture_requested;
 static atomic_bool g_capture_active;
+#if PET_P4_CONVERSATION_VIDEO
+static atomic_bool g_ptt_pcm_ready;
+#endif
 static atomic_bool g_capture_session_queue_empty;
 static atomic_bool g_playback_ready;
 static atomic_bool g_playback_active;
@@ -93,6 +138,7 @@ static unsigned long long g_playback_session_revision;
 static portMUX_TYPE g_status_cue_mux = portMUX_INITIALIZER_UNLOCKED;
 static atomic_bool g_status_cue_deferred;
 static atomic_bool g_status_cue_recheck;
+static atomic_uint g_status_cue_generation, g_status_cue_started_generation;
 static pet_completion_cue_guard_t g_completion_cues;
 static atomic_uint g_completion_cue_queued, g_completion_cue_started, g_completion_cue_suppressed;
 void pet_p4_audio_status_cues_defer(bool busy) {
@@ -126,6 +172,10 @@ static pet_resource_result_t status_cue_realtime_begin(pet_resource_realtime_t *
       }
     }
   }
+  if (result == PET_RESOURCE_OK && request
+      && request->generation == atomic_load(&g_status_cue_generation)) {
+    atomic_store(&g_status_cue_started_generation, request->generation);
+  }
   portEXIT_CRITICAL(&g_status_cue_mux);
   return result;
 }
@@ -150,6 +200,8 @@ static bool status_cue_enqueue(const pet_p4_audio_playback_request_t *request) {
 #define PET_P4_AUDIO_STREAM_RING_BYTES (96 * 1024)  /* 3 s @ 16 kHz s16 mono */
 #define PET_P4_AUDIO_STREAM_START_BYTES 6400          /* 200 ms 起播水位 */
 #define PET_P4_AUDIO_STREAM_WRITE_BYTES 640           /* 20 ms; AEC reference follows codec cadence */
+#define PET_P4_AUDIO_WIFI_START_BYTES (22 * PET_P4_AUDIO_STREAM_WRITE_BYTES)
+#define PET_P4_AUDIO_WIFI_MAX_BYTES (50 * PET_P4_AUDIO_STREAM_WRITE_BYTES)
 #define PET_P4_AUDIO_HALF_DUPLEX_TAIL_MS 250ULL
 static atomic_bool g_conversation;
 static atomic_bool g_conversation_half_duplex;
@@ -157,6 +209,26 @@ static atomic_bool g_conversation_starting;
 static portMUX_TYPE g_conversation_lock = portMUX_INITIALIZER_UNLOCKED;
 static char g_conversation_session[64];
 static char g_capture_owner[64];
+#if PET_P4_SYSTEM_WIFI
+/* Published under g_stream_lock. The atomic owner also permits the worker
+ * to identify a revoked LAN capture without taking the codec mutex. */
+static atomic_uint g_wifi_audio_owner;
+static atomic_bool g_wifi_audio_fault;
+static pet_p4_audio_wifi_session_t g_wifi_audio_generation;
+static SemaphoreHandle_t g_wifi_audio_tap_lock;
+static pet_p4_audio_wifi_capture_fn g_wifi_audio_tap;
+static void *g_wifi_audio_ctx;
+static uint32_t g_wifi_audio_turn;
+static atomic_uint g_wifi_audio_drained_turn;
+static unsigned g_wifi_audio_drain_writes;
+static bool g_wifi_audio_play_open;
+static const char wifi_capture_label[] = "\001wifi-rtc";
+static bool g_wifi_audio_ptt;
+static const char wifi_ptt_label[] = "\001wifi-ptt";
+static void audio_stream_flush_locked(void);
+_Static_assert(PET_P4_AUDIO_FRAME_BYTES == PET_P4_AUDIO_WIFI_FRAME_BYTES, "Wi-Fi audio frame size");
+#endif
+
 /* Pending requests and physical workers own different exact reservations.
  * Stop may release a pending request, never the worker's in-flight ticket.
  * Lock order: stream mutex -> capture resource mux -> resource broker mux. */
@@ -250,12 +322,18 @@ static void add_conversation_metadata(cJSON *payload) {
   cJSON_AddNumberToObject(payload, "dspFrames", dsp.frames);
   cJSON_AddNumberToObject(payload, "dspLastUs", dsp.last_us);
   cJSON_AddNumberToObject(payload, "dspMaxUs", dsp.max_us);
+  cJSON_AddNumberToObject(payload, "dspP95Us", dsp.p95_us);
+  cJSON_AddNumberToObject(payload, "dspP99Us", dsp.p99_us);
+  cJSON_AddNumberToObject(payload, "dspWindowSamples", dsp.window_samples);
+  cJSON_AddNumberToObject(payload, "dspOver20msFrames", dsp.over_20ms_frames);
   cJSON_AddNumberToObject(payload, "dspAecUs", dsp.aec_us);
   cJSON_AddNumberToObject(payload, "dspNsUs", dsp.ns_us);
   cJSON_AddNumberToObject(payload, "dspVadUs", dsp.vad_us);
   cJSON_AddNumberToObject(payload, "aecReferenceSamples", dsp.reference_samples);
   cJSON_AddNumberToObject(payload, "internalFreeBytes", heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   cJSON_AddNumberToObject(payload, "internalLargestBytes", heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  cJSON_AddBoolToObject(payload, "captureTxAsync", g_usb_capture_tx_queue != NULL);
+  cJSON_AddNumberToObject(payload, "captureTxPending", atomic_load(&g_usb_capture_tx_pending));
   cJSON_AddNumberToObject(payload, "captureTxLastUs", atomic_load(&g_capture_tx_last_us));
   cJSON_AddNumberToObject(payload, "captureTxMaxUs", atomic_load(&g_capture_tx_max_us));
   if (g_audio_task) cJSON_AddNumberToObject(payload, "captureStackMinBytes", uxTaskGetStackHighWaterMark(g_audio_task));
@@ -333,13 +411,13 @@ static uint64_t fnv1a64_update(uint64_t checksum, const uint8_t *data, size_t le
   return checksum;
 }
 
-static void send_topic(const char *topic, cJSON *payload) {
+static bool send_topic_to_transport(const char *topic, cJSON *payload, bool live_capture) {
   cJSON *root = cJSON_CreateObject();
   char *line;
   if (!root || !payload) {
     cJSON_Delete(root);
     cJSON_Delete(payload);
-    return;
+    return false;
   }
   if (!cJSON_GetObjectItemCaseSensitive(payload, "boardDeviceId"))
     cJSON_AddStringToObject(payload, "boardDeviceId", g_board_device_id);
@@ -350,9 +428,24 @@ static void send_topic(const char *topic, cJSON *payload) {
   pet_p4_send_line_fn send_line = g_send_line;
   void *ctx = g_send_ctx;
   portEXIT_CRITICAL(&g_send_lock);
-  if (line && send_line) send_line(line, ctx);
+  const bool serialized = line && send_line;
+  bool sent = serialized;
+  if (serialized && live_capture && g_usb_capture_tx_queue) {
+    pet_usb_capture_tx_frame_t frame = {line, send_line, ctx};
+    atomic_fetch_add(&g_usb_capture_tx_pending, 1);
+    sent = xQueueSend(g_usb_capture_tx_queue, &frame, 0) == pdTRUE;
+    if (sent) line = NULL; // The transmitter owns the immutable line now.
+    else atomic_fetch_sub(&g_usb_capture_tx_pending, 1);
+  } else if (serialized) {
+    send_line(line, ctx);
+  }
   cJSON_free(line);
   cJSON_Delete(root);
+  return sent;
+}
+
+static void send_topic(const char *topic, cJSON *payload) {
+  (void)send_topic_to_transport(topic, payload, false);
 }
 
 void pet_p4_audio_diagnostic(const char *event, const char *session_id, size_t bytes, bool ok) {
@@ -366,11 +459,18 @@ void pet_p4_audio_diagnostic(const char *event, const char *session_id, size_t b
   cJSON_AddStringToObject(payload, "sessionId", session_id ? session_id : "");
   cJSON_AddNumberToObject(payload, "seq", seq);
   cJSON_AddNumberToObject(payload, "bytes", bytes);
-  cJSON_AddNumberToObject(payload, "bufferedMs", stream_buffered() * 1000ULL / 32000ULL);
+  cJSON_AddNumberToObject(payload, "bufferedMs",
+    stream_buffered() * 1000ULL / (atomic_load(&g_music) ? 96000ULL : 32000ULL));
   cJSON_AddNumberToObject(payload, "uptimeMs", esp_timer_get_time() / 1000ULL);
   cJSON_AddBoolToObject(payload, "ok", ok);
   add_conversation_metadata(payload);
   send_topic("audio/diagnostic", payload);
+}
+
+void pet_p4_audio_add_completion_counters(cJSON *payload) {
+  cJSON_AddNumberToObject(payload, "completionCueQueued", atomic_load(&g_completion_cue_queued));
+  cJSON_AddNumberToObject(payload, "completionCueAdmitted", atomic_load(&g_completion_cue_started));
+  cJSON_AddNumberToObject(payload, "completionCueSuppressed", atomic_load(&g_completion_cue_suppressed));
 }
 
 void pet_p4_audio_send_status(void) {
@@ -399,12 +499,11 @@ void pet_p4_audio_send_status(void) {
   cJSON_AddBoolToObject(payload, "audioFullDuplex", pet_p4_afe_ready());
   add_conversation_metadata(payload);
   cJSON_AddBoolToObject(payload, "streamActive", atomic_load_explicit(&g_stream_active, memory_order_acquire));
-  cJSON_AddNumberToObject(payload, "streamBufferedMs", (double) (stream_buffered() * 1000ULL / 32000ULL));
+  cJSON_AddNumberToObject(payload, "streamBufferedMs", (double)
+    (stream_buffered() * 1000ULL / (atomic_load(&g_music) ? 96000ULL : 32000ULL)));
   cJSON_AddNumberToObject(payload, "streamUnderruns", atomic_load(&g_stream_underruns));
   cJSON_AddNumberToObject(payload, "streamReceivedBytes", atomic_load(&g_stream_received_bytes));
-  cJSON_AddNumberToObject(payload, "completionCueQueued", atomic_load(&g_completion_cue_queued));
-  cJSON_AddNumberToObject(payload, "completionCueAdmitted", atomic_load(&g_completion_cue_started));
-  cJSON_AddNumberToObject(payload, "completionCueSuppressed", atomic_load(&g_completion_cue_suppressed));
+  pet_p4_audio_add_completion_counters(payload);
   send_topic("audio/status", payload);
 }
 
@@ -466,8 +565,7 @@ static bool send_audio_chunk(
    * queued PTT/previous conversation frame with the latest control session. */
   cJSON_AddStringToObject(payload, "conversationSessionId", conversation_session);
   if (processed) cJSON_AddBoolToObject(payload, "vadSpeech", speech);
-  send_topic("audio/chunk", payload);
-  return true;
+  return send_topic_to_transport("audio/chunk", payload, processed && conversation_session[0]);
 }
 
 static void send_audio_end(
@@ -557,10 +655,25 @@ static void stream_silence_step(uint8_t *pcm, size_t capacity) {
   size_t bytes = capacity < PET_P4_AUDIO_STREAM_WRITE_BYTES ? capacity : PET_P4_AUDIO_STREAM_WRITE_BYTES;
   memset(pcm, 0, bytes);
   pet_p4_afe_reference((const int16_t *)pcm, bytes / sizeof(int16_t));
-  if (esp_codec_dev_write(g_speaker, pcm, (int)bytes) != ESP_OK) pet_p4_afe_reference_abort();
+  if (esp_codec_dev_write(g_speaker, pcm, (int)bytes) != ESP_OK) {
+    pet_p4_afe_reference_abort();
+#if PET_P4_SYSTEM_WIFI
+    if (atomic_load(&g_wifi_audio_owner)) atomic_store(&g_wifi_audio_fault, true);
+#endif
+  }
+#if PET_P4_SYSTEM_WIFI
+  else if (bytes == PET_P4_AUDIO_STREAM_WRITE_BYTES && g_wifi_audio_drain_writes &&
+           --g_wifi_audio_drain_writes == 0) {
+    atomic_store(&g_wifi_audio_drained_turn, g_wifi_audio_turn);
+  }
+#endif
 }
 
 static void stream_drain_step_locked(uint8_t *pcm, size_t capacity) {
+#if PET_P4_SYSTEM_WIFI
+  const bool wifi_playback = atomic_load(&g_wifi_audio_owner) != 0;
+  if (wifi_playback && atomic_load(&g_wifi_audio_fault)) return;
+#endif
   if (atomic_load(&g_music_paused) && atomic_load(&g_music)) return;
   if (!atomic_load_explicit(&g_stream_active, memory_order_acquire) || !g_stream_ring) {
     stream_silence_step(pcm, capacity);
@@ -569,8 +682,17 @@ static void stream_drain_step_locked(uint8_t *pcm, size_t capacity) {
   size_t buffered = stream_buffered();
   bool ended = atomic_load_explicit(&g_stream_ended, memory_order_acquire);
   bool playing = atomic_load_explicit(&g_stream_playing, memory_order_acquire);
-  if (!playing) {
+  bool wait_to_start = !playing;
+#if PET_P4_SYSTEM_WIFI
+  // End can arrive after an underrun has already paused the DAC. A turn with
+  // consumed PCM still needs the normal drain receipt in that case.
+  if (wifi_playback && ended && !buffered) wait_to_start = false;
+#endif
+  if (wait_to_start) {
     size_t start_bytes = atomic_load(&g_music) ? 38400 : PET_P4_AUDIO_STREAM_START_BYTES;
+#if PET_P4_SYSTEM_WIFI
+    if (wifi_playback) start_bytes = PET_P4_AUDIO_WIFI_START_BYTES;
+#endif
     if (buffered < start_bytes && !(ended && buffered > 0)) {
       if (ended && buffered == 0) {
         atomic_store_explicit(&g_stream_active, false, memory_order_release);
@@ -593,12 +715,24 @@ static void stream_drain_step_locked(uint8_t *pcm, size_t capacity) {
       atomic_store_explicit(&g_playback_active, false, memory_order_release);
       pet_resources_device_realtime_end(&g_stream_realtime);
       atomic_store_explicit(&g_stream_last_play_ms, (uint64_t) (esp_timer_get_time() / 1000ULL), memory_order_release);
+#if PET_P4_SYSTEM_WIFI
+      const unsigned played = atomic_load(&g_stream_played_bytes);
+      if (wifi_playback && played && played == atomic_load(&g_stream_received_bytes)) {
+        /* The Wi-Fi 6 BSP queues 30 ms of I2S DMA. Two accepted 20 ms
+         * silence writes advance it past the final PCM descriptor. */
+        g_wifi_audio_drain_writes = 2;
+      }
+#endif
       pet_p4_audio_diagnostic("playback_completed", g_stream_session, atomic_load(&g_stream_received_bytes), true);
       pet_p4_audio_send_status();
     } else {
       unsigned int n = atomic_fetch_add(&g_stream_underruns, 1);
       if (n == 0 || n % 100 == 0) pet_p4_audio_diagnostic("playback_underrun", g_stream_session, 0, false);
-      if (atomic_load(&g_music)) {
+      if (atomic_load(&g_music)
+#if PET_P4_SYSTEM_WIFI
+          || wifi_playback
+#endif
+      ) {
         atomic_store(&g_stream_playing, false);
         atomic_store(&g_playback_active, false);
       }
@@ -612,7 +746,11 @@ static void stream_drain_step_locked(uint8_t *pcm, size_t capacity) {
   if (want > write_bytes) want = write_bytes;
   size_t tail = atomic_load_explicit(&g_stream_tail, memory_order_acquire);
   for (size_t i = 0; i < want; i += 1) {
-    pcm[i] = g_stream_ring[(tail + i) % PET_P4_AUDIO_STREAM_RING_BYTES];
+    const size_t slot = (tail + i) % PET_P4_AUDIO_STREAM_RING_BYTES;
+    pcm[i] = g_stream_ring[slot];
+#if PET_P4_SYSTEM_WIFI
+    if (wifi_playback) g_stream_ring[slot] = 0;
+#endif
   }
   atomic_store_explicit(&g_stream_tail, (tail + want) % PET_P4_AUDIO_STREAM_RING_BYTES, memory_order_release);
   if (atomic_load(&g_music)) {
@@ -632,6 +770,13 @@ static void stream_drain_step_locked(uint8_t *pcm, size_t capacity) {
     pet_p4_afe_reference_abort();
     ESP_LOGW(TAG, "stream playback write failed");
     pet_p4_audio_diagnostic("playback_write_failed", g_stream_session, want, false);
+#if PET_P4_SYSTEM_WIFI
+    if (atomic_load(&g_wifi_audio_owner)) {
+      atomic_store(&g_wifi_audio_fault, true);
+      audio_stream_flush_locked();
+      return;
+    }
+#endif
     send_audio_error(g_stream_session, "speaker_write_failed", "speaker playback failed");
     pet_p4_audio_stream_flush();
     return;
@@ -794,23 +939,235 @@ static bool cext_mix_step(int16_t *pcm,bool blocked) {
 #define CEXT_PENDING() false
 #define cext_mix_step(pcm,blocked) false
 #endif
+
+#if PET_P4_WASM_AUDIO
+/* WASM speech cancellation must not wait for the codec. The small owner mux
+ * protects only the session/generation; the clip is protected by g_stream_lock. */
+static portMUX_TYPE g_wasm_speech_owner_mux = portMUX_INITIALIZER_UNLOCKED;
+static unsigned g_wasm_speech_session;
+static uint64_t g_wasm_speech_epoch;
+static atomic_bool g_wasm_speech_active;
+typedef struct {
+  uint8_t *encoded;
+  size_t bytes, offset;
+  unsigned volume, session;
+  uint64_t epoch;
+} wasm_clip_t;
+static wasm_clip_t g_wasm_speech, g_wasm_music;
+_Static_assert(PET_P4_AUDIO_FRAME_BYTES == 640, "WASM speech frame size");
+
+void pet_p4_audio_wasm_speech_session(unsigned session) {
+  portENTER_CRITICAL(&g_wasm_speech_owner_mux);
+  if (session != g_wasm_speech_session) {
+    g_wasm_speech_session = session;
+    ++g_wasm_speech_epoch;
+  }
+  portEXIT_CRITICAL(&g_wasm_speech_owner_mux);
+}
+
+void pet_p4_audio_wasm_speech_stop(unsigned session) {
+  portENTER_CRITICAL(&g_wasm_speech_owner_mux);
+  if (session && session == g_wasm_speech_session) ++g_wasm_speech_epoch;
+  portEXIT_CRITICAL(&g_wasm_speech_owner_mux);
+}
+
+static uint64_t wasm_speech_epoch(unsigned session) {
+  portENTER_CRITICAL(&g_wasm_speech_owner_mux);
+  uint64_t epoch = session && session == g_wasm_speech_session ? g_wasm_speech_epoch : 0;
+  portEXIT_CRITICAL(&g_wasm_speech_owner_mux);
+  return epoch;
+}
+
+static bool wasm_speech_blocked(void) {
+  return atomic_load(&g_capture_requested) || atomic_load(&g_capture_active)
+    || atomic_load(&g_conversation) || atomic_load(&g_stream_active) || atomic_load(&g_music);
+}
+
+static void wasm_speech_clear_locked(void) {
+  g_wasm_speech.bytes = g_wasm_music.bytes = 0;
+  atomic_store(&g_wasm_speech_active, false);
+}
+
+static void wasm_speech_preempt_locked(void) {
+  /* Also cancel submissions waiting for the stream mutex. A capture or stream
+   * that starts and stops before they take the mutex must not revive them. */
+  portENTER_CRITICAL(&g_wasm_speech_owner_mux);
+  ++g_wasm_speech_epoch;
+  portEXIT_CRITICAL(&g_wasm_speech_owner_mux);
+  wasm_speech_clear_locked();
+}
+
+void pet_p4_audio_wasm_channel_stop(unsigned session, bool music) {
+  if (!g_stream_lock || !wasm_speech_epoch(session)) return;
+  xSemaphoreTakeRecursive(g_stream_lock, portMAX_DELAY);
+  wasm_clip_t *clip = music ? &g_wasm_music : &g_wasm_speech;
+  if (clip->session == session) clip->bytes = 0;
+  atomic_store(&g_wasm_speech_active, g_wasm_speech.bytes || g_wasm_music.bytes);
+  xSemaphoreGiveRecursive(g_stream_lock);
+}
+
+bool pet_p4_audio_wasm_channel_play(unsigned session, const uint8_t *encoded,
+                                    size_t bytes, unsigned volume, bool music) {
+  wasm_clip_t *clip = music ? &g_wasm_music : &g_wasm_speech;
+  if (!encoded || !bytes || bytes > PET_P4_WASM_SPEECH_MAX_BYTES
+      || bytes % PET_P4_WASM_SPEECH_BLOCK_BYTES || !volume || volume > 100
+      || !pet_p4_audio_playback_ready() || !g_stream_lock || wasm_speech_blocked()) return false;
+  uint64_t epoch = wasm_speech_epoch(session);
+  if (!epoch) return false;
+  for (size_t at = 0; at < bytes; at += PET_P4_WASM_SPEECH_BLOCK_BYTES) {
+    const uint8_t *block = encoded + at;
+    if (block[2] > 88 || block[3] || block[4] != 64 || block[5] != 1
+        || (block[PET_P4_WASM_SPEECH_BLOCK_BYTES - 1] & 0xf0)) return false;
+  }
+
+  xSemaphoreTakeRecursive(g_stream_lock, portMAX_DELAY);
+  bool accepted = false;
+  if (epoch == wasm_speech_epoch(session) && !wasm_speech_blocked()) {
+    if (!clip->encoded)
+      clip->encoded = heap_caps_malloc(PET_P4_WASM_SPEECH_MAX_BYTES,
+                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (clip->encoded) {
+      if (music && clip->bytes == bytes && clip->epoch == epoch &&
+          memcmp(clip->encoded, encoded, bytes) == 0) {
+        xSemaphoreGiveRecursive(g_stream_lock);
+        return true;
+      }
+      memcpy(clip->encoded, encoded, bytes);
+      if (epoch == wasm_speech_epoch(session)) {
+        clip->bytes = bytes;
+        clip->offset = 0;
+        clip->volume = volume;
+        clip->session = session;
+        clip->epoch = epoch;
+        atomic_store(&g_wasm_speech_active, true);
+        /* Retire a status cue already in progress before speech owns the codec. */
+        atomic_fetch_add(&g_playback_generation, 1);
+        accepted = true;
+      } else {
+        wasm_speech_clear_locked();
+      }
+    }
+  }
+  xSemaphoreGiveRecursive(g_stream_lock);
+  return accepted;
+}
+
+static bool wasm_clip_decode(wasm_clip_t *clip, int16_t *pcm, bool loop) {
+  size_t written;
+  if (!pet_p4_media_decode(clip->encoded + clip->offset, PET_P4_WASM_SPEECH_BLOCK_BYTES,
+                           (uint8_t *)pcm, PET_P4_AUDIO_FRAME_BYTES, &written)
+      || written != PET_P4_AUDIO_FRAME_BYTES) {
+    clip->bytes = 0;
+    return false;
+  }
+  if (clip->volume < 100) {
+    for (size_t i = 0; i < written / 2; ++i)
+      pcm[i] = (int16_t)(pcm[i] * (int)clip->volume / 100);
+  }
+  clip->offset += PET_P4_WASM_SPEECH_BLOCK_BYTES;
+  if (clip->offset == clip->bytes) {
+    if (loop) clip->offset = 0;
+    else clip->bytes = 0;
+  }
+  return true;
+}
+
+static bool wasm_speech_drain_locked(uint8_t *pcm, bool blocked) {
+  if (blocked) { wasm_speech_clear_locked(); return false; }
+  wasm_clip_t *music = &g_wasm_music, *effect = &g_wasm_speech;
+  if (music->epoch != wasm_speech_epoch(music->session)) music->bytes = 0;
+  if (effect->epoch != wasm_speech_epoch(effect->session)) effect->bytes = 0;
+  if (!music->bytes && !effect->bytes) { wasm_speech_clear_locked(); return false; }
+  unsigned session = music->bytes ? music->session : effect->session;
+  uint64_t epoch = wasm_speech_epoch(session);
+  PET_AUDIO_REALTIME_SCOPE(speech_work);
+  if (pet_resources_device_realtime_begin(&speech_work) != PET_RESOURCE_OK) {
+    wasm_speech_clear_locked();
+    return false;
+  }
+  int16_t *output = (int16_t *)pcm;
+  bool have_music = music->bytes && wasm_clip_decode(music, output, true);
+  bool have_effect = false;
+  if (effect->bytes) {
+    int16_t short_pcm[PET_P4_AUDIO_FRAME_BYTES / 2];
+    have_effect = wasm_clip_decode(effect, have_music ? short_pcm : output, false);
+    if (have_music && have_effect) {
+      for (size_t i = 0; i < PET_P4_AUDIO_FRAME_BYTES / 2; ++i) {
+        int mixed = (int)output[i] + short_pcm[i];
+        output[i] = (int16_t)(mixed < -32768 ? -32768 : mixed > 32767 ? 32767 : mixed);
+      }
+    }
+  }
+  if (!epoch || epoch != wasm_speech_epoch(session) || (!have_music && !have_effect)) {
+    wasm_speech_clear_locked();
+    return false;
+  }
+  if (esp_codec_dev_write(g_speaker, pcm, PET_P4_AUDIO_FRAME_BYTES) != ESP_OK)
+    wasm_speech_clear_locked();
+  atomic_store(&g_wasm_speech_active, music->bytes || effect->bytes);
+  return true;
+}
+#endif
+
+/* One bounded local tone, consumed by the existing playback task at 16 kHz.
+ * Capture, conversation and media streaming retain their existing priority. */
+static atomic_uint g_wasm_tone;
+static uint32_t g_wasm_phase, g_wasm_remaining, g_wasm_length, g_wasm_step, g_wasm_volume;
+void pet_p4_wasm_trial_tone(int hz,int ms,int volume) {
+  if(hz<0||hz>8000||ms<0||ms>2000||volume<0||volume>100)return;
+  atomic_store(&g_wasm_tone,1u|((unsigned)hz<<1)|((unsigned)ms<<14)|((unsigned)volume<<25));
+}
+static void wasm_tone_render(int16_t *pcm) {
+  for(unsigned i=0;i<320&&g_wasm_remaining;i++,g_wasm_remaining--){
+    unsigned p=(g_wasm_phase>>8)&0xffffu;
+    int wave=p<32768?(int)p-16384:49151-(int)p;
+    unsigned age=g_wasm_length-g_wasm_remaining;
+    unsigned envelope=age<64?age:64;
+    if(g_wasm_remaining<envelope)envelope=g_wasm_remaining;
+    int sample=pcm[i]+wave*(int)(envelope*g_wasm_volume)/(64*200);
+    pcm[i]=(int16_t)(sample<-32768?-32768:sample>32767?32767:sample);
+    g_wasm_phase+=g_wasm_step;
+  }
+}
 static bool sfx_drain_step(uint8_t *pcm) {
   if(!g_stream_lock)return false;
   xSemaphoreTakeRecursive(g_stream_lock,portMAX_DELAY);
   bool blocked=atomic_load(&g_capture_requested)||atomic_load(&g_capture_active)
     ||atomic_load(&g_conversation)||atomic_load(&g_stream_active)||atomic_load(&g_music);
-  bool enabled=atomic_load(&g_sfx_enabled)||CEXT_ENABLED();
+#if PET_P4_WASM_AUDIO
+  if (wasm_speech_drain_locked(pcm, blocked)) {
+    atomic_store(&g_wasm_tone, 0);
+    atomic_store(&g_sfx_pending, 0);
+    g_wasm_remaining = 0;
+    pet_sfx_reset(&g_sfx_core);
+    xSemaphoreGiveRecursive(g_stream_lock);
+    return true;
+  }
+#endif
+  unsigned tone=atomic_exchange(&g_wasm_tone,0);
+  if(tone){
+    g_wasm_remaining=g_wasm_length=((tone>>14)&2047u)*16;
+    g_wasm_step=(((tone>>1)&8191u)*16777216ULL)/16000;
+    g_wasm_volume=tone>>25;
+    g_wasm_phase=0;
+  }
+  if(blocked)g_wasm_remaining=0;
+  bool enabled=atomic_load(&g_sfx_enabled)||CEXT_ENABLED()||g_wasm_remaining;
   unsigned pending=atomic_exchange(&g_sfx_pending,0);
   if(blocked||!enabled){pet_sfx_reset(&g_sfx_core);(void)cext_mix_step((int16_t*)pcm,true);xSemaphoreGiveRecursive(g_stream_lock);return false;}
   for(unsigned p=0;p<PET_SFX_PRESETS;p++)if(pending&(1u<<p)&&atomic_load(&g_sfx_enabled))pet_sfx_trigger(&g_sfx_core,p);
-  if(!pet_sfx_active(&g_sfx_core)&&!CEXT_PENDING()){xSemaphoreGiveRecursive(g_stream_lock);return false;}
+  if(!pet_sfx_active(&g_sfx_core)&&!CEXT_PENDING()&&!g_wasm_remaining){xSemaphoreGiveRecursive(g_stream_lock);return false;}
   PET_AUDIO_REALTIME_SCOPE(sfx_work);
   if (pet_resources_device_realtime_begin(&sfx_work) != PET_RESOURCE_OK) {
     xSemaphoreGiveRecursive(g_stream_lock); return false;
   }
   pet_sfx_render(&g_sfx_core,(int16_t*)pcm,320,atomic_load(&g_sfx_volume));
   (void)cext_mix_step((int16_t*)pcm,false);
-  if(esp_codec_dev_write(g_speaker,pcm,640)!=ESP_OK)pet_sfx_reset(&g_sfx_core);
+  wasm_tone_render((int16_t*)pcm);
+  if(esp_codec_dev_write(g_speaker,pcm,640)!=ESP_OK){
+    g_wasm_remaining=0;
+    pet_sfx_reset(&g_sfx_core);
+  }
   xSemaphoreGiveRecursive(g_stream_lock);
   return true;
 }
@@ -872,6 +1229,7 @@ static void playback_task(void *arg) {
   pet_p4_audio_playback_request_t request;
   pet_instrument_reset(&g_instrument_core);
   while (true) {
+    pet_p4_wdt_deadlock_feed(PET_DEADLOCK_PLAYBACK);
     if(fruit_drain_step(pcm)) {vTaskDelay(1);continue;}
     if(sfx_drain_step(pcm)) {vTaskDelay(1);continue;}
     if(instrument_drain_step(pcm)) {vTaskDelay(1);continue;}
@@ -937,7 +1295,18 @@ static void playback_task(void *arg) {
       continue;
     }
 
+#if PET_P4_SYSTEM_WIFI
+    xSemaphoreTakeRecursive(g_stream_lock, portMAX_DELAY);
+    if (atomic_load(&g_wifi_audio_owner) || atomic_load(&g_playback_generation) != request.generation) {
+      xSemaphoreGiveRecursive(g_stream_lock);
+      if (file) fclose(file);
+      continue;
+    }
+#endif
     atomic_store_explicit(&g_playback_active, true, memory_order_release);
+#if PET_P4_SYSTEM_WIFI
+    xSemaphoreGiveRecursive(g_stream_lock);
+#endif
     pet_p4_audio_send_status();
     ESP_LOGI(TAG, "playing P4 audio family=%s bytes=%u", request.family, (unsigned int) remaining);
     bool ok = true;
@@ -948,7 +1317,18 @@ static void playback_task(void *arg) {
       size_t count = wanted;
       if (file) count = fread(pcm, 1, wanted, file);
       else { memcpy(pcm, shared_pcm, wanted); shared_pcm += wanted; }
-      if (count != wanted || esp_codec_dev_write(g_speaker, pcm, (int) count) != ESP_OK) {
+#if PET_P4_SYSTEM_WIFI
+      xSemaphoreTakeRecursive(g_stream_lock, portMAX_DELAY);
+      if (atomic_load(&g_wifi_audio_owner) || atomic_load(&g_playback_generation) != request.generation) {
+        xSemaphoreGiveRecursive(g_stream_lock);
+        break;
+      }
+#endif
+      bool wrote = count == wanted && esp_codec_dev_write(g_speaker, pcm, (int) count) == ESP_OK;
+#if PET_P4_SYSTEM_WIFI
+      xSemaphoreGiveRecursive(g_stream_lock);
+#endif
+      if (!wrote) {
         ok = false;
         break;
       }
@@ -987,9 +1367,21 @@ static void audio_task(void *arg) {
              (unsigned long long) started_ms, (unsigned int) session_sequence);
     atomic_store(&g_capture_tx_last_us, 0);
     atomic_store(&g_capture_tx_max_us, 0);
+#if PET_P4_SYSTEM_WIFI
+    const bool wifi_ptt = !strcmp(capture_owner, wifi_ptt_label);
+    const bool wifi_capture = wifi_ptt || !strcmp(capture_owner, wifi_capture_label);
+    const unsigned wifi_owner = wifi_capture ? atomic_load(&g_wifi_audio_owner) : 0;
+    if (!wifi_capture)
+#endif
     send_audio_begin(session_id, session_queue_empty, capture_owner);
 
     while (capture_worker_current(capture_work)) {
+#if PET_P4_SYSTEM_WIFI
+      if (wifi_ptt && !pet_p4_lan_voice_mic_allowed()) {
+        capture_worker_cancel(capture_work);
+        break;
+      }
+#endif
       uint64_t now_ms = (uint64_t) (esp_timer_get_time() / 1000ULL);
       bool conversation = atomic_load_explicit(&g_conversation, memory_order_acquire);
       if (atomic_load(&g_conversation_starting)) { vTaskDelay(1); continue; }
@@ -1003,8 +1395,9 @@ static void audio_task(void *arg) {
       /* The pending/capture actor blocks video through microphone/AEC setup.
        * Only this physical worker may relax its own exact reservation. */
       (void)pet_resources_device_realtime_video_ready(capture_work,
-        conversation&&!atomic_load(&g_conversation_starting)
-          &&(atomic_load(&g_conversation_half_duplex)||pet_p4_afe_ready()));
+        conversation ? (!atomic_load(&g_conversation_starting)
+          &&(atomic_load(&g_conversation_half_duplex)||pet_p4_afe_ready()))
+          : pet_p4_audio_ptt_video_ready());
 #endif
       if (!conversation && now_ms - started_ms >= PET_P4_AUDIO_MAX_CAPTURE_MS) {
         reason = "timeout";
@@ -1015,6 +1408,9 @@ static void audio_task(void *arg) {
       if (!capture_worker_current(capture_work)) break;
       if (read_result != ESP_OK) {
         reason = "read_error";
+#if PET_P4_SYSTEM_WIFI
+        if (!wifi_capture)
+#endif
         send_audio_error(session_id, "codec_read_failed", "device PCM read failed");
         capture_worker_cancel(capture_work);
         break;
@@ -1034,8 +1430,13 @@ static void audio_task(void *arg) {
       if (conversation && !processed && !atomic_load(&g_conversation_half_duplex)) {
         atomic_store(&g_conversation_half_duplex, true);
         (void) conversation_mic_gain(false);
-        pet_p4_audio_diagnostic("aec_fallback", session_id, 0, false);
-        pet_p4_audio_send_status();
+#if PET_P4_SYSTEM_WIFI
+        if (!wifi_capture)
+#endif
+        {
+          pet_p4_audio_diagnostic("aec_fallback", session_id, 0, false);
+          pet_p4_audio_send_status();
+        }
         /* Fail closed: do not transmit raw echo even while the PC's stop
          * command is still in flight. A new entry can rebuild DSP once. */
         reason = "aec_unavailable";
@@ -1052,6 +1453,20 @@ static void audio_task(void *arg) {
       if (processed && !pet_p4_afe_take((int16_t *)pcm, &speech)) continue;
       do {
       if (!capture_worker_current(capture_work)) break;
+#if PET_P4_SYSTEM_WIFI
+      if (wifi_capture) {
+        /* No USB fallback. This frame belongs to the worker's original route
+         * even when the network closes during a codec read. */
+        if ((processed || (wifi_ptt && pet_p4_lan_voice_mic_allowed())) &&
+            wifi_owner && xSemaphoreTake(g_wifi_audio_tap_lock, 0) == pdTRUE) {
+          if (g_wifi_audio_tap && wifi_owner == atomic_load(&g_wifi_audio_owner) &&
+              !atomic_load(&g_wifi_audio_fault) && capture_worker_current(capture_work))
+            g_wifi_audio_tap(g_wifi_audio_ctx, wifi_owner, (uint64_t)esp_timer_get_time() / 1000, pcm, speech);
+          xSemaphoreGive(g_wifi_audio_tap_lock);
+        }
+        continue;
+      }
+#endif
       uint64_t tx_started_us = esp_timer_get_time();
       bool sent = send_audio_chunk(session_id, chunks, pcm, sizeof(pcm), processed, speech, conversation_session);
       uint64_t tx_elapsed = (uint64_t)esp_timer_get_time() - tx_started_us;
@@ -1059,18 +1474,38 @@ static void audio_task(void *arg) {
       atomic_store(&g_capture_tx_last_us, tx_us);
       if (tx_us > atomic_load(&g_capture_tx_max_us)) atomic_store(&g_capture_tx_max_us, tx_us);
       if (!sent) {
-        reason = "encode_error";
-        send_audio_error(session_id, "base64_failed", "PCM frame encoding failed");
+        reason = "capture_tx_failed";
+        send_audio_error(session_id, "capture_tx_failed", "PCM frame could not be queued for USB");
         capture_worker_cancel(capture_work);
         break;
       }
+#if PET_P4_CONVERSATION_VIDEO
+      /* Only the live worker that has already emitted PCM may admit a cached
+       * animation. Startup, playback and the storage lane stay protected. */
+      if (!conversation && !pet_p4_audio_conversation_active()
+          && !atomic_load(&g_conversation_starting)) {
+        atomic_store_explicit(&g_ptt_pcm_ready, true, memory_order_release);
+      }
+#endif
       stream_checksum = fnv1a64_update(stream_checksum, pcm, sizeof(pcm));
       total_bytes += sizeof(pcm);
       chunks += 1;
       } while (processed && pet_p4_afe_take((int16_t *)pcm, &speech));
     }
     if (!atomic_load_explicit(&g_enabled, memory_order_acquire)) reason = "disabled";
-    send_audio_end(session_id, reason, chunks, total_bytes, stream_checksum);
+#if PET_P4_CONVERSATION_VIDEO
+    atomic_store_explicit(&g_ptt_pcm_ready, false, memory_order_release);
+#endif
+#if PET_P4_SYSTEM_WIFI
+    if (wifi_capture) mbedtls_platform_zeroize(pcm, sizeof(pcm));
+    else
+#endif
+    {
+      // Do not let the final receipt overtake queued frames, or let the next
+      // capture borrow this session's transmitter.
+      while (atomic_load(&g_usb_capture_tx_pending)) vTaskDelay(1);
+      send_audio_end(session_id, reason, chunks, total_bytes, stream_checksum);
+    }
     capture_worker_done();
     pet_p4_audio_send_status();
   }
@@ -1133,6 +1568,7 @@ esp_err_t pet_p4_audio_init(
         // PCM deadlines must precede H.264 decode/pack (priorities 17/16).
         // Pin floating-point DSP away from the decoder's core-1 worker.
         && xTaskCreatePinnedToCore(audio_task, "pet_p4_audio", 8192, NULL, 18, &g_audio_task, 0) == pdPASS) {
+      usb_capture_tx_init();
       atomic_store_explicit(&g_enabled, true, memory_order_release);
       atomic_store_explicit(&g_ready, true, memory_order_release);
       initialized = true;
@@ -1151,13 +1587,14 @@ esp_err_t pet_p4_audio_init(
   if (g_speaker) {
     unsigned master_boot_volume = pet_audio_volume_boot_load();
     g_stream_lock = xSemaphoreCreateRecursiveMutex();
+    g_stream_ingress_lock = xSemaphoreCreateMutex();
     int open_result = esp_codec_dev_open(g_speaker, &format);
     int volume_result = open_result == ESP_OK && g_stream_lock
       ? pet_audio_volume_attach(g_speaker, g_stream_lock, i2c_bus) : ESP_ERR_INVALID_STATE;
     g_playback_queue = open_result == ESP_OK
       ? xQueueCreate(1, sizeof(pet_p4_audio_playback_request_t))
       : NULL;
-    if (volume_result == ESP_OK && open_result == ESP_OK && g_playback_queue && g_stream_lock
+    if (volume_result == ESP_OK && open_result == ESP_OK && g_playback_queue && g_stream_lock && g_stream_ingress_lock
         && xTaskCreatePinnedToCore(playback_task, "pet_p4_playback", 8192, NULL, 18, &g_playback_task, 0)
           == pdPASS) {
       pet_p4_behavior_init(&g_playback_behavior);
@@ -1201,6 +1638,9 @@ bool pet_p4_audio_playback_ready(void) {
 }
 
 bool pet_p4_audio_playback_active(void) {
+#if PET_P4_WASM_AUDIO
+  if (atomic_load(&g_wasm_speech_active)) return true;
+#endif
   return atomic_load_explicit(&g_playback_active, memory_order_acquire);
 }
 
@@ -1226,6 +1666,12 @@ static bool completion_active(const char *state) {
   const char *s=pet_p4_canonical_lifecycle(state);
   return !strcmp(s,"working")||!strcmp(s,"speaking")||!strcmp(s,"waiting_user");
 }
+static pet_task_cue_t completion_outcome(const char *state) {
+  const char *lifecycle = pet_p4_canonical_lifecycle(state);
+  if (!strcmp(lifecycle, "done")) return PET_TASK_CUE_DONE;
+  if (!strcmp(lifecycle, "error")) return PET_TASK_CUE_ERROR;
+  return PET_TASK_CUE_NONE;
+}
 static const char *completion_agent(const pet_p4_runtime_state_t *state) {
   return state->current_session_agent[0]?state->current_session_agent:state->active_agent;
 }
@@ -1236,8 +1682,16 @@ static void completion_cue_observe(const pet_p4_runtime_state_t *state,unsigned 
   pet_completion_snapshot_begin(&g_completion_cues);
   for(unsigned i=0;i<count;i++)pet_completion_snapshot_present(&g_completion_cues,agent,state->session_queue[i].id);
   if(!count)pet_completion_snapshot_present(&g_completion_cues,agent,state->current_session_id);
-  for(unsigned i=0;i<count;i++)pet_completion_observe(&g_completion_cues,agent,state->session_queue[i].id,state->session_queue[i].transition_revision,completion_active(state->session_queue[i].state));
-  if(!count)pet_completion_observe(&g_completion_cues,agent,state->current_session_id,0,completion_active(pet_p4_state_effective_lifecycle(state,now_ms)));
+  for (unsigned i = 0; i < count; i++) {
+    const pet_p4_session_queue_item_t *item = &state->session_queue[i];
+    pet_completion_observe(&g_completion_cues, agent, item->id, item->transition_revision,
+      completion_active(item->state), completion_outcome(item->state));
+  }
+  if (!count) {
+    const char *lifecycle = pet_p4_state_effective_lifecycle(state, now_ms);
+    pet_completion_observe(&g_completion_cues, agent, state->current_session_id, 0,
+      completion_active(lifecycle), completion_outcome(lifecycle));
+  }
   pet_completion_snapshot_end(&g_completion_cues);
   portEXIT_CRITICAL(&g_status_cue_mux);
 }
@@ -1290,10 +1744,12 @@ void pet_p4_audio_process(
   const char *family = (pet_p4_system_cue_family(lifecycle) || pet_audio_patch_global_enabled(lifecycle)) ? lifecycle : entry ? entry->family : "";
   /* Status cues do not depend on a matching animation being installed. */
   if (entry && strcmp(entry->family, family)) entry = NULL;
-  bool completion_guarded=!strcmp(family,"done");
+  /* Storage can request a recheck without changing the task result. */
+  pet_task_cue_t outcome = completion_outcome(family);
+  bool completion_guarded = outcome != PET_TASK_CUE_NONE;
   if(completion_guarded) {
     portENTER_CRITICAL(&g_status_cue_mux);
-    bool due=pet_completion_due(&g_completion_cues,completion_agent(state),session_key,session_revision,
+    bool due=pet_completion_due(&g_completion_cues,completion_agent(state),session_key,outcome,session_revision,
       atomic_load_explicit(&g_playback_generation,memory_order_acquire));
     portEXIT_CRITICAL(&g_status_cue_mux);
     if(!due) {
@@ -1311,7 +1767,9 @@ void pet_p4_audio_process(
       && strcmp(g_playback_family, family) == 0
       && strcmp(g_playback_session_key, session_key) == 0
       && g_playback_session_revision == session_revision
-      && !atomic_load_explicit(&g_status_cue_recheck,memory_order_acquire)) {
+      && (!atomic_load_explicit(&g_status_cue_recheck,memory_order_acquire)
+          || (!completion_guarded && atomic_load(&g_status_cue_started_generation)
+              == atomic_load(&g_status_cue_generation)))) {
     return;
   }
 
@@ -1337,10 +1795,11 @@ void pet_p4_audio_process(
   request.completion_guarded=completion_guarded;
   if(completion_guarded) {
     portENTER_CRITICAL(&g_status_cue_mux);
-    bool reserved=pet_completion_reserve(&g_completion_cues,completion_agent(state),session_key,session_revision,generation);
+    bool reserved=pet_completion_reserve(&g_completion_cues,completion_agent(state),session_key,outcome,session_revision,generation);
     portEXIT_CRITICAL(&g_status_cue_mux);
     if(!reserved)return;
   }
+  atomic_store(&g_status_cue_generation, generation);
   if(status_cue_enqueue(&request)) {
     if(completion_guarded)atomic_fetch_add(&g_completion_cue_queued,1U);
   } else completion_cue_cancel_pending(&request,true);
@@ -1348,6 +1807,9 @@ void pet_p4_audio_process(
 
 esp_err_t pet_p4_audio_play_event_cue(const char *family) {
   if (!family || !pet_p4_system_cue_family(family)) return ESP_ERR_INVALID_ARG;
+#if PET_P4_WASM_AUDIO
+  if (atomic_load(&g_wasm_speech_active)) return ESP_ERR_INVALID_STATE;
+#endif
   if (!pet_p4_audio_playback_ready() || !g_playback_queue || status_cue_deferred()) return ESP_ERR_INVALID_STATE;
   pet_p4_audio_playback_request_t request;
   memset(&request, 0, sizeof(request));
@@ -1359,7 +1821,27 @@ esp_err_t pet_p4_audio_play_event_cue(const char *family) {
   return status_cue_enqueue(&request)?ESP_OK:ESP_ERR_INVALID_STATE;
 }
 
+esp_err_t pet_p4_audio_set_enabled(bool enabled);
+static esp_err_t audio_set_enabled(bool enabled);
+#if PET_P4_SYSTEM_WIFI
+static bool audio_wired_lock(void);
+static void audio_wired_unlock(void);
+#endif
+
 esp_err_t pet_p4_audio_set_enabled(bool enabled) {
+#if PET_P4_SYSTEM_WIFI
+  if (!audio_wired_lock()) return ESP_ERR_INVALID_STATE;
+#endif
+  const esp_err_t result = audio_set_enabled(enabled);
+#if PET_P4_SYSTEM_WIFI
+  audio_wired_unlock();
+#endif
+  return result;
+}
+
+static void audio_stream_flush_locked(void);
+
+static esp_err_t audio_set_enabled(bool enabled) {
   if (!pet_p4_audio_ready()) return ESP_ERR_INVALID_STATE;
   atomic_store_explicit(&g_enabled, enabled, memory_order_release);
   if (!enabled) capture_request_cancel();
@@ -1367,9 +1849,9 @@ esp_err_t pet_p4_audio_set_enabled(bool enabled) {
   return ESP_OK;
 }
 
-esp_err_t pet_p4_audio_capture_start_owned(bool session_queue_empty,const char *owner) {
+static esp_err_t audio_capture_start(bool session_queue_empty, const char *owner, bool conversation) {
   if(!owner||strlen(owner)>=sizeof(g_capture_owner))return ESP_ERR_INVALID_ARG;
-  if(owner[0]&&(atomic_load(&g_capture_active)||pet_p4_audio_conversation_active()))return ESP_ERR_INVALID_STATE;
+  if(!conversation&&owner[0]&&(atomic_load(&g_capture_active)||pet_p4_audio_conversation_active()))return ESP_ERR_INVALID_STATE;
   if (!pet_p4_audio_ready() || !pet_p4_audio_enabled()) return ESP_ERR_INVALID_STATE;
   PET_AUDIO_REALTIME_SCOPE(request);
   if (pet_resources_device_realtime_begin(&request) != PET_RESOURCE_OK) return ESP_ERR_INVALID_STATE;
@@ -1384,13 +1866,45 @@ esp_err_t pet_p4_audio_capture_start_owned(bool session_queue_empty,const char *
     if(g_stream_lock)xSemaphoreGiveRecursive(g_stream_lock);
     return ESP_ERR_INVALID_STATE;
   }
+#if PET_P4_WASM_AUDIO
+  if (g_stream_lock) wasm_speech_preempt_locked();
+#endif
   if(g_stream_lock)xSemaphoreGiveRecursive(g_stream_lock);
   xTaskNotifyGive(g_audio_task);
   return ESP_OK;
 }
+#if PET_P4_SYSTEM_WIFI
+/* Legacy wired/component entrypoints share the same exclusion boundary. */
+static bool audio_wired_lock(void) {
+  if (g_stream_lock) xSemaphoreTakeRecursive(g_stream_lock, portMAX_DELAY);
+  if (!atomic_load(&g_wifi_audio_owner)) return true;
+  xSemaphoreGiveRecursive(g_stream_lock);
+  return false;
+}
+
+static void audio_wired_unlock(void) {
+  if (g_stream_lock) xSemaphoreGiveRecursive(g_stream_lock);
+}
+#endif
+
+esp_err_t pet_p4_audio_capture_start_owned(bool queue_empty, const char *owner) {
+#if PET_P4_SYSTEM_WIFI
+  if (owner && owner[0] == wifi_capture_label[0]) return ESP_ERR_INVALID_ARG;
+  if (!audio_wired_lock()) return ESP_ERR_INVALID_STATE;
+#endif
+  const esp_err_t result = audio_capture_start(queue_empty, owner, false);
+#if PET_P4_SYSTEM_WIFI
+  audio_wired_unlock();
+#endif
+  return result;
+}
+
 esp_err_t pet_p4_audio_capture_start(bool session_queue_empty){return pet_p4_audio_capture_start_owned(session_queue_empty,"");}
 esp_err_t pet_p4_audio_capture_stop_owned(const char *owner){
   if(!owner||!owner[0])return ESP_ERR_INVALID_ARG;
+#if PET_P4_SYSTEM_WIFI
+  if (owner[0] == wifi_capture_label[0]) return ESP_ERR_INVALID_ARG;
+#endif
   portENTER_CRITICAL(&g_capture_resource_lock);
   bool matches=!strcmp(owner,g_capture_owner)&&!atomic_load(&g_conversation);
   if(matches) {
@@ -1403,20 +1917,36 @@ esp_err_t pet_p4_audio_capture_stop_owned(const char *owner){
 
 esp_err_t pet_p4_audio_capture_stop(void) {
   if (!pet_p4_audio_ready()) return ESP_ERR_INVALID_STATE;
+#if PET_P4_SYSTEM_WIFI
+  if (!audio_wired_lock()) return ESP_ERR_INVALID_STATE;
+#endif
   capture_request_cancel();
+#if PET_P4_SYSTEM_WIFI
+  audio_wired_unlock();
+#endif
   return ESP_OK;
 }
 
 bool pet_p4_audio_conversation_active(void) {
   return atomic_load_explicit(&g_conversation, memory_order_acquire);
 }
+#if PET_P4_CONVERSATION_VIDEO
+bool pet_p4_audio_ptt_video_ready(void) {
+  return atomic_load_explicit(&g_ptt_pcm_ready, memory_order_acquire)
+    && pet_p4_audio_active() && !pet_p4_audio_conversation_active()
+    && !atomic_load(&g_conversation_starting) && !pet_p4_audio_playback_active()
+    && !pet_p4_audio_music_active();
+}
+#endif
+
 bool pet_p4_audio_conversation_video_ready(void) {
   return pet_p4_audio_conversation_active()&&!atomic_load(&g_conversation_starting)
     &&atomic_load_explicit(&g_capture_active,memory_order_acquire)
     &&(atomic_load(&g_conversation_half_duplex)||pet_p4_afe_ready());
 }
 
-esp_err_t pet_p4_audio_conversation_set(bool enabled, bool half_duplex, const char *session_id) {
+static esp_err_t audio_conversation_set(bool enabled, bool half_duplex, const char *session_id,
+                                          const char *capture_owner) {
   if (!enabled) {
     if (g_stream_lock) xSemaphoreTakeRecursive(g_stream_lock, portMAX_DELAY);
     pet_p4_audio_diagnostic("conversation_stopped", "", 0, true);
@@ -1424,8 +1954,8 @@ esp_err_t pet_p4_audio_conversation_set(bool enabled, bool half_duplex, const ch
     portENTER_CRITICAL(&g_conversation_lock);
     g_conversation_session[0] = '\0';
     portEXIT_CRITICAL(&g_conversation_lock);
-    pet_p4_audio_stream_flush();
-    (void) pet_p4_audio_capture_stop();
+    audio_stream_flush_locked();
+    if (pet_p4_audio_ready()) capture_request_cancel();
     (void) conversation_mic_gain(false);
     pet_resources_device_realtime_end(&g_conversation_realtime);
     if (g_stream_lock) xSemaphoreGiveRecursive(g_stream_lock);
@@ -1464,10 +1994,10 @@ esp_err_t pet_p4_audio_conversation_set(bool enabled, bool half_duplex, const ch
   atomic_store_explicit(&g_conversation, true, memory_order_release);
   atomic_store(&g_conversation_starting, false);
   atomic_fetch_add_explicit(&g_playback_generation, 1U, memory_order_acq_rel);
-  esp_err_t err = pet_p4_audio_set_enabled(true);
+  esp_err_t err = audio_set_enabled(true);
   if (err == ESP_OK) {
-    err = pet_p4_audio_capture_start(true);
-    if (err == ESP_ERR_INVALID_STATE && atomic_load_explicit(&g_capture_active, memory_order_acquire)) {
+    err = audio_capture_start(true, capture_owner, true);
+    if (!capture_owner[0] && err == ESP_ERR_INVALID_STATE && atomic_load_explicit(&g_capture_active, memory_order_acquire)) {
       err = ESP_OK; /* PTT 采集已经在跑：直接转入对话模式 */
     }
   }
@@ -1486,13 +2016,31 @@ esp_err_t pet_p4_audio_conversation_set(bool enabled, bool half_duplex, const ch
   return err;
 }
 
-esp_err_t pet_p4_audio_stream_begin(const char *session_id) {
+esp_err_t pet_p4_audio_conversation_set(bool enabled, bool half_duplex, const char *session_id) {
+#if PET_P4_SYSTEM_WIFI
+  if (!audio_wired_lock()) return ESP_ERR_INVALID_STATE;
+#endif
+  const esp_err_t result = audio_conversation_set(enabled, half_duplex, session_id, "");
+#if PET_P4_SYSTEM_WIFI
+  audio_wired_unlock();
+#endif
+  return result;
+}
+
+static esp_err_t audio_stream_begin(const char *session_id) {
   if (!pet_p4_audio_playback_ready()) return ESP_ERR_INVALID_STATE;
   PET_AUDIO_REALTIME_SCOPE(stream_request);
   if (pet_resources_device_realtime_begin(&stream_request) != PET_RESOURCE_OK) return ESP_ERR_INVALID_STATE;
   if (atomic_load(&g_music) && (!session_id || strncmp(session_id,"music-",6))) pet_p4_audio_stream_flush();
   if (!stream_ring_ensure()) return ESP_ERR_NO_MEM;
   xSemaphoreTakeRecursive(g_stream_lock, portMAX_DELAY);
+#if PET_P4_WASM_AUDIO
+  wasm_speech_preempt_locked();
+#endif
+  pet_resources_device_realtime_end(&g_stream_realtime);
+  g_stream_realtime = stream_request;
+  memset(&stream_request, 0, sizeof(stream_request));
+  xSemaphoreTake(g_stream_ingress_lock, portMAX_DELAY);
   atomic_store_explicit(&g_stream_playing, false, memory_order_release);
   atomic_store_explicit(&g_stream_head, 0, memory_order_release);
   atomic_store_explicit(&g_stream_tail, 0, memory_order_release);
@@ -1501,10 +2049,8 @@ esp_err_t pet_p4_audio_stream_begin(const char *session_id) {
   atomic_store(&g_stream_received_bytes, 0);
   atomic_store(&g_stream_played_bytes, 0);
   atomic_store(&g_stream_underruns, 0);
-  pet_resources_device_realtime_end(&g_stream_realtime);
-  g_stream_realtime = stream_request;
-  memset(&stream_request, 0, sizeof(stream_request));
   atomic_store_explicit(&g_stream_active, true, memory_order_release);
+  xSemaphoreGive(g_stream_ingress_lock);
 #if PET_P4_CONVERSATION_VIDEO
   /* Ring/codec ownership is published. Other initialization tickets, if any,
    * still protect video independently. Music/file playback never opts in. */
@@ -1516,22 +2062,28 @@ esp_err_t pet_p4_audio_stream_begin(const char *session_id) {
   return ESP_OK;
 }
 
+static bool stream_session_matches_locked(const char *session_id) {
+  return session_id && session_id[0] &&
+#if PET_P4_SYSTEM_WIFI
+    !atomic_load(&g_wifi_audio_owner) &&
+#endif
+    atomic_load(&g_stream_active) && strcmp(session_id, g_stream_session) == 0;
+}
+
 bool pet_p4_audio_stream_matches(const char *session_id) {
-  if (!session_id || !session_id[0] || !g_stream_lock) return false;
-  xSemaphoreTakeRecursive(g_stream_lock, portMAX_DELAY);
-  bool matches = atomic_load(&g_stream_active) && strcmp(session_id, g_stream_session) == 0;
-  xSemaphoreGiveRecursive(g_stream_lock);
+  if (!g_stream_ingress_lock) return false;
+  xSemaphoreTake(g_stream_ingress_lock, portMAX_DELAY);
+  bool matches = stream_session_matches_locked(session_id);
+  xSemaphoreGive(g_stream_ingress_lock);
   return matches;
 }
 
-esp_err_t pet_p4_audio_stream_push(const uint8_t *pcm, size_t length) {
+/* Caller owns ingress. No logging/TX here: full ring is bounded backpressure. */
+static esp_err_t audio_stream_push_locked(const uint8_t *pcm, size_t length) {
   if (!pcm || length == 0) return ESP_ERR_INVALID_ARG;
   if (!atomic_load_explicit(&g_stream_active, memory_order_acquire) || !g_stream_ring) return ESP_ERR_INVALID_STATE;
-  if (stream_buffered() + length >= PET_P4_AUDIO_STREAM_RING_BYTES - 1) {
-    ESP_LOGW(TAG, "stream ring full, dropping %u bytes", (unsigned int) length);
-    pet_p4_audio_diagnostic("playback_overflow", g_stream_session, length, false);
-    return ESP_ERR_NO_MEM;
-  }
+  if (length >= PET_P4_AUDIO_STREAM_RING_BYTES - 1 ||
+      stream_buffered() >= PET_P4_AUDIO_STREAM_RING_BYTES - 1 - length) return ESP_ERR_NO_MEM;
   size_t head = atomic_load_explicit(&g_stream_head, memory_order_acquire);
   for (size_t i = 0; i < length; i += 1) {
     g_stream_ring[(head + i) % PET_P4_AUDIO_STREAM_RING_BYTES] = pcm[i];
@@ -1541,19 +2093,58 @@ esp_err_t pet_p4_audio_stream_push(const uint8_t *pcm, size_t length) {
   return ESP_OK;
 }
 
-esp_err_t pet_p4_audio_stream_end(void) {
+static esp_err_t audio_stream_push(const uint8_t *pcm, size_t length) {
+  if (!g_stream_ingress_lock) return ESP_ERR_INVALID_STATE;
+  xSemaphoreTake(g_stream_ingress_lock, portMAX_DELAY);
+  esp_err_t result = audio_stream_push_locked(pcm, length);
+  xSemaphoreGive(g_stream_ingress_lock);
+  if (result == ESP_ERR_NO_MEM) {
+    ESP_LOGW(TAG, "stream ring full, dropping %u bytes", (unsigned int) length);
+    pet_p4_audio_diagnostic("playback_overflow", g_stream_session, length, false);
+  }
+  return result;
+}
+
+esp_err_t pet_p4_audio_stream_push_session(const char *session_id, const uint8_t *pcm, size_t length) {
+  if (!g_stream_ingress_lock) return ESP_ERR_INVALID_STATE;
+  xSemaphoreTake(g_stream_ingress_lock, portMAX_DELAY);
+  /* Recheck under the SAME lock as the copy: cancellation/replacement after
+   * the protocol's early stale check cannot append bytes to the new session.
+   * Stale wired frames keep their existing successful-ignore semantics. */
+  esp_err_t result = stream_session_matches_locked(session_id)
+    ? audio_stream_push_locked(pcm, length) : ESP_OK;
+  xSemaphoreGive(g_stream_ingress_lock);
+  return result;
+}
+
+static esp_err_t audio_stream_end(void) {
   if (!atomic_load_explicit(&g_stream_active, memory_order_acquire)) return ESP_ERR_INVALID_STATE;
   atomic_store_explicit(&g_stream_ended, true, memory_order_release);
   pet_p4_audio_diagnostic("playback_input_end", g_stream_session, atomic_load(&g_stream_received_bytes), true);
   return ESP_OK;
 }
 
-void pet_p4_audio_stream_flush(void) {
-  if (g_stream_lock) xSemaphoreTakeRecursive(g_stream_lock, portMAX_DELAY);
+static void audio_stream_flush_locked(void) {
+  /* Wait only for an admitted bounded copy, then close ingress before any
+   * zeroing, diagnostic TX or codec restore. Begin is excluded by stream lock. */
+  bool was_active;
+  if (g_stream_ingress_lock) xSemaphoreTake(g_stream_ingress_lock, portMAX_DELAY);
+  was_active = atomic_exchange_explicit(&g_stream_active, false, memory_order_acq_rel);
+  if (g_stream_ingress_lock) xSemaphoreGive(g_stream_ingress_lock);
+#if PET_P4_SYSTEM_WIFI
+  g_wifi_audio_drain_writes = 0;
+  atomic_store(&g_wifi_audio_drained_turn, 0);
+  if (atomic_load(&g_wifi_audio_owner) && g_stream_ring) {
+    const size_t tail = atomic_load(&g_stream_tail);
+    const size_t buffered = stream_buffered();
+    for (size_t i = 0; i < buffered; ++i)
+      g_stream_ring[(tail + i) % PET_P4_AUDIO_STREAM_RING_BYTES] = 0;
+  }
+#endif
   atomic_store_explicit(&g_stream_ended, true, memory_order_release);
   atomic_store_explicit(&g_stream_head, 0, memory_order_release);
   atomic_store_explicit(&g_stream_tail, 0, memory_order_release);
-  if (atomic_load_explicit(&g_stream_active, memory_order_acquire)) {
+  if (was_active) {
     pet_p4_audio_diagnostic("playback_flushed", g_stream_session, atomic_load(&g_stream_received_bytes), true);
     atomic_store_explicit(&g_stream_playing, false, memory_order_release);
     atomic_store_explicit(&g_stream_active, false, memory_order_release);
@@ -1579,8 +2170,180 @@ void pet_p4_audio_stream_flush(void) {
   /* g_stream_lock has waited for any active codec write/restore to return. */
   pet_resources_device_realtime_end(&g_stream_realtime);
   pet_resources_device_realtime_end(&g_music_realtime);
+}
+
+esp_err_t pet_p4_audio_stream_begin(const char *session_id) {
+#if PET_P4_SYSTEM_WIFI
+  if (!audio_wired_lock()) return ESP_ERR_INVALID_STATE;
+#endif
+  const esp_err_t result = audio_stream_begin(session_id);
+#if PET_P4_SYSTEM_WIFI
+  audio_wired_unlock();
+#endif
+  return result;
+}
+
+esp_err_t pet_p4_audio_stream_push(const uint8_t *pcm, size_t bytes) {
+#if PET_P4_SYSTEM_WIFI
+  if (!audio_wired_lock()) return ESP_ERR_INVALID_STATE;
+#endif
+  const esp_err_t result = audio_stream_push(pcm, bytes);
+#if PET_P4_SYSTEM_WIFI
+  audio_wired_unlock();
+#endif
+  return result;
+}
+
+esp_err_t pet_p4_audio_stream_end(void) {
+#if PET_P4_SYSTEM_WIFI
+  if (!audio_wired_lock()) return ESP_ERR_INVALID_STATE;
+#endif
+  const esp_err_t result = audio_stream_end();
+#if PET_P4_SYSTEM_WIFI
+  audio_wired_unlock();
+#endif
+  return result;
+}
+
+void pet_p4_audio_stream_flush(void) {
+#if PET_P4_SYSTEM_WIFI
+  if (!audio_wired_lock()) return;
+#else
+  if (g_stream_lock) xSemaphoreTakeRecursive(g_stream_lock, portMAX_DELAY);
+#endif
+  audio_stream_flush_locked();
   if (g_stream_lock) xSemaphoreGiveRecursive(g_stream_lock);
 }
+
+#if PET_P4_SYSTEM_WIFI
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC push_options
+#pragma GCC optimize ("Os")
+#endif
+static esp_err_t audio_wifi_start(pet_p4_audio_wifi_capture_fn tap, void *ctx, bool ptt,
+                                  bool queue_empty, pet_p4_audio_wifi_session_t *session) {
+  if (!tap || !session) return ESP_ERR_INVALID_ARG;
+  *session = 0;
+  if (!g_stream_lock || (!ptt && !pet_p4_audio_playback_ready()) || !audio_wired_lock())
+    return ESP_ERR_INVALID_STATE;
+  esp_err_t result = ESP_ERR_INVALID_STATE;
+  if (g_wifi_audio_generation != UINT32_MAX && pet_p4_audio_master_idle()) {
+    if (!g_wifi_audio_tap_lock) g_wifi_audio_tap_lock = xSemaphoreCreateMutex();
+    if (!g_wifi_audio_tap_lock) {
+      audio_wired_unlock();
+      return ESP_ERR_NO_MEM;
+    }
+    const unsigned owner = ++g_wifi_audio_generation;
+    g_wifi_audio_tap = tap;
+    g_wifi_audio_ptt = ptt;
+    g_wifi_audio_ctx = ctx;
+    g_wifi_audio_turn = 0;
+    atomic_store(&g_wifi_audio_drained_turn, 0);
+    g_wifi_audio_drain_writes = 0;
+    g_wifi_audio_play_open = false;
+    atomic_store(&g_wifi_audio_fault, false);
+    atomic_store(&g_wifi_audio_owner, owner);
+    /* The worker snapshots the private route label at admission. The
+     * conversation ID is local and cannot identify a wired conversation. */
+    result = ptt
+      ? audio_capture_start(queue_empty, wifi_ptt_label, false)
+      : audio_conversation_set(true, false, "wifi-realtime", wifi_capture_label);
+    if (result == ESP_OK) *session = owner;
+    else (void)pet_p4_audio_wifi_stop(owner);
+  }
+  audio_wired_unlock();
+  return result;
+}
+
+esp_err_t pet_p4_audio_wifi_start(pet_p4_audio_wifi_capture_fn tap, void *ctx,
+                                 pet_p4_audio_wifi_session_t *session) {
+  return audio_wifi_start(tap, ctx, false, false, session);
+}
+
+esp_err_t pet_p4_audio_wifi_ptt_start(pet_p4_audio_wifi_capture_fn tap, bool queue_empty,
+                                     pet_p4_audio_wifi_session_t *session) {
+  return audio_wifi_start(tap, NULL, true, queue_empty, session);
+}
+
+esp_err_t pet_p4_audio_wifi_ptt_enable(bool enabled) {
+  if (!g_stream_lock) return ESP_ERR_INVALID_STATE;
+  xSemaphoreTakeRecursive(g_stream_lock, portMAX_DELAY);
+  // The dictation switch may stop its own capture, never an active SW2 session.
+  const unsigned owner = atomic_load(&g_wifi_audio_owner);
+  const esp_err_t result = (!owner || (!enabled && g_wifi_audio_ptt))
+    ? audio_set_enabled(enabled) : ESP_ERR_INVALID_STATE;
+  xSemaphoreGiveRecursive(g_stream_lock);
+  return result;
+}
+
+bool pet_p4_audio_wifi_live(pet_p4_audio_wifi_session_t session) {
+  return session && session == atomic_load(&g_wifi_audio_owner) &&
+         atomic_load(&g_capture_requested) && !atomic_load(&g_wifi_audio_fault);
+}
+
+esp_err_t pet_p4_audio_wifi_stop(pet_p4_audio_wifi_session_t session) {
+  if (!session || !g_stream_lock) return ESP_ERR_INVALID_STATE;
+  xSemaphoreTakeRecursive(g_stream_lock, portMAX_DELAY);
+  esp_err_t result = ESP_ERR_INVALID_STATE;
+  if (session == atomic_load(&g_wifi_audio_owner) && g_wifi_audio_tap) {
+    xSemaphoreTake(g_wifi_audio_tap_lock, portMAX_DELAY);
+    g_wifi_audio_tap = NULL;
+    g_wifi_audio_ctx = NULL;
+    xSemaphoreGive(g_wifi_audio_tap_lock);
+    capture_request_cancel();
+    result = g_wifi_audio_ptt ? ESP_OK : audio_conversation_set(false, true, NULL, "");
+  }
+  xSemaphoreGiveRecursive(g_stream_lock);
+  if (result == ESP_OK) {
+    /* The cancelled worker may still be inside a codec read. Keep the old
+     * owner reserved until that read returns and the worker retires. */
+    while (atomic_load(&g_capture_active)) vTaskDelay(1);
+    atomic_store(&g_wifi_audio_owner, 0);
+  }
+  return result;
+}
+
+uint32_t pet_p4_audio_wifi_take_drained_turn(pet_p4_audio_wifi_session_t session) {
+  // The LAN worker owns this session until teardown, so it does not need to
+  // acquire the mutex held by the DAC to collect its completion notification.
+  return pet_p4_audio_wifi_live(session) ? atomic_exchange(&g_wifi_audio_drained_turn, 0) : 0;
+}
+
+esp_err_t pet_p4_audio_wifi_play(pet_p4_audio_wifi_session_t session, uint32_t turn,
+                                pet_p4_audio_wifi_play_t op, const uint8_t *pcm, size_t bytes) {
+  if (!turn || (op == PET_P4_AUDIO_WIFI_PLAY_FRAME
+      ? (!pcm || bytes != PET_P4_AUDIO_WIFI_FRAME_BYTES) : (pcm || bytes)))
+    return ESP_ERR_INVALID_ARG;
+  if (!g_stream_lock) return ESP_ERR_INVALID_STATE;
+  xSemaphoreTakeRecursive(g_stream_lock, portMAX_DELAY);
+  esp_err_t result = ESP_ERR_INVALID_STATE;
+  if (pet_p4_audio_wifi_live(session)) {
+    if (op == PET_P4_AUDIO_WIFI_PLAY_BEGIN && turn > g_wifi_audio_turn) {
+      audio_stream_flush_locked();
+      result = audio_stream_begin("wifi-realtime");
+      g_wifi_audio_turn = turn;
+      g_wifi_audio_play_open = result == ESP_OK;
+    } else if (turn == g_wifi_audio_turn) {
+      if (op == PET_P4_AUDIO_WIFI_PLAY_FRAME && g_wifi_audio_play_open)
+        result = stream_buffered() >= PET_P4_AUDIO_WIFI_MAX_BYTES
+          ? ESP_ERR_NO_MEM : audio_stream_push(pcm, bytes);
+      else if (op == PET_P4_AUDIO_WIFI_PLAY_END && g_wifi_audio_play_open) {
+        result = audio_stream_end();
+        g_wifi_audio_play_open = false;
+      } else if (op == PET_P4_AUDIO_WIFI_PLAY_FLUSH) {
+        audio_stream_flush_locked();
+        g_wifi_audio_play_open = false;
+        result = ESP_OK;
+      }
+    }
+  }
+  xSemaphoreGiveRecursive(g_stream_lock);
+  return result;
+}
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC pop_options
+#endif
+#endif
 
 esp_err_t pet_p4_audio_music_begin(const char *session_id) {
   if (!g_stream_lock || !pet_p4_audio_playback_ready()) return ESP_ERR_INVALID_STATE;
@@ -1590,6 +2353,9 @@ esp_err_t pet_p4_audio_music_begin(const char *session_id) {
   if (atomic_load(&g_capture_requested) || atomic_load(&g_capture_active) || atomic_load(&g_conversation)) {
     xSemaphoreGiveRecursive(g_stream_lock);return ESP_ERR_INVALID_STATE;
   }
+#if PET_P4_WASM_AUDIO
+  wasm_speech_preempt_locked();
+#endif
   pet_p4_audio_stream_flush();
   atomic_fetch_add(&g_playback_generation,1);
   xQueueReset(g_playback_queue);
@@ -1616,3 +2382,5 @@ void pet_p4_audio_music_pause(bool paused) {
 }
 void pet_p4_audio_music_volume(unsigned int v) {atomic_store(&g_music_volume,v>100?100:v);}
 unsigned int pet_p4_audio_music_buffered_ms(void) {return (unsigned int)(stream_buffered()*1000ULL/96000ULL);}
+
+#include "pet_p4_radio_audio.inc"

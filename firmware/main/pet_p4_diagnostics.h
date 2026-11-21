@@ -14,6 +14,9 @@ extern "C" {
 #endif
 
 esp_err_t pet_p4_diagnostics_init(void);
+#if PET_P4_SYSTEM_WIFI
+cJSON *pet_p4_diagnostics_lan_snapshot(const pet_p4_runtime_state_t *state);
+#endif
 /* Native boot / existing save worker only, outside every model/store lock.
  * Private cached comparison is default-off. Never called by a query. */
 void pet_p4_diagnostics_storage_refresh(void);
@@ -39,6 +42,8 @@ void pet_p4_diagnostics_process(
   const pet_p4_runtime_state_t *state
 );
 bool pet_p4_diagnostics_reboot_pending(void);
+/* Call from the existing serialized device control owner. */
+bool pet_p4_diagnostics_schedule_reboot(const pet_p4_runtime_state_t *state);
 
 #ifdef __cplusplus
 }

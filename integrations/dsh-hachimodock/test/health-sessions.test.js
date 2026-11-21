@@ -121,8 +121,8 @@ test('loopback address classification', () => {
   assert.equal(isLoopbackAddress('127.0.0.1'), true)
   assert.equal(isLoopbackAddress('::1'), true)
   assert.equal(isLoopbackAddress('::ffff:127.0.0.1'), true)
-  assert.equal(isLoopbackAddress('10.0.0.2'), false)
-  assert.equal(isLoopbackAddress('::ffff:10.0.0.2'), false)
+  assert.equal(isLoopbackAddress('192.0.2.2'), false)
+  assert.equal(isLoopbackAddress('::ffff:192.0.2.2'), false)
   assert.equal(isLoopbackAddress(undefined), false)
 })
 

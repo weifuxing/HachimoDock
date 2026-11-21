@@ -1,3 +1,6 @@
+#include "pet_p4_boot_memory.h"
+#include "pet_p4_protocol_budget.h"
+#include "pet_p4_wasm_trial.h"
 #include "pet_p4_audio_patch.h"
 /*
  * [Input] UART/native USB protocol traffic, display/input state, and assets.
@@ -26,6 +29,7 @@
 #include "esp_spiffs.h"
 #include "esp_timer.h"
 #include "esp_random.h"
+#include "cJSON.h"
 #include "driver/uart.h"
 #include "driver/usb_serial_jtag.h"
 #include "freertos/FreeRTOS.h"
@@ -50,11 +54,16 @@
 #include "pet_p4_system_cues.h"
 #include "pet_p4_audio_frontend.h"
 #include "pet_p4_diagnostics.h"
+#include "pet_p4_wdt_deadlock.h"
 #include "pet_p4_input.h"
 #include "pet_p4_miniapp.h"
+#include "pet_p4_private_feed.h"
 #include "pet_p4_media.h"
 #include "pet_p4_ota.h"
 #include "pet_p4_protocol.h"
+#include "pet_p4_board_probe.h"
+#include "pet_p4_system_settings.h"
+#include "pet_p4_lan.h"
 #include "pet_p4_bubble_pixels.h"
 #include "pet_p4_transport_config.h"
 #include "pet_p4_control_integrity.h"
@@ -87,8 +96,9 @@ static const char *TAG = "pet-p4";
 #define PET_P4_UART_READ_CHUNK_BYTES 2048
 #define PET_P4_TRANSPORT_RX_TASK_STACK_BYTES 8192
 #define PET_P4_PROTOCOL_TASK_STACK_BYTES 12288
+#define PET_P4_BOOT_CATALOG_TASK_STACK_BYTES 12288
 #define PET_P4_PROTOCOL_QUEUE_DEPTH 24
-#define PET_P4_MAIN_RENDER_INTERVAL_MS 50ULL
+#define PET_P4_MAIN_RENDER_INTERVAL_MS CONFIG_PET_P4_MAIN_RENDER_INTERVAL_MS
 #define PET_P4_MAIN_LOOP_DELAY_MS 1
 #define PET_P4_MAIN_RX_HEALTH_TIMEOUT_MS 1000ULL
 
@@ -119,6 +129,21 @@ static bool g_transport_ready;
 static char g_transport_log_buffer[1024];
 static SemaphoreHandle_t g_state_mutex;
 static QueueHandle_t g_protocol_queue;
+
+static pet_protocol_budget_t g_protocol_budget;
+static portMUX_TYPE g_protocol_budget_lock = portMUX_INITIALIZER_UNLOCKED;
+pet_protocol_budget_t pet_p4_protocol_budget_snapshot(void) {
+  portENTER_CRITICAL(&g_protocol_budget_lock);
+  pet_protocol_budget_t result = g_protocol_budget;
+  portEXIT_CRITICAL(&g_protocol_budget_lock);
+  return result;
+}
+static void release_protocol_memory(size_t bytes) {
+  portENTER_CRITICAL(&g_protocol_budget_lock);
+  pet_protocol_budget_release(&g_protocol_budget, bytes);
+  portEXIT_CRITICAL(&g_protocol_budget_lock);
+}
+
 static pet_p4_runtime_state_t *g_render_state;
 static portMUX_TYPE g_rx_health_mutex = portMUX_INITIALIZER_UNLOCKED;
 static TickType_t g_usb_rx_last_tick;
@@ -135,11 +160,16 @@ typedef enum {
 
 typedef struct {
   char *line;
+  size_t charged_bytes;
+  uint64_t enqueued_us;
   pet_p4_send_line_fn send_line;
   void *reply_ctx;
   /* Trusted internal work only. Wire requests cannot supply this token. */
   uint64_t activation_token;
   uint64_t cursor_token;
+#if PET_P4_SYSTEM_WIFI
+  uint32_t lan_control;
+#endif
 #if PET_P4_HELLO_ASYNC
   bool unsolicited_hello;
 #endif
@@ -157,6 +187,28 @@ static bool usb_protocol_seen(void);
  * Pending/in-flight announcements coalesce. No heap, wait or TX in the mux. */
 static char g_hello_board_id[PET_P4_DEVICE_ID_MAX];
 static bool g_hello_pending;
+static atomic_bool g_board_identity_announcement;
+#if PET_P4_SYSTEM_WIFI
+static atomic_bool g_hosted_probe_pending;
+#endif
+
+static void board_probe_task(void *arg) {
+  (void)arg;
+  vTaskDelay(pdMS_TO_TICKS(250));
+  bool detected = false;
+  for (unsigned attempt = 0; attempt < 3 && !detected; ++attempt) {
+    if (attempt) vTaskDelay(pdMS_TO_TICKS(350));
+    detected = pet_p4_probe_wifi6_board();
+  }
+  pet_p4_finish_board_probe(detected);
+#if PET_P4_SYSTEM_WIFI
+  // A failed passive probe is inconclusive. Ask the real C6 host driver once.
+  if (!detected) atomic_store_explicit(&g_hosted_probe_pending, true, memory_order_release);
+#endif
+  atomic_store_explicit(&g_board_identity_announcement, true, memory_order_release);
+  vTaskDelete(NULL);
+}
+
 static void transport_send_line(const char *line,void *ctx);
 static bool enqueue_unsolicited_hello(void) {
   if(!g_protocol_queue)return false;
@@ -545,6 +597,17 @@ static bool transport_control_prefix(const char prefix[PET_CONTROL_PREFIX_BYTES+
   return false;
 }
 #endif
+
+int __wrap_printf(const char *format, ...) {
+  /* This vendor debug print bypasses the transport mutex and can split
+   * in-flight audio JSON. It also exposes an internal pointer. */
+  if (strcmp(format, "WebRtcNs_Create: self=%p size:%d\n") == 0) return 0;
+  va_list args;
+  va_start(args, format);
+  int written = vprintf(format, args);
+  va_end(args);
+  return written;
+}
 
 static int transport_log_vprintf(const char *format, va_list args) {
 #if PET_P4_RESET_PHASE_TRACE
@@ -959,7 +1022,7 @@ static bool screenshot_control_framed(void *reply_ctx){
 #endif
 }
 #endif
-static bool maybe_handle_debug_line(const char *line, void *reply_ctx) {
+static __attribute__((optimize("Os"))) bool maybe_handle_debug_line(const char *line, void *reply_ctx) {
   if (!line || !strstr(line, "\"debug/screenshot")) return false;
   cJSON *request=cJSON_ParseWithOpts(line,NULL,true);
   const cJSON *topic=cJSON_GetObjectItemCaseSensitive(request,"topic");
@@ -1284,6 +1347,14 @@ static bool enqueue_protocol_line(
     cJSON_free(reply.line);
   }
   size_t line_len = strlen(line);
+  portENTER_CRITICAL(&g_protocol_budget_lock);
+  bool admitted = pet_protocol_budget_acquire(&g_protocol_budget, line_len + 1);
+  portEXIT_CRITICAL(&g_protocol_budget_lock);
+  if (!admitted) {
+    send_line("{\"topic\":\"protocol/error\",\"payload\":{\"ok\":false,\"error\":\"command_queue_busy\"}}", reply_ctx);
+    return false;
+  }
+
 #if PET_P4_RESET_PHASE_TRACE
   PET_RESET_PHASE_SCOPE(enqueue_phase,PET_PHASE_ENQUEUE_ALLOC);
 #endif
@@ -1291,14 +1362,22 @@ static bool enqueue_protocol_line(
     line_len + 1,
     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
   );
-  if (!line_copy) line_copy = (char *) malloc(line_len + 1);
-  if (!line_copy) return false;
+  if (!line_copy) {
+    portENTER_CRITICAL(&g_protocol_budget_lock);
+    pet_protocol_budget_release(&g_protocol_budget, line_len + 1);
+    if (g_protocol_budget.allocation_failures != UINT32_MAX) ++g_protocol_budget.allocation_failures;
+    portEXIT_CRITICAL(&g_protocol_budget_lock);
+    send_line("{\"topic\":\"protocol/error\",\"payload\":{\"ok\":false,\"error\":\"command_queue_busy\"}}", reply_ctx);
+    return false;
+  }
 #if PET_P4_RESET_PHASE_TRACE
   pet_reset_phase_set(PET_PHASE_ENQUEUE_COPY);
 #endif
   memcpy(line_copy, line, line_len + 1);
   pet_p4_protocol_request_t request = {
     .line = line_copy,
+    .charged_bytes = line_len + 1,
+    .enqueued_us = (uint64_t)esp_timer_get_time(),
     .send_line = send_line,
     .reply_ctx = reply_ctx,
   };
@@ -1309,6 +1388,10 @@ static bool enqueue_protocol_line(
     return true;
   }
   free(line_copy);
+  portENTER_CRITICAL(&g_protocol_budget_lock);
+  pet_protocol_budget_release(&g_protocol_budget, line_len + 1);
+  if (g_protocol_budget.queue_full != UINT32_MAX) ++g_protocol_budget.queue_full;
+  portEXIT_CRITICAL(&g_protocol_budget_lock);
   send_line(
     "{\"topic\":\"protocol/error\",\"payload\":{\"ok\":false,\"error\":\"command_queue_busy\"}}",
     reply_ctx
@@ -1492,6 +1575,62 @@ static void volume_worker_idle_commit(void) {
   pet_audio_volume_idle_commit((uint64_t)esp_timer_get_time()/1000ULL,idle,volume_worker_idle);
 }
 
+#if PET_P4_SYSTEM_WIFI
+static void volume_worker_lan(void) {
+  if (!volume_worker_idle() || !pet_p4_audio_playback_ready() ||
+      xSemaphoreTake(g_state_mutex, 0) != pdTRUE) return;
+  uint8_t volume;
+  const bool claimed = !g_state.asset_transfer_active && !g_state.approval_active &&
+    !pet_p4_ota_transfer_active() && !pet_p4_diagnostics_reboot_pending() &&
+    !pet_p4_miniapp_storage_busy() && !pet_p4_conversation_active(&g_state) &&
+    pet_p4_lan_volume_claim(&volume);
+  xSemaphoreGive(g_state_mutex);
+  if (!claimed) return;
+  pet_audio_volume_status_t result;
+  const bool applied = volume_worker_idle() &&
+    pet_audio_volume_set(volume, (uint64_t)esp_timer_get_time()/1000ULL, &result) == ESP_OK &&
+    result.confirmed && result.volume == volume;
+  pet_p4_lan_volume_finish(applied);
+}
+#endif
+
+#if PET_P4_SYSTEM_WIFI
+bool pet_p4_lan_trust_wired(pet_p4_send_line_fn send, void *route) {
+  if (send == pet_p4_native_usb_send_json_line) return pet_p4_native_usb_route_current(route);
+  return send == transport_send_line && (route == &g_usb_serial_jtag_route || route == &g_uart_route);
+}
+
+bool pet_p4_lan_schedule_control(uint32_t token) {
+  const pet_p4_protocol_request_t request = {.lan_control = token};
+  return g_protocol_queue && xQueueSend(g_protocol_queue, &request, 0) == pdTRUE;
+}
+
+static void run_lan_control(uint32_t token) {
+  xSemaphoreTake(g_state_mutex, portMAX_DELAY);
+#if PET_P4_GAP_PEAK_HOLDER
+  g_worker_locked_topic_hash = pet_topic_hash("lan/control", sizeof("lan/control") - 1);
+  worker_locked_begin();
+#endif
+  const bool storage = pet_p4_miniapp_storage_lane_enter();
+  g_protocol_storage_command_entered = storage;
+  pet_p4_lan_control_run(&g_state, token, storage &&
+    !pet_p4_diagnostics_reboot_pending() && !pet_p4_ota_active() &&
+    !g_state.approval_active && !pet_p4_conversation_active(&g_state) &&
+    pet_p4_audio_master_idle());
+  if (storage) {
+    const bool released = pet_p4_miniapp_storage_lane_leave();
+    configASSERT(released);
+    (void)released;
+  }
+  g_protocol_storage_command_entered = false;
+#if PET_P4_GAP_PEAK_HOLDER
+  worker_locked_end();
+  g_worker_locked_topic_hash = 0;
+#endif
+  xSemaphoreGive(g_state_mutex);
+}
+#endif
+
 static void protocol_worker_task(void *arg) {
   (void) arg;
 #if PET_P4_RESET_PHASE_TRACE
@@ -1515,6 +1654,9 @@ static void protocol_worker_task(void *arg) {
     if(wait>pdMS_TO_TICKS(1000))wait=pdMS_TO_TICKS(1000);
     asset_idle_worker();
     if (xQueueReceive(g_protocol_queue, &request, wait) != pdTRUE){
+#if PET_P4_SYSTEM_WIFI
+      volume_worker_lan();
+#endif
       screenshot_poll();volume_worker_idle_commit();continue;
     }
     screenshot_poll();
@@ -1528,6 +1670,12 @@ static void protocol_worker_task(void *arg) {
 #if PET_P4_QUERY_OBSERVATION
       query_native_end();
 #endif
+      continue;
+    }
+#endif
+#if PET_P4_SYSTEM_WIFI
+    if (request.lan_control) {
+      run_lan_control(request.lan_control);
       continue;
     }
 #endif
@@ -1545,10 +1693,11 @@ static void protocol_worker_task(void *arg) {
 #endif
       continue;
     }
+    uint64_t protocol_started_us = (uint64_t)esp_timer_get_time();
     /* Retired ordinary native JSON must not reach debug/trace/state dispatch. */
     if (request.send_line == pet_p4_native_usb_send_json_line
         && !pet_p4_native_usb_route_current(request.reply_ctx)) {
-      free(request.line); continue;
+      free(request.line); release_protocol_memory(request.charged_bytes); continue;
     }
 #if PET_P4_QUERY_REPLY_TRACE
     uint64_t query_begin=(uint64_t)esp_timer_get_time();
@@ -1650,6 +1799,13 @@ static void protocol_worker_task(void *arg) {
 #endif
     }
     free(request.line);
+    uint32_t waited_us = pet_protocol_duration(protocol_started_us - request.enqueued_us);
+    uint32_t handled_us = pet_protocol_duration((uint64_t)esp_timer_get_time() - protocol_started_us);
+    portENTER_CRITICAL(&g_protocol_budget_lock);
+    pet_protocol_budget_release(&g_protocol_budget, request.charged_bytes);
+    if (waited_us > g_protocol_budget.max_wait_us) g_protocol_budget.max_wait_us = waited_us;
+    if (handled_us > g_protocol_budget.max_handle_us) g_protocol_budget.max_handle_us = handled_us;
+    portEXIT_CRITICAL(&g_protocol_budget_lock);
   }
 }
 
@@ -1803,7 +1959,13 @@ static esp_err_t init_uart(void) {
     0
   );
   if (err == ESP_ERR_INVALID_STATE) return ESP_OK;
-  return err;
+  if (err != ESP_OK) return err;
+  // At 4 Mbaud the default 120-byte trigger leaves only 20 us before
+  // a 128-byte FIFO overflows. Service sustained bursts earlier so LCD and
+  // audio interrupts can coexist with PC-to-device playback.
+  if (PET_P4_UART_BAUD >= 2000000)
+    return uart_set_rx_full_threshold(PET_P4_UART_NUM, 32);
+  return ESP_OK;
 }
 
 static void usb_rx_task(void *arg) {
@@ -1811,6 +1973,7 @@ static void usb_rx_task(void *arg) {
   uint8_t buf[512];
   bool raw_mode = false;
   while (true) {
+    pet_p4_wdt_deadlock_feed(PET_DEADLOCK_USB_RX);
     int len = usb_serial_jtag_read_bytes(buf, sizeof(buf), pdMS_TO_TICKS(20));
     if (len >= 0) mark_rx_healthy(true);
     if (len > 0) {
@@ -1836,6 +1999,7 @@ static void uart_rx_task(void *arg) {
   uint8_t buf[PET_P4_UART_READ_CHUNK_BYTES];
   bool raw_mode = false;
   while (true) {
+    pet_p4_wdt_deadlock_feed(PET_DEADLOCK_UART_RX);
 #if PET_P4_RESET_PHASE_TRACE
     PET_RESET_PHASE_SCOPE(rx_phase,PET_PHASE_RX_WAIT);
 #endif
@@ -1863,9 +2027,75 @@ static void uart_rx_task(void *arg) {
  * model turn still samples its own now_ms exactly once after the lock. */
 static inline int64_t pet_p4_gap_clock_us(void){return esp_timer_get_time();}
 #endif
+static void boot_catalog_initialize(void) {
+  esp_err_t miniapp_err = pet_p4_miniapp_init();
+  (void)pet_boot_trace_mark(PET_BOOT_CATALOG_DONE);
+  pet_p4_boot_memory_checkpoint(PET_MEMORY_BOOT_CATALOG);
+  if (miniapp_err != ESP_OK && miniapp_err != ESP_ERR_INVALID_STATE) {
+    ESP_LOGW(TAG, "mini-app init failed: %s", esp_err_to_name(miniapp_err));
+  }
+  esp_err_t builtin_sync_err = pet_p4_miniapp_sync_builtins();
+  (void)pet_boot_trace_mark(PET_BOOT_BUILTINS_DONE);
+  pet_p4_boot_memory_checkpoint(PET_MEMORY_BOOT_BUILTINS);
+  if (builtin_sync_err != ESP_OK) {
+    ESP_LOGW(TAG, "built-in component sync failed: %s", esp_err_to_name(builtin_sync_err));
+  }
+}
+
+static void boot_catalog_task(void *arg) {
+#if PET_P4_STORAGE_IO_TRACE_ENABLE
+  if (!pet_storage_io_register(PET_STORAGE_IO_MAIN, xTaskGetCurrentTaskHandle())) {
+    ESP_LOGW(TAG, "boot catalog storage trace unavailable");
+  }
+#endif
+  boot_catalog_initialize();
+  xSemaphoreGive((SemaphoreHandle_t) arg);
+  vTaskDelete(NULL);
+}
+
+static void boot_catalog_with_animation(bool display_ready, unsigned long long *last_render_ms) {
+  SemaphoreHandle_t complete = display_ready ? xSemaphoreCreateBinary() : NULL;
+  if (!complete || pet_p4_storage_worker_create(boot_catalog_task, "p4_boot_catalog",
+        PET_P4_BOOT_CATALOG_TASK_STACK_BYTES, complete, PET_P4_STORAGE_IO_TASK_PRIORITY, NULL) != pdPASS) {
+    if (complete) vSemaphoreDelete(complete);
+    boot_catalog_initialize();
+    return;
+  }
+
+  pet_p4_view_model_t view;
+  pet_p4_build_view_model(&g_state, &view);
+  const uint32_t submitted_before = pet_p4_renderer_metrics().submitted_frames;
+  TickType_t wait_ticks = pdMS_TO_TICKS(PET_P4_MAIN_RENDER_INTERVAL_MS);
+  while (xSemaphoreTake(complete, wait_ticks) != pdTRUE) {
+    *last_render_ms = (unsigned long long) (esp_timer_get_time() / 1000);
+    esp_err_t err = pet_p4_renderer_render(&g_state, &view, *last_render_ms);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "boot animation render failed: %s", esp_err_to_name(err));
+      xSemaphoreTake(complete, portMAX_DELAY);
+      break;
+    }
+    unsigned long long render_ms = (unsigned long long) (esp_timer_get_time() / 1000)
+      - *last_render_ms;
+    wait_ticks = pdMS_TO_TICKS(render_ms < PET_P4_MAIN_RENDER_INTERVAL_MS
+      ? PET_P4_MAIN_RENDER_INTERVAL_MS - render_ms : 1);
+  }
+  vSemaphoreDelete(complete);
+#if PET_P4_STORAGE_IO_TRACE_ENABLE
+  if (!pet_storage_io_register(PET_STORAGE_IO_MAIN, xTaskGetCurrentTaskHandle())) {
+    ESP_LOGW(TAG, "main storage trace unavailable after boot catalog");
+  }
+#endif
+  ESP_LOGI(TAG, "boot animation submitted_frames=%u",
+    (unsigned) (pet_p4_renderer_metrics().submitted_frames - submitted_before));
+}
+
 void app_main(void) {
+#if PET_P4_SYSTEM_WIFI
+  pet_private_storage_init();
+#endif
   pet_boot_dma_link_anchor();
   (void)pet_boot_trace_begin();
+  pet_p4_boot_memory_checkpoint(PET_MEMORY_BOOT_ENTRY);
 #if PET_P4_RESET_PHASE_TRACE
   pet_reset_phase_boot();
 #endif
@@ -1928,9 +2158,17 @@ void app_main(void) {
   }
   esp_err_t device_id_err = build_board_device_id(board_device_id, sizeof(board_device_id));
   (void)pet_boot_trace_mark(PET_BOOT_STORAGE_DONE);
+  pet_p4_boot_memory_checkpoint(PET_MEMORY_BOOT_STORAGE);
   if (device_id_err != ESP_OK) {
     ESP_LOGE(TAG, "base MAC unavailable; using degraded device id: %s", esp_err_to_name(device_id_err));
   }
+  bool factory_board_known =
+      device_id_err == ESP_OK && pet_p4_load_board_identity(board_device_id);
+#if PET_P4_HELLO_ASYNC
+  bool board_probe_needed = device_id_err == ESP_OK && !factory_board_known;
+#else
+  (void)factory_board_known;
+#endif
   pet_p4_state_init(&g_state, board_device_id);
 #if PET_P4_HELLO_ASYNC
   snprintf(g_hello_board_id,sizeof(g_hello_board_id),"%s",board_device_id);
@@ -1959,32 +2197,13 @@ void app_main(void) {
       &g_protocol_task
     ) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM
   );
-  esp_err_t miniapp_err = pet_p4_miniapp_init();
-  (void)pet_boot_trace_mark(PET_BOOT_CATALOG_DONE);
-  if (miniapp_err != ESP_OK && miniapp_err != ESP_ERR_INVALID_STATE) {
-    ESP_LOGW(TAG, "mini-app init failed: %s", esp_err_to_name(miniapp_err));
-  }
-  esp_err_t builtin_sync_err = pet_p4_miniapp_sync_builtins();
-  (void)pet_boot_trace_mark(PET_BOOT_BUILTINS_DONE);
-  if (builtin_sync_err != ESP_OK) {
-    ESP_LOGW(TAG, "built-in component sync failed: %s", esp_err_to_name(builtin_sync_err));
-  }
-  ESP_ERROR_CHECK(pet_p4_miniapp_storage_lane_configure(storage_command_unlock,
-    storage_command_lock, storage_command_owner, NULL) ? ESP_OK : ESP_ERR_INVALID_STATE);
-  ESP_ERROR_CHECK(pet_p4_miniapp_catalog_cursor_configure(enqueue_catalog_cursor,
-    NULL) ? ESP_OK : ESP_ERR_INVALID_STATE);
-  ESP_ERROR_CHECK(pet_p4_protocol_asset_query_io_configure(asset_query_io_begin,
-    asset_query_io_end,NULL) ? ESP_OK : ESP_ERR_INVALID_STATE);
-  ESP_ERROR_CHECK(pet_p4_protocol_asset_query_pending_configure(
-    asset_query_worker_pending,NULL) ? ESP_OK : ESP_ERR_INVALID_STATE);
-  ESP_ERROR_CHECK(pet_p4_miniapp_activation_configure(enqueue_component_activation,
-    NULL) ? ESP_OK : ESP_ERR_INVALID_STATE);
   // Parse the large appearance manifest before any USB/UART receive task can
   // concurrently parse command JSON during boot.
   pet_p4_load_asset_manifest(&g_state);
   // Load cue admission metadata before either receive task can publish audio.
   pet_audio_patch_global_refresh();
   (void)pet_boot_trace_mark(PET_BOOT_MANIFEST_DONE);
+  pet_p4_boot_memory_checkpoint(PET_MEMORY_BOOT_MANIFEST);
   ESP_ERROR_CHECK(init_usb());
   ESP_ERROR_CHECK(init_uart());
   xSemaphoreTake(g_transport_mutex, portMAX_DELAY);
@@ -2014,15 +2233,21 @@ void app_main(void) {
   (void)pet_p4_lcd_scan_i2c(i2c_devices,sizeof(i2c_devices));
 #endif
   (void)pet_boot_trace_mark(PET_BOOT_HARDWARE_DONE);
+  pet_p4_boot_memory_checkpoint(PET_MEMORY_BOOT_AUDIO);
   if (lcd_err == ESP_OK) {
     pet_p4_view_model_t boot_view;
     pet_p4_build_view_model(&g_state, &boot_view);
-    render_err = pet_p4_renderer_render(&g_state, &boot_view, 0);
+    bool pet_visible = false;
+    render_err = pet_p4_renderer_render_boot(&g_state, &boot_view, &pet_visible);
     if (render_err == ESP_OK) {
       render_err = pet_p4_lcd_reveal();
     }
     runtime_render_healthy = render_err == ESP_OK;
-    if(runtime_render_healthy)(void)pet_boot_trace_mark(PET_BOOT_FIRST_FRAME);
+    if (runtime_render_healthy) {
+      (void)pet_boot_trace_mark(PET_BOOT_FIRST_FRAME);
+      pet_p4_boot_memory_checkpoint(PET_MEMORY_BOOT_FIRST_FRAME);
+      ESP_LOGI(TAG, "boot display pet_frame=%u", (unsigned) pet_visible);
+    }
   } else {
     ESP_LOGW(TAG, "LCD init failed, keep USB runtime alive: %s", esp_err_to_name(lcd_err));
   }
@@ -2039,6 +2264,21 @@ void app_main(void) {
     i2c_devices
   );
   transport_send_line(lcd_status, NULL);
+
+  // Show the home screen before verifying the installed component packages.
+  // Keep command and input processing gated on catalog recovery and seeding.
+  boot_catalog_with_animation(runtime_render_healthy, &last_render_ms);
+  pet_p4_renderer_finish_boot();
+  ESP_ERROR_CHECK(pet_p4_miniapp_storage_lane_configure(storage_command_unlock,
+    storage_command_lock, storage_command_owner, NULL) ? ESP_OK : ESP_ERR_INVALID_STATE);
+  ESP_ERROR_CHECK(pet_p4_miniapp_catalog_cursor_configure(enqueue_catalog_cursor,
+    NULL) ? ESP_OK : ESP_ERR_INVALID_STATE);
+  ESP_ERROR_CHECK(pet_p4_protocol_asset_query_io_configure(asset_query_io_begin,
+    asset_query_io_end,NULL) ? ESP_OK : ESP_ERR_INVALID_STATE);
+  ESP_ERROR_CHECK(pet_p4_protocol_asset_query_pending_configure(
+    asset_query_worker_pending,NULL) ? ESP_OK : ESP_ERR_INVALID_STATE);
+  ESP_ERROR_CHECK(pet_p4_miniapp_activation_configure(enqueue_component_activation,
+    NULL) ? ESP_OK : ESP_ERR_INVALID_STATE);
   esp_err_t ota_err = pet_p4_ota_init(&g_state, transport_send_line, NULL);
   if (ota_err != ESP_OK) {
     ESP_LOGW(TAG, "A/B firmware OTA unavailable: %s", esp_err_to_name(ota_err));
@@ -2075,8 +2315,11 @@ void app_main(void) {
   }
   // Optional DSP must not take RAM needed to create display/USB tasks.
   if (pet_p4_audio_ready() && pet_p4_audio_playback_ready()) (void)pet_p4_afe_init();
-  if(usb_rx_created==pdPASS&&uart_rx_created==pdPASS)
+  pet_p4_boot_memory_checkpoint(PET_MEMORY_BOOT_AFE);
+  if(usb_rx_created==pdPASS&&uart_rx_created==pdPASS) {
     (void)pet_boot_trace_mark(PET_BOOT_TRANSPORT_STARTED);
+    pet_p4_boot_memory_checkpoint(PET_MEMORY_BOOT_RX_TASKS);
+  }
   ESP_LOGI(TAG, "Pet Manager ESP-P4 USB Serial/JTAG, USB-UART and native USB runtime ready");
 #if !PET_P4_HELLO_ASYNC
   xSemaphoreTake(g_state_mutex, portMAX_DELAY);
@@ -2102,7 +2345,10 @@ void app_main(void) {
 #if PET_P4_RESET_PHASE_TRACE
   pet_reset_phase_set(PET_PHASE_IDLE);
 #endif
+  pet_p4_boot_memory_checkpoint(PET_MEMORY_BOOT_READY);
+  pet_p4_wdt_deadlock_start();
   while (true) {
+    pet_p4_wdt_deadlock_feed(PET_DEADLOCK_MAIN);
     bool render_frame = false;
     bool render_transfer_frame = false;
     bool firmware_transfer_active = false;
@@ -2147,7 +2393,9 @@ void app_main(void) {
     int64_t loop_miniapp_started_us = pet_p4_gap_clock_us();
 #endif
     pet_p4_miniapp_process(now_ms,!strcmp(g_state.screen_page,"app")&&!pet_p4_conversation_active(&g_state));
-    pet_p4_miniapp_host_process(now_ms,!strcmp(g_state.screen_page,"app")&&!pet_p4_conversation_active(&g_state));
+    pet_p4_miniapp_host_process(now_ms,!strcmp(g_state.screen_page,"app")&&!pet_p4_conversation_active(&g_state),
+        pet_p4_state_host_connected(&g_state,now_ms));
+    pet_p4_wasm_trial_tick(!strcmp(g_state.screen_page,"app")&&!pet_p4_conversation_active(&g_state));
 #if PET_P4_GAP_PEAK_CONTEXT
     uint32_t loop_miniapp_us = (uint32_t)(pet_p4_gap_clock_us() - loop_miniapp_started_us);
 #endif
@@ -2155,6 +2403,10 @@ void app_main(void) {
     pet_reset_phase_leave(&program_phase);
 #endif
     pet_p4_state_process(&g_state, now_ms);
+#if PET_P4_SYSTEM_WIFI
+    pet_settings_maintain(&g_state, pet_p4_conversation_active(&g_state));
+    pet_p4_lan_process(&g_state, now_ms);
+#endif
     pet_p4_touch_process(&g_state, transport_send_line, NULL);
     pet_p4_input_process(&g_state, transport_send_line, NULL);
     pet_p4_miniapp_activation_guard(!strcmp(g_state.screen_page, "components")
@@ -2178,13 +2430,32 @@ void app_main(void) {
       &&!pet_p4_ota_transfer_active()&&!pet_p4_audio_conversation_active(),
       instrument_effect,instrument_ambience);
     pet_bubble_pixels_maintain(now_ms,
-      pet_p4_audio_active() || pet_p4_audio_playback_active() || pet_p4_audio_music_active()
-      || pet_p4_audio_conversation_active() || pet_p4_ota_active() || g_state.asset_transfer_active);
+      pet_p4_audio_active() || pet_p4_audio_playback_active() || pet_p4_audio_stream_playing() || pet_p4_audio_music_active()
+      || pet_p4_ota_active() || g_state.asset_transfer_active, pet_p4_audio_conversation_active());
     pet_bubble_need_t need;
     if(pet_bubble_pixels_next_need(now_ms,&need)){
-      char notice[256];
-      int count=snprintf(notice,sizeof(notice),"{\"topic\":\"ui/text-pixels/need\",\"payload\":{\"boot\":\"%s\",\"client\":\"%s\",\"id\":\"%s\",\"style\":%u,\"page\":%u}}",need.boot,need.client,need.id,need.style,need.page);
-      if(count>0&&(size_t)count<sizeof(notice))transport_send_line(notice,(void*)need.route);
+      /* Send the same bounded text used for the pixel key. */
+      cJSON *notice = cJSON_CreateObject();
+      cJSON *payload = notice ? cJSON_AddObjectToObject(notice, "payload") : NULL;
+      if (payload
+          && cJSON_AddStringToObject(notice, "topic", "ui/text-pixels/need")
+          && cJSON_AddStringToObject(payload, "boot", need.boot)
+          && cJSON_AddStringToObject(payload, "client", need.client)
+          && cJSON_AddStringToObject(payload, "id", need.id)
+          && cJSON_AddStringToObject(payload, "owner", need.owner)
+          && cJSON_AddStringToObject(payload, "version", need.version)
+          && cJSON_AddStringToObject(payload, "text", need.text)
+          && cJSON_AddNumberToObject(payload, "style", need.style)
+          && cJSON_AddBoolToObject(payload, "glyphCells", need.glyph_cells)
+          && cJSON_AddBoolToObject(payload, "bodyMasks", need.body_mask)
+          && cJSON_AddNumberToObject(payload, "page", need.page)) {
+        char *line = cJSON_PrintUnformatted(notice);
+        if (line) {
+          transport_send_line(line, (void *)need.route);
+          cJSON_free(line);
+        }
+      }
+      cJSON_Delete(notice);
     }
     /* p4-sfx-v1 cues: same preconditions as the instrument path, no AEC involvement. */
     pet_p4_miniapp_sfx_process(now_ms,!strcmp(g_state.screen_page,"app")&&!g_state.asset_transfer_active
@@ -2215,6 +2486,15 @@ void app_main(void) {
       pet_p4_renderer_reset_playback();
     }
     transfer_was_active = transfer_active;
+#if PET_P4_HELLO_ASYNC
+    const bool start_board_probe = board_probe_needed
+#if PET_P4_SYSTEM_WIFI
+      && now_ms > 3000ULL
+#else
+      && g_state.desktop_device_id[0]
+#endif
+      && !transfer_active && !pet_p4_miniapp_storage_busy();
+#endif
     if (!g_state.desktop_device_id[0] && now_ms - last_hello_ms > 2000ULL) {
 #if PET_P4_HELLO_ASYNC
       if(enqueue_unsolicited_hello())last_hello_ms=now_ms;
@@ -2253,10 +2533,38 @@ void app_main(void) {
       memcpy(g_render_state, &g_state, sizeof(*g_render_state));
       pet_p4_build_view_model(g_render_state, &render_view);
       render_view.component_loading = pet_p4_miniapp_activation_pending();
+#if PET_P4_SYSTEM_WIFI
+      if (!strcmp(render_view.page, PET_SETTINGS_PAGE)) {
+        static pet_settings_view_t settings_render;
+        pet_settings_snapshot(&settings_render);
+        render_view.settings = &settings_render;
+      }
+#endif
       render_frame = true;
       last_render_ms = now_ms;
     }
     xSemaphoreGive(g_state_mutex);
+#if PET_P4_SYSTEM_WIFI
+    if (now_ms > 3000ULL && !transfer_active) {
+#if PET_P4_HELLO_ASYNC
+      if (atomic_exchange_explicit(&g_hosted_probe_pending, false, memory_order_acq_rel)) {
+        pet_device_wifi_start();
+        (void)pet_device_wifi_request(PET_WIFI_START, NULL, NULL);
+      }
+      static bool wifi_announced;
+#endif
+      if (pet_p4_is_wifi6_hardware()) {
+        pet_device_wifi_start();
+        pet_p4_lan_start();
+#if PET_P4_HELLO_ASYNC
+        if (!wifi_announced) {
+          wifi_announced = true;
+          atomic_store_explicit(&g_board_identity_announcement, true, memory_order_release);
+        }
+#endif
+      }
+    }
+#endif
 #if PET_P4_RESET_PHASE_TRACE
     pet_reset_phase_leave(&main_state_phase);
 #endif
@@ -2267,6 +2575,25 @@ void app_main(void) {
     /* Held time ends after the passive probe cleanup that follows the unlock;
      * that cleanup is microseconds and keeps the original unlock adjacency. */
     pet_p4_renderer_note_loop(loop_wait_us,(uint32_t)(pet_p4_gap_clock_us() - loop_held_started_us),loop_miniapp_us);
+#endif
+#if PET_P4_HELLO_ASYNC
+    if (start_board_probe) {
+      board_probe_needed = false;
+      if (xTaskCreate(board_probe_task, "p4_board_probe", 3072, NULL,
+                      tskIDLE_PRIORITY, NULL) != pdPASS) {
+        pet_p4_finish_board_probe(false);
+        atomic_store_explicit(&g_board_identity_announcement, true, memory_order_release);
+      }
+    }
+    if (!transfer_active &&
+        atomic_load_explicit(&g_board_identity_announcement, memory_order_acquire)) {
+      portENTER_CRITICAL(&g_rx_health_mutex);
+      const bool hello_free = !g_hello_pending;
+      portEXIT_CRITICAL(&g_rx_health_mutex);
+      if (hello_free && enqueue_unsolicited_hello()) {
+        atomic_store_explicit(&g_board_identity_announcement, false, memory_order_release);
+      }
+    }
 #endif
     if (keep_lcd_awake) {
       esp_err_t keepalive_err = pet_p4_lcd_keep_awake();

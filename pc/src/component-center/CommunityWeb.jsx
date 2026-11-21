@@ -9,10 +9,10 @@ import WorkflowConfirm from './WorkflowConfirm.jsx';
 const request=(action,fields={})=>invoke('community_request',{input:{action,...fields}});
 // Development uses a same-origin reverse proxy, never an arbitrary URL parameter.
 const origin=import.meta.env.DEV?location.origin:COMMUNITY_ORIGIN;
-export default function CommunityWeb({view='discover',localItems,inventory,onImported,onOpenLocal}){
+export default function CommunityWeb({view='discover',localItems,inventory,deviceInstallTargetKey,onImported,onOpenLocal}){
   const frame=useRef(null),current=useRef(null),confirmation=useRef(null),[confirm,setConfirm]=useState(null);
   const [ready,setReady]=useState(false),[failed,setFailed]=useState(false),[revision,setRevision]=useState(0),[dirty,setDirty]=useState(false),[busy,setBusy]=useState(false);
-  current.current={localItems,inventory,onImported,onOpenLocal};
+  current.current={localItems,inventory,deviceInstallTargetKey,onImported,onOpenLocal};
   useExitProtection(busy?'社区下载或提交尚未完成':dirty?'社区评论或昵称尚未保存':'');
   useEffect(()=>{
     let alive=true,initialized=false,activeWrites=0;const channel=crypto.randomUUID(),inflight=new Set(),done=new Set();
@@ -28,9 +28,12 @@ export default function CommunityWeb({view='discover',localItems,inventory,onImp
       if(action==='configure'){const item=current.current.localItems.find(x=>x.id===fields.id&&!x.isDeviceOnly);if(!item)throw Error('请先下载组件');current.current.onOpenLocal(item);return {ok:true};}
       if(action==='download'){
         const work=await request('detail',fields),state=await status(fields.id);if(state.blocked)throw Error(state.downloadLabel);
-        const accepted=await new Promise(resolve=>{confirmation.current=resolve;setConfirm(work);});confirmation.current=null;setConfirm(null);
-        if(!accepted||!alive)throw Error('已取消下载，未修改本机或设备');
-        const result=await request('download',{...fields,expectedContentHash:work.contentHash});await current.current.onImported(result.entry);return {ok:true};
+        const targetKey=current.current.deviceInstallTargetKey;
+        const choice=await new Promise(resolve=>{confirmation.current=resolve;setConfirm({work,targetKey});});confirmation.current=null;setConfirm(null);
+        if(!choice||!alive)throw Error('已取消下载，未修改本机或设备');
+        const result=await request('download',{...fields,expectedContentHash:work.contentHash});
+        if(alive)await current.current.onImported(result.entry,choice==='install'?targetKey:null);
+        return {ok:true};
       }
       if(action==='comment')return request('comment',{...fields,name:readCommentIdentity(commentStorage()).displayName});
       return request(action,fields);
@@ -57,6 +60,10 @@ export default function CommunityWeb({view='discover',localItems,inventory,onImp
   return <section className="community-web" aria-label={view==='favorites'?'我的收藏':'社区广场'}>
     {!ready&&<div className="community-web-loading" role="status">{failed?'社区页面暂时未能加载；本机组件不受影响。':'正在加载社区网页…'}{failed&&<button onClick={()=>setRevision(x=>x+1)}>重新连接</button>}</div>}
     <iframe key={`${view}:${revision}`} ref={frame} src={`${origin}/community/#${view}`} title="哈基米社区网页" sandbox="allow-scripts allow-same-origin allow-forms" referrerPolicy="no-referrer" onError={()=>setFailed(true)}/>
-    {confirm&&<WorkflowConfirm title="下载社区组件" description={`将从社区下载「${confirm.name}」${confirm.version}，校验后加入本机组件库。不会自动安装到设备，也不会开放本机文件或设备控制权限。`} confirmLabel="确认下载" cancelLabel="取消下载" onCancel={()=>confirmation.current?.(false)} onConfirm={()=>confirmation.current?.(true)}/>}
+    {confirm&&<WorkflowConfirm title="下载社区组件"
+      description={`下载「${confirm.work.name}」${confirm.work.version}，校验通过后显示在「我的组件」顶部。`}
+      confirmLabel={confirm.targetKey?"仅下载":"确认下载"} cancelLabel="取消"
+      onCancel={()=>confirmation.current?.(null)} onConfirm={()=>confirmation.current?.('download')}
+      extraAction={confirm.targetKey&&{label:"下载并安装到设备",onClick:()=>confirmation.current?.('install')}}/>}
   </section>;
 }

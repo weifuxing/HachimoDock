@@ -21,7 +21,7 @@ import {
 } from "./lib/avatar-pipeline/pipeline-defaults.js";
 import {
   DEFAULT_ADVANCED,
-  DEFAULT_PROVIDER_ID,
+  defaultGenerationProvider,
   VIDEO_PROVIDERS,
   VOLCENGINE_BASE_URL,
   VOLCENGINE_THINKING_MODEL,
@@ -36,6 +36,7 @@ import {
 import HelpTooltip from "./HelpTooltip.jsx";
 import { VideoModelSelect, VideoGenerationSettings } from "./VideoGenerationSettings.jsx";
 import TextModelSelect from "./TextModelSelect.jsx";
+import KlingVideoSettings from "./KlingVideoSettings.jsx";
 import ImageModelSelect from "./ImageModelSelect.jsx";
 import useReferenceImageImport from "./useReferenceImageImport.js";
 import { discoverDefaultVideoModel } from "./lib/avatar-pipeline/video-models.js";
@@ -66,7 +67,7 @@ export default function CustomAvatarWizard({ onExit, onOpenApiSettings }) {
   const previewImageModel = useRef("");
   if(!previewController.current)previewController.current=createReferencePreviewController(setReferencePreview);
 
-  const [providerId, setProviderId] = useState(DEFAULT_PROVIDER_ID);
+  const [providerId, setProviderId] = useState(defaultGenerationProvider);
   const provider = useMemo(
     () => VIDEO_PROVIDERS.find((item) => item.id === providerId) || VIDEO_PROVIDERS[0],
     [providerId],
@@ -74,8 +75,6 @@ export default function CustomAvatarWizard({ onExit, onOpenApiSettings }) {
   const isVolcengine = providerId === "volcengine";
 
   const [apiKey, setApiKey] = useState("");
-  const [accessKey, setAccessKey] = useState("");
-  const [secretKey, setSecretKey] = useState("");
   const [baseUrl, setBaseUrl] = useState(provider.baseUrl);
   const [model, setModel] = useState(provider.models[0] || "");
   const [thinkingModel, setThinkingModel] = useState("");
@@ -84,12 +83,13 @@ export default function CustomAvatarWizard({ onExit, onOpenApiSettings }) {
   const [openaiCompat, setOpenaiCompat] = useState(true);
   const [advanced, setAdvanced] = useState({ ...DEFAULT_ADVANCED });
   const [removeBg, setRemoveBg] = useState(true);
+  const processBackground = removeBg && (providerId !== "kling" || Boolean(loadArkImageConfig().apiKey));
   const [manualReview, setManualReview] = useState(false);
   const [fastGeneration, setFastGeneration] = useState(true);
   const [videoParameters, setVideoParameters] = useState({});
   const [modelDiscovery, setModelDiscovery] = useState({ loading: false, error: "" });
   const [modelRetry, setModelRetry] = useState(0);
-  useEffect(()=>{previewController.current.invalidate();return ()=>previewController.current.invalidate();},[file,styleDescription,removeBg,apiKey,providerId,fastGeneration,imageModel]);
+  useEffect(()=>{previewController.current.invalidate();return ()=>previewController.current.invalidate();},[file,styleDescription,processBackground,apiKey,providerId,fastGeneration,imageModel]);
   const validPreview=referencePreview.result?.source===file && referencePreview.result?.style===normalizeStyleDescription(styleDescription)
     ? referencePreview.result : null;
   const handleStylePreview=()=>previewController.current.run({imageFile:file,styleDescription,
@@ -137,8 +137,6 @@ export default function CustomAvatarWizard({ onExit, onOpenApiSettings }) {
       previewController.current.invalidate();
     }
     setApiKey(saved.apiKey);
-    setAccessKey(saved.accessKey);
-    setSecretKey(saved.secretKey);
     setBaseUrl(saved.baseUrl);
     setModel(saved.model);
     setThinkingModel(saved.thinkingModel);
@@ -204,14 +202,12 @@ export default function CustomAvatarWizard({ onExit, onOpenApiSettings }) {
 
   const canAdvanceFromStep1 = Boolean(file);
   const generationReadyIssue = useMemo(() => {
-    if (!manualReview && !isVolcengine) return "此服务暂不支持自动视觉检查，请在高级设置开启逐步确认模式。";
+    if (!manualReview && providerId === "custom") return "此服务暂不支持自动视觉检查，请在高级设置开启逐步确认模式。";
     if (providerId === "kling") {
-      if (!accessKey.trim() || !secretKey.trim()) {
-        return "请先在 API 配置中保存 Kling Access Key 和 Secret Key。";
+      if (!apiKey.trim()) {
+        return "请先在 API 配置中保存可灵 AI 的 API Key。";
       }
-      if (!baseUrl.trim() || !model.trim()) {
-        return "请先填写接口地址和视频生成模型。";
-      }
+      if (!model.trim()) return "请先选择可灵视频生成模型。";
       return "";
     }
 
@@ -223,15 +219,13 @@ export default function CustomAvatarWizard({ onExit, onOpenApiSettings }) {
     if (!apiKey.trim()) return "请先在 API 配置中保存当前服务的 API Key。";
     if (!baseUrl.trim() || !model.trim()) return "请先填写接口地址和视频生成模型。";
     return "";
-  }, [providerId, accessKey, secretKey, apiKey, baseUrl, model, isVolcengine, manualReview, modelDiscovery]);
+  }, [providerId, apiKey, baseUrl, model, isVolcengine, manualReview, modelDiscovery]);
 
   const canStartGenerate = !generationReadyIssue;
 
   const persistConfig = useCallback(() => {
     return saveProviderConfig(providerId, {
       apiKey,
-      accessKey,
-      secretKey,
       baseUrl,
       model,
       thinkingModel,
@@ -240,7 +234,7 @@ export default function CustomAvatarWizard({ onExit, onOpenApiSettings }) {
       videoParameters,
       advanced,
     });
-  }, [providerId, apiKey, accessKey, secretKey, baseUrl, model, thinkingModel, imageModel, fastGeneration, videoParameters, advanced]);
+  }, [providerId, apiKey, baseUrl, model, thinkingModel, imageModel, fastGeneration, videoParameters, advanced]);
 
   const handleStartGenerate = useCallback(async () => {
     if (!file || startingRef.current || referencePreview.busy) return;
@@ -265,14 +259,12 @@ export default function CustomAvatarWizard({ onExit, onOpenApiSettings }) {
     const providerConfig = {
       provider: providerId,
       apiKey,
-      accessKey,
-      secretKey,
       baseUrl: isVolcengine ? VOLCENGINE_BASE_URL : baseUrl,
       model: trimmedModel,
       imageEdit: loadArkImageConfig(),
       thinkingModel: thinkingModel.trim() || (isVolcengine ? VOLCENGINE_THINKING_MODEL : trimmedModel),
       fastGeneration,
-      ...(isVolcengine ? videoParameters : {}),
+      ...(providerId !== "custom" ? videoParameters : {}),
       advanced:
         providerId === "custom"
           ? {
@@ -291,8 +283,8 @@ export default function CustomAvatarWizard({ onExit, onOpenApiSettings }) {
         styleDescription:normalizeStyleDescription(styleDescription),
         referencePreview:validPreview ? {bytes:validPreview.bytes,mime:validPreview.mime,base64:validPreview.base64,dataUrl:validPreview.dataUrl,filename:validPreview.filename,master:validPreview.master} : null,
         providerConfig,
-        skipProcessing: !removeBg,
-        manualReview,
+        skipProcessing: !processBackground,
+        manualReview: manualReview || providerId === "kling",
       });
     } catch (error) {
       startingRef.current = false;
@@ -313,8 +305,6 @@ export default function CustomAvatarWizard({ onExit, onOpenApiSettings }) {
     thinkingModel,
     persistConfig,
     apiKey,
-    accessKey,
-    secretKey,
     baseUrl,
     model,
     fastGeneration,
@@ -326,7 +316,7 @@ export default function CustomAvatarWizard({ onExit, onOpenApiSettings }) {
     styleDescription,
     validPreview,
     referencePreview.busy,
-    removeBg,
+    processBackground,
     manualReview,
     onExit,
   ]);
@@ -374,21 +364,21 @@ export default function CustomAvatarWizard({ onExit, onOpenApiSettings }) {
             onCancel={onExit}
             canAdvance={canAdvanceFromStep1 && canStartGenerate && !taskRunning && !starting && !referencePreview.busy}
             title="选一张完整人物或角色图，自动生成整套动画"
-            nextLabel={starting ? "正在准备…" : "一键生成整套 · 11 段"}
+            nextLabel={starting ? "正在准备…" : providerId === "kling" ? "确认参考图并生成试片" : "一键生成整套 · 11 段"}
             onNext={handleStartGenerate}
           >
             <ReferenceStyleEditor value={styleDescription} onChange={setStyleDescription}
               preview={{...referencePreview,result:validPreview}} onPreview={handleStylePreview}
               onCancel={()=>previewController.current.invalidate()}
-              disabled={!file || !removeBg || taskRunning || starting}
-              processingEnabled={removeBg}/>
-            <p className="muted small">默认自动清理主体并检查参考图，再为 11 个动作分别生成不同的起始姿势图片，检查后生成对应动画，不需要中途确认。会产生参考图、每个动作起始图、检查和视频费用；已有结果自动复用。请保持客户端运行，完成后可一键应用到设备。</p>
-            <p className="muted small">支持人物、动物、玩偶和机器人。留空使用默认风格；预览可选，生成动画时会复用当前预览图片。保留角色服装、配饰及自身肢体，移除背景及其他人物。</p>
-            <p className="muted small">{manualReview ? "当前：逐步确认模式" : "当前：全自动模式"} · {removeBg ? "完整主体清理已开启" : "使用原图，未清理背景"}</p>
+              disabled={!file || !processBackground || taskRunning || starting}
+              processingEnabled={processBackground}/>
+            {isVolcengine && <p className="muted small">默认自动清理主体并检查参考图，再为 11 个动作分别生成不同的起始姿势图片，检查后生成对应动画，不需要中途确认。会产生参考图、每个动作起始图、检查和视频费用；已有结果自动复用。请保持客户端运行，完成后可一键应用到设备。</p>}
+            <p className="muted small">支持人物、动物、玩偶和机器人。留空使用默认风格；开启主体清理后可预览，生成时会复用预览结果。</p>
+            <p className="muted small">{manualReview || providerId === "kling" ? "当前：逐步确认模式" : "当前：全自动模式"} · {processBackground ? "完整主体清理已开启" : "使用原图，未清理背景"}</p>
             {generationReadyIssue && <p role="alert">{generationReadyIssue}</p>}
             {isVolcengine && apiKey.trim() && !model.trim() && modelDiscovery.error && !modelDiscovery.loading &&
               <button type="button" className="btn-secondary" onClick={() => setModelRetry(value => value + 1)}>重新加载视频模型</button>}
-            {isVolcengine && model.trim() && <p className="muted small">视频模型：{model}</p>}
+            <p className="muted small">视频生成服务：{provider.label}{model.trim() ? ` · ${model}` : ""}</p>
             {submitError && <p role="alert">{submitError}</p>}
             <button type="button" className="btn-secondary" onClick={()=>setStep(1)}>高级设置 / 模型与逐步确认</button>
             {generationReadyIssue && <button type="button" className="btn-ghost" onClick={onOpenApiSettings}>前往 API 配置</button>}
@@ -396,17 +386,13 @@ export default function CustomAvatarWizard({ onExit, onOpenApiSettings }) {
         )}
 
         {step === 1 && (<>
-          <label className="row"><input type="checkbox" checked={manualReview} onChange={e=>setManualReview(e.target.checked)}/>逐步确认参考图和试片（默认关闭）</label>
+          {providerId !== "kling" && <label className="row"><input type="checkbox" checked={manualReview} onChange={e=>setManualReview(e.target.checked)}/>逐步确认参考图和试片（默认关闭）</label>}
           <AvatarWizardStep2
             apiKey={apiKey}
             videoParameters={videoParameters}
             onVideoParameters={setVideoParameters}
             providerId={providerId}
-            credentialConfigured={providerCredentialsConfigured(providerId, {
-              apiKey,
-              accessKey,
-              secretKey,
-            })}
+            credentialConfigured={providerCredentialsConfigured(providerId, { apiKey })}
             onOpenApiSettings={onOpenApiSettings}
             baseUrl={baseUrl}
             onBaseUrl={setBaseUrl}
@@ -426,7 +412,7 @@ export default function CustomAvatarWizard({ onExit, onOpenApiSettings }) {
             canStart={canStartGenerate && !taskRunning && !starting && !referencePreview.busy}
             generationReadyIssue={generationReadyIssue}
             submitError={submitError}
-            removeBg={removeBg}
+            removeBg={processBackground}
             onRemoveBg={setRemoveBg}
             fastGeneration={fastGeneration}
             onFastGeneration={setFastGeneration}
@@ -637,7 +623,7 @@ export function AvatarWizardStep2({
           <small>
             {credentialConfigured
               ? `${provider.label} 凭据已从统一配置读取`
-              : `请先在 API 配置中补充${isKling ? " Access Key 和 Secret Key" : " API Key"}`}
+              : `请先在 API 配置中补充 API Key`}
           </small>
         </span>
         <button type="button" className="btn-secondary btn-sm" onClick={onOpenApiSettings}>
@@ -645,7 +631,7 @@ export function AvatarWizardStep2({
         </button>
       </div>
 
-      {!isVolcengine && (
+      {isCustom && (
         <FieldWithHelp label="Base URL" help={HELP_TEXT.baseUrl}>
           <input
             className="field-input"
@@ -655,7 +641,7 @@ export function AvatarWizardStep2({
         </FieldWithHelp>
       )}
 
-      <FieldWithHelp label="视频生成模型" help={HELP_TEXT.model}>
+      {!isKling && <FieldWithHelp label="视频生成模型" help={HELP_TEXT.model}>
         {isVolcengine ? (
           <VideoModelSelect apiKey={apiKey} baseUrl={baseUrl}
             model={model} onModel={onModel} onReady={setModelReady} />
@@ -675,7 +661,8 @@ export function AvatarWizardStep2({
             onChange={(event) => onModel(event.target.value)}
           />
         )}
-      </FieldWithHelp>
+      </FieldWithHelp>}
+      {isKling && <KlingVideoSettings model={model} onModel={onModel} value={videoParameters} onChange={onVideoParameters} />}
 
       {isVolcengine && <FieldWithHelp label="图像理解 / 提示词模型" help="默认使用 Lite；可主动选择 2.1 Pro。不会在失败后自动换模型。">
         <TextModelSelect vision label="图像理解模型" value={thinkingModel || ""} onChange={onThinkingModel}
@@ -725,7 +712,7 @@ export function AvatarWizardStep2({
         </>
       )}
 
-      <label className="row" style={{ display: "flex", gap: 8, alignItems: "center", margin: "12px 0 4px" }}>
+      {(!isKling || loadArkImageConfig().apiKey) && <label className="row" style={{ display: "flex", gap: 8, alignItems: "center", margin: "12px 0 4px" }}>
         <input
           type="checkbox"
           checked={removeBg}
@@ -734,7 +721,8 @@ export function AvatarWizardStep2({
         <span>
           提取完整宠物主体（默认开启）：移除真人手、背景及所有杂物，保留宠物自身肢体和部件，置于纯黑背景。会产生图片处理费用；处理失败会停止，不自动改用原图。
         </span>
-      </label>
+      </label>}
+      {isKling && !loadArkImageConfig().apiKey && <p className="muted small">可灵使用原图和内置动作提示词。若需要清理背景，可另行配置火山引擎图片处理。</p>}
       {!removeBg && <p role="alert" className="muted small">你已关闭主体清理：原图中的手、桌面、人物和杂物可能进入视频。仅当原图已经干净且宠物完整时使用；下一步仍需确认参考图。</p>}
       <label className="row" style={{ display: "flex", gap: 8, alignItems: "center", margin: "8px 0 4px" }}>
         <input
@@ -744,7 +732,7 @@ export function AvatarWizardStep2({
         />
         <span>
           快速生成模式：开启背景处理时合成黑底 4:3 参考帧，分辨率约 {FAST_VIDEO_GENERATION_PROFILE.imageMaxDimension}x{FAST_REFERENCE_HEIGHT}；关闭时保留原图。
-          默认使用 5 秒低清视频，视频参数可单独调整。
+          {isVolcengine && "默认使用 5 秒低清视频，视频参数可单独调整。"}
         </span>
       </label>
 

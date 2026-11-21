@@ -349,6 +349,14 @@ test("bridge restart failure reports the committed assignment rather than replay
   assert.equal(f.storage.get(ACTIVE_APPEARANCE_KEY), "new-avatar");
 });
 
+test("an unhealthy bridge response preserves the submitted USB assignment", async t => {
+  const f = fixture(t, { bridge: { running: false } });
+  await assert.rejects(() => f.run(), error => error.committedAssignment?.agentId === "claude-code");
+  assert.equal(f.count("dispatch_remote_cli_binding"), 1);
+  assert.equal(f.count("ensure_bridge_runtime"), 1);
+  assert.equal(f.storage.get(ACTIVE_APPEARANCE_KEY), "new-avatar");
+});
+
 
 test("follow carries the pre-transfer connection and never adopts a reconnected native generation", async t => {
   let nativeGeneration = USB.connectionId, received;
@@ -394,4 +402,11 @@ test("video capacity refusal is explicit and cannot commit a follow switch",asyn
  const f=fixture(t,{sync:{ok:false,error:"APPEARANCE_NOT_SUBMITTED: P4 appearance videos require 17972330 bytes but the custom slot only has 10481664 bytes"}});
  await assert.rejects(f.run(),e=>e.code==='appearance-capacity-exceeded'&&e.outcome==='not_submitted'&&e.message.includes('可用空间'));
  assert.equal(f.count('usb_sync_appearance'),1);noCommit(f);
+});
+
+test("a failed slot preflight explains the wait and never commits the switch", async t => {
+ const f = fixture(t, {sync:{ok:false,error:"APPEARANCE_NOT_SUBMITTED: appearance_slot_query_busy"}});
+ await assert.rejects(f.run(), error => error.outcome === "not_submitted" && /存储操作/.test(error.message));
+ assert.equal(f.count("usb_sync_appearance"), 1);
+ noCommit(f);
 });

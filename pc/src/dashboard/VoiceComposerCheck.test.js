@@ -83,12 +83,13 @@ test("readiness check is explicit and restricted to local UI, with no draft cont
 test("diagnostic build skips all automatic USB, credentials, audio and shared-runtime shutdown", () => {
   const lib=read("../../src-tauri/src/lib.rs");
   const start=lib.split("pub fn run() {")[1];
-  assert.match(start, /if !cfg!\(feature = "composer-diagnostic"\) \{[\s\S]*start_usb_host_heartbeat/);
   const setup=start.split(".setup(move |app| {")[1].split("desktop_window::fit")[0];
-  assert.match(setup, /cfg!\(feature = "composer-diagnostic"\)/);
-  assert.match(setup, /return Ok\(\(\)\)/);
-  assert.doesNotMatch(setup, /configure_storage|start_usb|load\(/);
-  const exit=start.split("app.run(|app_handle, event| {")[1];
+  const guard=setup.indexOf('if cfg!(feature = "composer-diagnostic") {');
+  const earlyReturn=setup.indexOf("return Ok(());",guard);
+  const heartbeat=setup.indexOf("start_usb_host_heartbeat");
+  assert.ok(guard>=0 && earlyReturn>guard && heartbeat>earlyReturn);
+  assert.doesNotMatch(setup.slice(0,earlyReturn), /configure_storage|start_usb|load\(/);
+  const exit=start.split("app.run(move |app_handle, event| {")[1];
   assert.match(exit, /if cfg!\(feature = "composer-diagnostic"\) \{ return; \}/);
   assert.match(read("composer-diagnostic.jsx"), /不运行尚未证实的候选修复/);
 });

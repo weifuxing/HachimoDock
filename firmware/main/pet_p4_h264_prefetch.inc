@@ -5,6 +5,12 @@
 #if PET_P4_H264_PREFETCH
 static char g_h264_presented_path[80];
 static uint64_t g_h264_first_presented_ms;
+static uint64_t g_h264_selection_ms;
+static bool g_h264_tail_confirmed;
+#if PET_P4_CONVERSATION_VIDEO
+static uint64_t g_h264_last_ptt_offer_us;
+#define PET_P4_PTT_VIDEO_INTERVAL_US 125000ULL
+#endif
 #if PET_P4_H264_WORKER_PACK
 /* Main/render-mutex owner only. The pin exists solely within one render call;
  * unlike QUEUED, this descriptor is never visible to the native worker. */
@@ -131,7 +137,11 @@ static bool h264_prefetch_offer(pet_p4_asset_cache_entry_t *source,const char *p
   /* This lease admits only decode of a finished, pinned PSRAM source on the
    * existing single worker. No file/cache allocation is moved into audio. */
   kind=PET_RESOURCE_CACHED_VIDEO; /* NULL-source jobs only close the codec. */
-  audio_blocked=audio_blocked&&(!pet_p4_audio_conversation_video_ready()||pet_p4_audio_music_active());
+  bool ptt=pet_p4_audio_ptt_video_ready();
+  audio_blocked=audio_blocked&&(!(pet_p4_audio_conversation_video_ready()||ptt)||pet_p4_audio_music_active());
+  if(!ptt)g_h264_last_ptt_offer_us=0;
+  if(ptt&&source&&g_h264_last_ptt_offer_us
+      &&next.enqueued_us-g_h264_last_ptt_offer_us<PET_P4_PTT_VIDEO_INTERVAL_US)return false;
 #endif
   if(!room||!g_asset_prepare_task||audio_blocked)return false;
   if(pet_resources_device_owner_open(PET_RESOURCE_MASK(kind),&next.owner)!=PET_RESOURCE_OK)return false;
@@ -156,6 +166,9 @@ static bool h264_prefetch_offer(pet_p4_asset_cache_entry_t *source,const char *p
   portENTER_CRITICAL(&g_metrics_lock);
   pet_render_counter_increment(&g_metrics.prefetch.jobs);
   portEXIT_CRITICAL(&g_metrics_lock);
+#if PET_P4_CONVERSATION_VIDEO
+  if(ptt&&source)g_h264_last_ptt_offer_us=next.enqueued_us;
+#endif
   xTaskNotifyGive(g_asset_prepare_task);return true;
 }
 
@@ -197,6 +210,7 @@ static void h264_frame_offer_end(bool submit){
 static bool h264_prefetch_reset(void){
   g_h264_packed_current=(pet_h264_packed_view_t){0};g_h264_presented_frame=-1;
   g_h264_first_presented_ms=0;g_h264_presented_path[0]=0;
+  g_h264_tail_confirmed=false;
   portENTER_CRITICAL(&g_asset_prepare_mux);
   h264_prefetch_cancel_locked();
   pet_resource_owner_t owner=g_h264_prefetch_job.owner;
@@ -224,6 +238,9 @@ static bool h264_prefetch_worker(void){
   source.owner=job.owner;source.prepare_lease=job.lease;
   pet_p4_render_trace_t trace={0}; /* Job-local, never the current main frame. */
   bool ok=execute&&job.source&&asset_prepare_current(&source);
+#if PET_P4_SYSTEM_WIFI
+  pet_p4_lcd_video_worker(ok);
+#endif
   if(ok&&job.restart)ok=start_h264_decoder_role(job.path,source.bytes,source.size,&trace,&source);
   if(ok)ok=decode_next_h264_frame_role(job.width,job.height,false,&job.decode_us,&source);
   bool authority=job.source&&asset_prepare_current(&source);
@@ -240,6 +257,9 @@ static bool h264_prefetch_worker(void){
    * concurrent cancellation may leave this codec allocated until next cleanup,
    * but can never deliver/reuse its output or release a physical reader early. */
   if(!ok)reset_h264_decoder();
+#if PET_P4_SYSTEM_WIFI
+  pet_p4_lcd_video_worker(false);
+#endif
   bool lease_finished_current=pet_resources_device_finish(job.lease)==PET_RESOURCE_FINISH_CURRENT;
   ok=lease_finished_current&&ok;
   pet_resources_device_revoke(job.owner);
@@ -285,15 +305,17 @@ static bool render_h264_asset_frame_async(const pet_p4_asset_selection_t *asset,
   portENTER_CRITICAL(&g_asset_prepare_mux);
   bool reset=g_h264_reset_requested;
   portEXIT_CRITICAL(&g_asset_prepare_mux);
-  if(reset||strcmp(path,g_h264_presented_path)){
+  if(reset||strcmp(path,g_h264_presented_path)
+      ||(asset->play_once&&g_h264_selection_ms!=asset->selection_ms)){
     if(!h264_prefetch_reset()){g_asset_cache_pending=true;return false;}
     snprintf(g_h264_presented_path,sizeof(g_h264_presented_path),"%s",path);
+    g_h264_selection_ms=asset->selection_ms;
   }
   uint64_t now_ms=renderer_monotonic_ms();
   uint64_t elapsed=g_h264_first_presented_ms&&now_ms>=g_h264_first_presented_ms?now_ms-g_h264_first_presented_ms:0;
   int target=(int)((elapsed*(uint64_t)asset->frames)/duration_ms);
   if(target>=asset->frames)target=asset->frames-1;
-  if(elapsed>=duration_ms&&g_h264_presented_frame==asset->frames-1){
+  if(!asset->play_once&&elapsed>=duration_ms&&g_h264_tail_confirmed){
     (void)h264_prefetch_reset();g_asset_cache_pending=true;return false;
   }
   pet_h264_prefetch_job_t ready={0};bool taken=false,failed=false;

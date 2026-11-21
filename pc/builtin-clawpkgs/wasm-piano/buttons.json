@@ -1,0 +1,1 @@
+[{"action":"lab.left","control":"前方摇杆","event":"knob.rotate_ccw","label":"选左边琴键"},{"action":"lab.right","control":"前方摇杆","event":"knob.rotate_cw","label":"选右边琴键"},{"action":"lab.a","control":"SW1","event":"button.sw1.short_press","label":"弹奏选中琴键"},{"action":"lab.b","control":"SW2","event":"button.sw2.short_press","label":"切换高低八度"}]

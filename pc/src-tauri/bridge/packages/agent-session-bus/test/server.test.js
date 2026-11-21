@@ -16,12 +16,13 @@ const path = require("node:path");
 const { createAgentSessionBus, MockAdapter } = require("../src/index");
 const { listClaudeSessions } = require("../src/util/claude-paths");
 
+const authByPort = new Map();
 function silentLog() { return () => {}; }
 
 function jsonRequest(port, method, pathname, body) {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { host: "127.0.0.1", port, method, path: pathname, headers: { "Content-Type": "application/json" } },
+      { host: "127.0.0.1", port, method, path: pathname, headers: { ...authByPort.get(port), "Content-Type": "application/json" } },
       (res) => {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
@@ -42,7 +43,7 @@ function jsonRequest(port, method, pathname, body) {
 function sseRequest(port, method, pathname, body) {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { host: "127.0.0.1", port, method, path: pathname, headers: { "Content-Type": "application/json", Accept: "text/event-stream" } },
+      { host: "127.0.0.1", port, method, path: pathname, headers: { ...authByPort.get(port), "Content-Type": "application/json", Accept: "text/event-stream" } },
       (res) => {
         const events = [];
         let buffer = "";
@@ -83,6 +84,7 @@ async function startBus({ sessionStatusProvider, sessionEventProvider, agentId =
     log: silentLog(),
   });
   const port = await bus.start();
+  authByPort.set(port, bus.authorizationHeaders("control"));
   return { bus, port };
 }
 
@@ -92,7 +94,7 @@ test("GET /agent/health works", async () => {
     const { status, body } = await jsonRequest(port, "GET", "/agent/health");
     assert.equal(status, 200);
     assert.equal(body.ok, true);
-    assert.deepEqual(body.adapters, ["mock"]);
+    assert.deepEqual(body, { ok: true, service: "agent-session-bus" });
   } finally {
     await bus.stop();
   }
@@ -392,6 +394,30 @@ test("GET /agent/sessions includes hook-only desktop sessions", async () => {
   }
 });
 
+test("GET /agent/sessions includes cloud-only Devin sessions", async () => {
+  const { bus, port } = await startBus({
+    agentId: "devin",
+    sessionStatusProvider: () => [{
+      id: "devin:cloud-session-001",
+      state: "working",
+      updatedAt: 34567,
+      title: "Devin 云端任务",
+      displayTitle: "Devin 云端任务",
+      displayContent: "正在处理",
+    }],
+  });
+  try {
+    const { status, body } = await jsonRequest(port, "GET", "/agent/sessions?agentId=devin&limit=5");
+    assert.equal(status, 200);
+    const session = body.sessions.find((item) => item.id === "cloud-session-001");
+    assert.equal(session.state, "working");
+    assert.equal(session.summary, "Devin 云端任务");
+    assert.equal(session.displayContent, "正在处理");
+  } finally {
+    await bus.stop();
+  }
+});
+
 test("GET /agent/sessions never pairs a terminal state with active-only card text", async () => {
   const { bus, port } = await startBus({
     agentId: "claude-code",
@@ -623,6 +649,7 @@ test('POST /agent/inject sessionId="new" forces openNew (skips resolveActive)', 
 
   const bus = createAgentSessionBus({ port: 0, adapters: [adapter], log: silentLog() });
   const port = await bus.start();
+  authByPort.set(port, bus.authorizationHeaders("control"));
   try {
     const { status, events } = await sseRequest(port, "POST", "/agent/inject", {
       agentId: "mock",
@@ -653,6 +680,7 @@ test('POST /agent/inject sessionId="auto" still resumes resolveActive', async ()
 
   const bus = createAgentSessionBus({ port: 0, adapters: [adapter], log: silentLog() });
   const port = await bus.start();
+  authByPort.set(port, bus.authorizationHeaders("control"));
   try {
     const { status, events } = await sseRequest(port, "POST", "/agent/inject", {
       agentId: "mock",
@@ -723,7 +751,7 @@ test("404 on unknown route", async () => {
 function rawRequest(port, method, pathname, headers = {}, body) {
   return new Promise((resolve, reject) => {
     const req = http.request(
-      { host: "127.0.0.1", port, method, path: pathname, headers },
+      { host: "127.0.0.1", port, method, path: pathname, headers: { ...authByPort.get(port), ...headers } },
       (res) => {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));

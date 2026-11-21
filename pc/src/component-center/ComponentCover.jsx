@@ -7,7 +7,9 @@ import './component-cover.css';
 export default function ComponentCover({component,className=''}){
   return <div className={`component-cover ${className}`} data-cover-id={component.id} data-cover-version={component.versionHash||component.version||''}>
     <div className="component-cover__surface" inert="" aria-hidden="true">
-      <DeviceScreenPreview key={`${component.id}:${component.versionHash||component.version||''}`} component={component} cover />
+      {component.coverDataUrl
+        ? <img className="component-cover__image" src={component.coverDataUrl} alt="" />
+        : <DeviceScreenPreview key={`${component.id}:${component.versionHash||component.version||''}`} component={component} cover />}
     </div>
   </div>;
 }

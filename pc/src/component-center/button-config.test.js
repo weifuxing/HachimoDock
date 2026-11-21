@@ -31,7 +31,7 @@ test("the exact shipped v7 board map migrates SW1/SW3 without changing custom ma
     ["button.sw2.long_press", "disabled"],
     ["button.sw2.hold", "disabled"],
     ["button.sw3.short_press", "page_enter"],
-    ["button.sw3.long_press", "disabled"],
+    ["button.sw3.long_press", "system_settings"],
     ["button.sw3.hold", "disabled"],
     ["button.encoder.short_press", "page_enter"],
     ["button.encoder.long_press", "disabled"],

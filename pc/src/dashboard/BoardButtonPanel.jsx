@@ -12,12 +12,15 @@ import React, { useState } from "react";
 import { ChevronDown, UploadCloud, Mic, Usb } from "lucide-react";
 import {
   BUTTON_FUNCTION_OPTIONS,
+  VOICE_KEY_PRESETS,
   DEFAULT_BUTTON_ACTIONS,
   DEFAULT_VOICE_CONFIG,
   actionOptionById,
   buttonControlRowsForRuntime,
 } from "../DeviceDashboard.jsx";
 import Button from "../shell/Button";
+import P4BoardInputMap, { ControlGlyph } from "./P4BoardInputMap.jsx";
+import { decodeBluetoothShortcut } from "../lib/bluetooth-shortcut.js";
 import { buildUsageHelp, friendlyControlLabel } from "../lib/usage-help.js";
 
 const CONTROL_GROUP_META = {
@@ -27,6 +30,10 @@ const CONTROL_GROUP_META = {
   p4_joystick: { label: "摇杆", detail: "四向与中按" },
   legacy_encoder: { label: "前方旋钮", detail: "旋转与按压" },
 };
+
+function defaultVoiceKeyPreset() {
+  return globalThis.navigator?.platform?.startsWith("Mac") ? "mac-ctrl-alt-d" : "win-ctrl";
+}
 
 // Each callout has an (x,y) anchor in the enlarged SVG viewport where the label is drawn.
 const CALLOUT_ANCHORS = {
@@ -90,51 +97,6 @@ function gestureLabel(row, group) {
     || row.label;
 }
 
-function ControlGlyph({ controlId, label, active = false }) {
-  const isJoystick = controlId === "p4_joystick";
-  const isEncoder = controlId === "legacy_encoder";
-  return (
-    <svg
-      className={`board-button-control-glyph${isEncoder || isJoystick ? " is-encoder" : " is-key"}${isJoystick ? " is-joystick" : ""}${active ? " is-active" : ""}`}
-      viewBox="0 0 120 92"
-      role="img"
-      aria-label={`${label} 实体控件示意`}
-    >
-      <rect className="board-button-control-glyph__deck" x="5" y="5" width="110" height="82" rx="22" />
-      {isJoystick ? (
-        <>
-          <circle className="board-button-control-glyph__encoder-shadow" cx="60" cy="49" r="27" />
-          <circle className="board-button-control-glyph__encoder" cx="60" cy="45" r="25" />
-          <circle className="board-button-control-glyph__encoder-cap" cx="60" cy="45" r="15" />
-          <path className="board-button-control-glyph__arrow" d="M60 12 V25 M55 18 L60 12 L65 18" />
-          <path className="board-button-control-glyph__arrow" d="M60 78 V65 M55 72 L60 78 L65 72" />
-          <path className="board-button-control-glyph__arrow" d="M22 45 H36 M28 40 L22 45 L28 50" />
-          <path className="board-button-control-glyph__arrow" d="M98 45 H84 M92 40 L98 45 L92 50" />
-        </>
-      ) : isEncoder ? (
-        <>
-          <path className="board-button-control-glyph__rotation" d="M28 53 A34 34 0 0 1 92 53" />
-          <path className="board-button-control-glyph__arrow" d="M28 53 L25 43 M28 53 L38 50" />
-          <path className="board-button-control-glyph__arrow" d="M92 53 L95 43 M92 53 L82 50" />
-          <circle className="board-button-control-glyph__encoder-shadow" cx="60" cy="47" r="29" />
-          <circle className="board-button-control-glyph__encoder" cx="60" cy="43" r="27" />
-          <circle className="board-button-control-glyph__encoder-cap" cx="60" cy="43" r="18" />
-          <path className="board-button-control-glyph__encoder-mark" d="M60 19 V27" />
-        </>
-      ) : (
-        <>
-          <rect className="board-button-control-glyph__key-shadow" x="32" y="29" width="56" height="46" rx="15" />
-          <rect className="board-button-control-glyph__key" x="32" y="23" width="56" height="46" rx="15" />
-          <path className="board-button-control-glyph__press-mark" d="M49 14 H71 M54 9 L49 14 L54 19 M66 9 L71 14 L66 19" />
-        </>
-      )}
-      <text className="board-button-control-glyph__label" x="60" y={isEncoder || isJoystick ? "49" : "52"} textAnchor="middle">
-        {label}
-      </text>
-    </svg>
-  );
-}
-
 export default function BoardButtonPanel({
   selectedAgentId,
   voiceConfig,
@@ -145,16 +107,29 @@ export default function BoardButtonPanel({
   voiceConfigDirty,
   voiceConfigOtaState,
   usbConnected,
+  wifiConnected = false,
+  wifiSyncAvailable = false,
+  systemSettingsSupported = false,
+  doublePressSupported = false,
+  voiceKeySupported = false,
   selectedTrigger,
   onVoiceConfigChange,
   onApplyVoiceConfig,
 }) {
   const [hoveredButtonId, setHoveredButton] = useState("");
   const triggerId = selectedTrigger?.id || DEFAULT_VOICE_CONFIG.trigger;
-  const controlRows = buttonControlRowsForRuntime(runtime);
+  const controlRows = buttonControlRowsForRuntime(runtime)
+    .filter(row => doublePressSupported || !row.event.endsWith(".double_press"));
   const isP4Runtime = String(runtime || "").toLowerCase() === "esp-p4";
   const controlGroups = groupControlRows(controlRows, isP4Runtime);
   const help = buildUsageHelp(controlRows, buttonActions, voiceConfig?.enabled, voiceConfigDirty);
+  const syncAvailable = usbConnected || wifiSyncAvailable;
+  const syncPending = syncAvailable && voiceConfigOtaState?.pending;
+  const confirmed = syncAvailable && !syncPending && voiceConfigOtaState?.tone === "success";
+  const syncHint = wifiConnected && !wifiSyncAvailable
+    ? (voiceConfigDirty ? "修改已保存在电脑上。" : "当前显示电脑保存的按键配置。") + "普通按键配置需要通过 USB 同步。"
+    : voiceConfigOtaState?.message;
+  const syncTone = wifiConnected && !wifiSyncAvailable ? "warning" : voiceConfigOtaState?.tone || "info";
 
   if (controlRows.length === 0) {
     return (
@@ -176,6 +151,9 @@ export default function BoardButtonPanel({
     }
     if (actionId === "agent_prompt" && !nextValues[row.id]) {
       nextValues[row.id] = row.defaultValue || "继续当前任务。";
+    }
+    if (actionId === "voice_key_forward" && !VOICE_KEY_PRESETS.some(preset => preset.id === nextValues[row.id]) && !decodeBluetoothShortcut(nextValues[row.id])) {
+      nextValues[row.id] = defaultVoiceKeyPreset();
     }
     if (actionId === "voice_ptt" && row.voiceTriggerId) {
       patch.trigger = row.voiceTriggerId;
@@ -202,7 +180,7 @@ export default function BoardButtonPanel({
           <h2>按钮配置</h2>
           <strong>{controlGroups.length} 个控件 <i /> {controlRows.length} 个手势</strong>
           <span className={`board-button-panel__sync-label${voiceConfigDirty ? " is-dirty" : ""}`}>
-            {voiceConfigDirty ? "待同步" : "已同步"}
+            {voiceConfigDirty ? "待同步" : confirmed ? "已同步" : "待核对"}
           </span>
         </div>
         <div className="board-button-panel__toolbar-actions">
@@ -211,10 +189,10 @@ export default function BoardButtonPanel({
             size="medium"
             className={`voice-config-apply-btn${voiceConfigDirty ? " is-dirty" : ""}`}
             onClick={onApplyVoiceConfig}
-            loading={voiceConfigOtaState?.pending}
+            loading={syncPending}
             loadingLabel="正在同步…"
-            disabled={voiceConfigOtaState?.pending || !usbConnected}
-            title={usbConnected ? "通过 USB 将当前映射同步到设备" : "需要 USB 连接设备后同步"}
+            disabled={syncPending || !syncAvailable}
+            title={syncAvailable ? "将当前映射同步到设备" : "当前连接无法同步普通按键"}
           >
             <UploadCloud size={14} />
             同步到设备
@@ -222,18 +200,18 @@ export default function BoardButtonPanel({
         </div>
       </div>
 
-      {voiceConfigOtaState?.message && (
+      {syncHint && (
         <div
-          className={`board-button-panel__hint board-button-panel__hint--${voiceConfigOtaState.tone || "info"}`}
+          className={`board-button-panel__hint board-button-panel__hint--${syncTone}`}
           role="status"
           aria-live="polite"
         >
-          {voiceConfigOtaState.message}
+          {syncHint}
         </div>
       )}
 
       <div className="usage-help">
-        <p>为按键和摇杆选择功能，修改后点击「同步到设备」生效。同一个按键可以分别设置短按和长按。</p>
+        <p>为按键和摇杆选择功能，修改后点击「同步到设备」生效。同一个按键可以分别设置短按和长按。{doublePressSupported && "设置双击后，该键的单击会等待约 280 毫秒。语音长按和组件退出优先。"}</p>
         <details open>
           <summary>常用操作 · 按当前配置显示{voiceConfigDirty ? "（待同步）" : ""}</summary>
           <dl className="usage-help__operations">
@@ -251,72 +229,20 @@ export default function BoardButtonPanel({
       <div className={`board-button-panel__workspace${isP4Runtime ? " board-button-panel__workspace--p4" : ""}`}>
         <section className="board-button-panel__left" aria-label="设备控件导航">
           <div className="board-button-panel__device-stage">
-            <svg
-              className="board-button-map__device board-button-panel__svg"
-              viewBox={isP4Runtime ? "0 0 456 320" : "0 0 560 320"}
-              role="img"
-              aria-label="板端外观和按钮位置示意"
-            >
-              {/* Hit-areas mirror the physical deck and link to the focused editor. */}
-              {isP4Runtime ? (
-                <>
-                  <rect className="board-button-map__body board-button-map__body--p4" x="48" y="20" width="360" height="278" rx="32" />
-                  <rect className="board-button-map__screen-bezel board-button-map__screen-bezel--p4" x="70" y="40" width="316" height="154" rx="20" />
-                  <rect className="board-button-map__screen board-button-map__screen--p4" x="84" y="54" width="288" height="126" rx="10" />
-                  <circle className="board-button-map__screen-status" cx="108" cy="82" r="4" />
-                  <text className="board-button-map__screen-kicker" x="120" y="86">HARDWARE INPUT</text>
-                  <text className="board-button-map__screen-title" x="108" y="128">
-                    12 GESTURES
-                  </text>
-                  <text className="board-button-map__screen-copy" x="108" y="153">
-                    SW1 · SW2 · SW3 · JOYSTICK
-                  </text>
-                  <rect className="board-button-map__control-deck" x="66" y="206" width="324" height="76" rx="22" />
-                  {[
-                    ["p4_sw1", "p4_sw1_short", 84, "SW1"],
-                    ["p4_sw2", "p4_sw2_short", 150, "SW2"],
-                    ["p4_sw3", "p4_sw3_short", 216, "SW3"],
-                  ].map(([controlId, activeActionId, x, label]) => (
-                    <g
-                      key={controlId}
-                      onMouseEnter={() => setHoveredButton(controlId)}
-                      onMouseLeave={() => setHoveredButton("")}
-                      data-button-id={controlId}
-                    >
-                      <rect
-                        className={[
-                          "board-button-map__hardware-key",
-                          controlId === "p4_sw1"
-                            && buttonActions.p4_sw1_long === "voice_ptt"
-                            && voiceConfig.enabled
-                            ? "is-active"
-                            : "",
-                          isControlHovered(controlId) ? "is-hovered" : "",
-                        ].filter(Boolean).join(" ")}
-                        x={x} y="218" width="48" height="48" rx="12"
-                      />
-                      <text className="board-button-map__hardware-key-label" x={x + 24} y="247" textAnchor="middle">
-                        {label}
-                      </text>
-                    </g>
-                  ))}
-                  <circle
-                    className={[
-                      "board-button-map__encoder",
-                      "board-button-map__encoder--p4",
-                    ].filter(Boolean).join(" ")}
-                    cx="328" cy="242" r="32"
-                    onMouseEnter={() => setHoveredButton("p4_joystick")}
-                    onMouseLeave={() => setHoveredButton("")}
-                    data-button-id="p4_joystick"
-                  />
-                  <circle className="board-button-map__encoder-cap" cx="328" cy="242" r="24" />
-                  <text className="board-button-map__encoder-label" x="328" y="246" textAnchor="middle">
-                    摇杆
-                  </text>
-                </>
-              ) : (
-                <>
+            {isP4Runtime ? (
+              <P4BoardInputMap
+                gestureCount={controlRows.length}
+                highlightedControl={controlGroups.find(group => isControlHovered(group.id))?.id}
+                activeControl={buttonActions.p4_sw1_long === "voice_ptt" && voiceConfig.enabled ? "p4_sw1" : ""}
+                onHover={setHoveredButton}
+              />
+            ) : (
+              <svg
+                className="board-button-map__device board-button-panel__svg"
+                viewBox="0 0 560 320"
+                role="img"
+                aria-label="板端外观和按钮位置示意"
+              >
                   <rect className="board-button-map__body" x="72" y="58" width="374" height="200" rx="32" />
                   <rect className="board-button-map__screen-bezel" x="100" y="80" width="198" height="130" rx="18" />
                   <rect className="board-button-map__screen" x="119" y="95" width="160" height="100" rx="8" />
@@ -327,18 +253,17 @@ export default function BoardButtonPanel({
                     onMouseLeave={() => setHoveredButton("")}
                     data-button-id="encoder_button"
                   />
-                </>
-              )}
-              {!isP4Runtime && controlRows.map((row) => [row.id, CALLOUT_PATHS[row.id]]).filter(([, d]) => d).map(([id, d]) => (
-                <path key={id} className={`board-button-map__callout${hoveredButtonId === id ? " is-hovered" : ""}`} d={d} />
-              ))}
-              {!isP4Runtime && controlRows.map((row) => {
-                const anchor = CALLOUT_ANCHORS[row.id];
-                if (!anchor) return null;
-                const action = actionOptionById(buttonActions[row.id] || row.defaultAction);
-                return renderCalloutLabel(row, action, anchor, hoveredButtonId === row.id);
-              })}
-            </svg>
+                {controlRows.map((row) => [row.id, CALLOUT_PATHS[row.id]]).filter(([, d]) => d).map(([id, d]) => (
+                  <path key={id} className={`board-button-map__callout${hoveredButtonId === id ? " is-hovered" : ""}`} d={d} />
+                ))}
+                {controlRows.map((row) => {
+                  const anchor = CALLOUT_ANCHORS[row.id];
+                  if (!anchor) return null;
+                  const action = actionOptionById(buttonActions[row.id] || row.defaultAction);
+                  return renderCalloutLabel(row, action, anchor, hoveredButtonId === row.id);
+                })}
+              </svg>
+            )}
           </div>
         </section>
 
@@ -368,7 +293,8 @@ export default function BoardButtonPanel({
                     <small>
                       {group.id === "p4_joystick"
                         ? "上、下、左、右与中按分别配置"
-                        : "短按、长按分别配置"}
+                        : group.rows.some(row => row.event.endsWith(".double_press"))
+                          ? "短按、双击、长按分别配置" : "短按、长按分别配置"}
                     </small>
                   </span>
                 </div>
@@ -377,6 +303,9 @@ export default function BoardButtonPanel({
                     const currentActionId = buttonActions?.[row.id] || row.defaultAction;
                     const isShortPress = isP4Runtime && row.event.endsWith(".short_press");
                     const allowedOptions = BUTTON_FUNCTION_OPTIONS.filter((option) => {
+                      if (option.id === "system_settings" && !systemSettingsSupported
+                          && currentActionId !== option.id) return false;
+                      if (option.id === "voice_key_forward" && !voiceKeySupported && currentActionId !== option.id) return false;
                       if (option.id === "dsh_interrupt" && selectedAgentId !== "deepseek-harness") return false;
                       return row.actionOptions.includes(option.id)
                         || (isShortPress && option.id === "voice_ptt");
@@ -438,6 +367,29 @@ export default function BoardButtonPanel({
                               aria-hidden="true"
                             />
                           </span>
+                        )}
+                        {row.id === "p4_sw3_long" && currentActionId !== row.defaultAction && (
+                          <div className="board-button-control-field__prompt">
+                            <small>默认动作：打开系统设置</small>
+                            <Button variant="ghost" size="small"
+                              disabled={!systemSettingsSupported || syncPending}
+                              title={systemSettingsSupported
+                                ? "只修改 SW3 长按，同步到设备后生效"
+                                : "需要设备固件支持系统设置"}
+                              onClick={() => onButtonActionChange(row, row.defaultAction)}>
+                              恢复默认：打开系统设置
+                            </Button>
+                          </div>
+                        )}
+                        {currentActionId === "voice_key_forward" && (
+                          <label className="board-button-control-field__prompt">
+                            <span>电脑语音快捷键</span>
+                            <select value={(VOICE_KEY_PRESETS.some(preset => preset.id === buttonValues[row.id]) || decodeBluetoothShortcut(buttonValues[row.id])) ? buttonValues[row.id] : defaultVoiceKeyPreset()}
+                              onChange={event => onButtonValueChange(row, event.target.value)}>
+                              {decodeBluetoothShortcut(buttonValues[row.id]) && <option value={buttonValues[row.id]}>旧版自定义组合键</option>}
+                              {VOICE_KEY_PRESETS.map(preset => <option key={preset.id} value={preset.id}>{preset.label}</option>)}
+                            </select>
+                          </label>
                         )}
                         {currentActionId === "agent_prompt" && (
                           <label className="board-button-control-field__prompt" htmlFor={promptId}>

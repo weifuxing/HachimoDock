@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { loadArkImageConfig, loadProviderConfig, saveProviderConfig, resolveProviderApiKey, initializeProviderConfigs } from "./provider-config.js";
+import { defaultGenerationProvider, loadArkImageConfig, loadProviderConfig, saveProviderConfig, resolveProviderApiKey, initializeProviderConfigs } from "./provider-config.js";
 
 const libDir = dirname(fileURLToPath(import.meta.url));
 
@@ -151,4 +151,33 @@ test("native credential storage roundtrips the configured image model", async ()
     if (previous === undefined) delete globalThis.window;
     else globalThis.window = previous;
   }
+});
+
+test("Kling saves single-key settings and does not reinterpret legacy access keys", () => {
+  let value;
+  const storage = { getItem: () => value, setItem: (_key, saved) => { value = saved; } };
+  saveProviderConfig("kling", { accessKey: "legacy", secretKey: "legacy-secret", model: "kling-v1-5" }, storage);
+  const legacy = loadProviderConfig("kling", storage);
+  assert.equal(legacy.apiKey, "");
+  assert.equal(legacy.needsKlingApiKey, true);
+  assert.equal(legacy.model, "kling-4.0-flash");
+  saveProviderConfig("kling", { apiKey: "new-key", model: "kling-2.6",
+    videoParameters: { duration: 10, resolution: "720p", generateAudio: true, endFrame: true } }, storage);
+  const saved = loadProviderConfig("kling", storage);
+  assert.equal(saved.apiKey, "new-key");
+  assert.equal(saved.baseUrl, "https://api-beijing.klingai.com");
+  assert.equal(saved.needsKlingApiKey, false);
+  assert.equal(saved.model, "kling-2.6");
+  assert.deepEqual(saved.videoParameters, {
+    duration: 10, resolution: "1080p", generateAudio: true, endFrame: false, watermark: false,
+  });
+});
+
+test("new avatars default to Ark when both keys are saved and to Kling when only Kling is saved", () => {
+  const saved = new Map();
+  const storage = { getItem: key => saved.get(key), setItem: (key, value) => saved.set(key, value) };
+  saveProviderConfig("kling", { apiKey: "kling-test-key" }, storage);
+  assert.equal(defaultGenerationProvider(storage), "kling");
+  saveProviderConfig("volcengine", { apiKey: "ark-test-key" }, storage);
+  assert.equal(defaultGenerationProvider(storage), "volcengine");
 });

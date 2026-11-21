@@ -24,7 +24,6 @@ import {
 import { API_CONFIGURATION_UPDATED_EVENT } from "../lib/api-configuration.js";
 import Switch from "../shell/Switch";
 import VoiceComposerCheck from "./VoiceComposerCheck.jsx";
-import { ensureOptionalDshDesktop } from "./DshConnectionPanel.jsx";
 import { composerFailureEvidence, withoutComposerEvidence } from "./composer-failure-evidence.js";
 import UsageHelp from "../UsageHelp.jsx";
 import { useUsageHelp } from "../shell/DeviceContext.jsx";
@@ -168,12 +167,6 @@ export default function VoiceAssistantPanel({
 }) {
   const usageHelp = useUsageHelp();
   const dshTarget = state.selectedAgentId === "deepseek-harness";
-  const optionalDshEnsure = useRef(null);
-  useEffect(() => {
-    if (!dshTarget) { optionalDshEnsure.current = null; return; }
-    // Once on entry, shared across StrictMode replay; never an input gate.
-    if (!optionalDshEnsure.current) optionalDshEnsure.current = ensureOptionalDshDesktop();
-  }, [dshTarget]);
   const [asrState, setAsrState] = useState({
     loading: true,
     configured: false,
@@ -237,9 +230,13 @@ export default function VoiceAssistantPanel({
     && state.voiceRuntime?.targetKey === state.voiceRuntimeTargetKey;
   const listening = runtimeCurrent && state.audioBridgeEnabled;
   const voiceRunning = runtimeCurrent && state.voiceRuntime?.running === true;
+  const voiceTransport = state.voiceOnWifi ? "Wi-Fi" : "USB";
+  const runtimeWaitHint = state.wifiConnected && !state.voiceOnWifi
+    ? "当前固件未开放 Wi-Fi 按键语音输入，可通过 USB 使用。"
+    : "正在等待设备握手确认";
   let audioBlockingReason = null;
   if (!runtimeCurrent || state.voiceRuntime?.mode === "waiting_device") {
-    audioBlockingReason = "正在等待设备握手确认";
+    audioBlockingReason = runtimeWaitHint;
   } else if (!state.selectedAgentId) {
     audioBlockingReason = "请先在「当前展示」里选择一个渠道";
   } else if (platformWarning) {
@@ -272,7 +269,7 @@ export default function VoiceAssistantPanel({
     || showAccessibilityGuidance;
   const formattedAudioBridgeMessage = runtimeCurrent ? formatVoiceUserMessage(state.audioBridgeMessage) : "";
   const listenHint = !runtimeCurrent || state.voiceRuntime?.mode === "waiting_device"
-    ? "正在等待设备握手确认"
+    ? runtimeWaitHint
     : listening
     ? "设备麦克风监听中，等待已配置按键触发"
     : state.audioBridgePending
@@ -283,7 +280,7 @@ export default function VoiceAssistantPanel({
           ? "语音通道暂未就绪，请检查 Agent 与识别服务"
           : boardOffline
             ? "设备当前离线，重新连接后可启动监听"
-            : "通过 USB 接收设备麦克风音频，不会使用电脑麦克风";
+            : `通过 ${voiceTransport} 接收设备麦克风音频`;
 
   useEffect(() => {
     if (!showAccessibilityGuidance || desktopPlatform !== "macos") {
@@ -431,7 +428,7 @@ export default function VoiceAssistantPanel({
               ? "停止设备麦克风监听"
               : !voiceConfig.enabled
                 ? "请先启用按键语音"
-                : audioBlockingReason || "使用设备麦克风录音并通过 USB 转发。"
+                : audioBlockingReason || `使用设备麦克风录音并通过 ${voiceTransport} 转发。`
           }
         >
           {state.audioBridgePending ? (

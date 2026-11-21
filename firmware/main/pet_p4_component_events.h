@@ -1,7 +1,7 @@
 /*
  * [Input] Package-declared event names, alarm declarations, consistent UTC/uptime clock snapshots and
  *         the component's private save text.
- * [Output] A bounded device-wide event bus (<=32 components x 8 queued names) and per-component
+ * [Output] A bounded device-wide event bus (eight queued names per component) and per-component
  *          alarm sets with backward-compatible relative and UTC private saves.
  * [Pos] p4-events-v1 portable core (Track C). No tasks, allocation, files or wire commands;
  *       the miniapp hooks own locking and delivery. Host-tested through ctypes.
@@ -11,10 +11,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "pet_p4_catalog_profile.h"
 #define PET_CEV_NAME_MAX 16u          /* <=15 ASCII [A-Za-z0-9_.-] + NUL */
 #define PET_CEV_NAMES_PER_PACKAGE 8u  /* emit names and subscriptions, each */
 #define PET_CEV_QUEUE 8u              /* queued deliveries per component */
-#define PET_CEV_COMPONENTS 32u        /* maxInstalled */
+#define PET_CEV_COMPONENTS PET_P4_MINIAPP_CATALOG_MAX
 #define PET_CEV_WIDGET_ID_MAX 48u
 #define PET_CEV_ALARMS 4u
 #define PET_CEV_ALARM_MIN_MS 60000u
@@ -37,7 +38,7 @@ typedef struct {
 bool pet_cev_name_valid(const char *name);
 void pet_cev_bus_reset(pet_cev_bus_t *bus);
 /* Registers (or replaces) the subscription list of one installed component. The
- * queue survives a re-registration with the same id; false when 32 are used. */
+ * queue survives a re-registration with the same id; false when all component slots are used. */
 bool pet_cev_bus_subscribe(pet_cev_bus_t *bus, const char *widget_id, const char (*names)[PET_CEV_NAME_MAX], unsigned count);
 void pet_cev_bus_unsubscribe(pet_cev_bus_t *bus, const char *widget_id);
 /* Fans one name out to every subscribed component (the emitter included when it

@@ -23,6 +23,9 @@ mod composer_visibility;
 #[path = "pasteboard_ownership.rs"]
 mod pasteboard_ownership;
 
+#[path = "mimo_voice_target.rs"]
+mod mimo_voice_target;
+
 #[path = "workbuddy_voice_wake.rs"]
 mod workbuddy_voice_wake;
 
@@ -230,6 +233,9 @@ pub(super) struct FocusedTextTarget {
     window_title: String,
     element_bounds: Option<(i64, i64, i64, i64)>,
     window_bounds: Option<(i64, i64, i64, i64)>,
+    element_hash: usize,
+    window_hash: Option<usize>,
+    desktop_draft: Option<String>,
 }
 
 enum PasteboardField {
@@ -589,11 +595,11 @@ fn capture_focused_text_target_unchecked() -> Result<FocusedTextTarget, String> 
         ));
     }
     let focused = ax_element_attribute(&app, "AXFocusedUIElement")
-        .ok_or_else(|| "MiMoCode 当前没有可读取的文本光标；请先点击终端输入位置".to_string())?;
+        .ok_or_else(|| "MiMo Desktop / MiMoCode 当前没有可读取的文本光标；请先点击 MiMo Desktop 输入框或 MiMoCode 终端输入位置".to_string())?;
     let role = ax_string_attribute(&focused, "AXRole");
     if !focused_text_role_is_supported(&role) {
         return Err(format!(
-            "MiMoCode 当前焦点不是可输入文本的位置（{}）；请先点击终端输入位置",
+            "MiMo Desktop / MiMoCode 当前焦点不是可输入文本的位置（{}）；请先点击 MiMo Desktop 输入框或 MiMoCode 终端输入位置",
             if role.is_empty() {
                 "未知控件"
             } else {
@@ -622,11 +628,16 @@ fn capture_focused_text_target_unchecked() -> Result<FocusedTextTarget, String> 
             .unwrap_or_default(),
         element_bounds: rounded_bounds(&focused),
         window_bounds: window.as_ref().and_then(rounded_bounds),
+        element_hash: unsafe { CFHash(focused.as_CFTypeRef()) } as usize,
+        window_hash: window.as_ref().map(|window| unsafe { CFHash(window.as_CFTypeRef()) } as usize),
+        desktop_draft: None,
     })
 }
 
 fn focused_text_target_matches(captured: &FocusedTextTarget, current: &FocusedTextTarget) -> bool {
     captured.pid == current.pid
+        && (captured.desktop_draft.is_none() || (captured.element_hash == current.element_hash
+            && captured.window_hash == current.window_hash))
         && captured.role == current.role
         && captured.subrole == current.subrole
         // Losing previously captured identity is uncertainty, not a match.
@@ -634,15 +645,252 @@ fn focused_text_target_matches(captured: &FocusedTextTarget, current: &FocusedTe
             || captured.identifier == current.identifier)
         && (captured.window_title.is_empty()
             || captured.window_title == current.window_title)
-        && (captured.element_bounds.is_none()
+        // A rich editor may grow after paste. Desktop uses exact AX identity;
+        // CLI keeps its original conservative geometry guard.
+        && (captured.desktop_draft.is_some() || captured.element_bounds.is_none()
             || captured.element_bounds == current.element_bounds)
-        && (captured.window_bounds.is_none()
+        && (captured.desktop_draft.is_some() || captured.window_bounds.is_none()
             || captured.window_bounds == current.window_bounds)
 }
 
-pub(super) fn capture_focused_text_target() -> Result<FocusedTextTarget, String> {
+fn mimo_error(code: &str) -> String {
+    let hint = match code {
+        "composer_missing" => "未找到可见输入框，请打开目标任务",
+        "composer_ambiguous" => "有多个可见输入框，请关闭多余面板后重试",
+        "window_ambiguous" => "有多个主窗口，请只保留目标窗口后重试",
+        "window_missing" => "未找到可用主窗口，请打开目标任务",
+        "modal_open" => "存在弹窗，请先处理弹窗",
+        "draft_changed" => "草稿内容已变化，已保留原文，请重新录音",
+        "focus_changed" => "前台窗口或输入框已变化，请重新录音",
+        "caret_unconfirmed" => "无法确认末尾光标，已保留原文，请手动点击输入框后重试",
+        "activation_failed" => "无法切到前台，请打开应用后重试",
+        _ => "无法确认输入目标，请打开 MiMo Desktop 输入框或 MiMoCode 终端后重试",
+    };
+    format!("MiMo Desktop / MiMoCode [{code}] {hint}；本次未自动发送")
+}
+
+fn mimo_window_is_current(window: &CodexWindow) -> bool {
+    ax_element_attribute(&AXUIElement::system_wide(), "AXFocusedApplication").as_ref() == Some(&window.app)
+        && ax_element_attribute(&window.app, "AXFocusedWindow").as_ref() == Some(&window.window)
+        && !task_window_is_blocked(&window.window)
+}
+
+fn mimo_composer_candidates(window: &CodexWindow, current: &impl Fn() -> bool) -> Result<Vec<AXUIElement>, String> {
+    let mut stack = vec![(window.window.clone(), 0usize)];
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    while let Some((element, depth)) = stack.pop() {
+        if !current() { return Err(mimo_error("prepare_cancelled")); }
+        if !seen.insert(unsafe { CFHash(element.as_CFTypeRef()) }) { continue; }
+        if seen.len() > MAX_TREE_ELEMENTS || depth > MAX_TREE_DEPTH { return Err(mimo_error("tree_limit")); }
+        if is_composer_element(&element) && element_is_enabled(&element)
+            && composer_is_visible(&element, window)
+            && ax_element_attribute(&element, "AXWindow").as_ref() == Some(&window.window) {
+            result.push(element.clone());
+        }
+        for children in [element.children().ok(), element.visible_children().ok()].into_iter().flatten() {
+            for child in children.iter() {
+                if stack.len() >= MAX_TREE_ELEMENTS { return Err(mimo_error("tree_limit")); }
+                stack.push((child.clone(), depth + 1));
+            }
+        }
+    }
+    Ok(result)
+}
+
+pub(super) fn prepare_mimo_text_target(still_current: impl Fn() -> bool) -> Result<FocusedTextTarget, String> {
+    let started = Instant::now();
+    let current = || still_current() && started.elapsed() < Duration::from_secs(8);
+    let check = || if current() { Ok(()) } else { Err(mimo_error("prepare_cancelled")) };
+    check()?;
     ensure_accessibility_permission()?;
-    capture_focused_text_target_unchecked()
+    let bundle = NSString::from_str(mimo_voice_target::DESKTOP_BUNDLE_ID);
+    let running = NSRunningApplication::runningApplicationsWithBundleIdentifier(&bundle);
+    let installed = std::path::Path::new("/Applications/Xiaomi MiMo.app").is_dir()
+        || std::env::var_os("HOME").is_some_and(|home| PathBuf::from(home).join("Applications/Xiaomi MiMo.app").is_dir());
+    // An arbitrary text area is not evidence of MiMoCode. Desktop selection wins
+    // whenever Desktop is available; CLI fallback requires a known terminal and
+    // explicit MiMo title, and is never used after a Desktop preparation error.
+    let cli = if running.is_empty() && !installed {
+        capture_focused_text_target_unchecked().ok().filter(|target| {
+            let terminal = NSRunningApplication::runningApplicationWithProcessIdentifier(target.pid)
+                .and_then(|app| app.bundleIdentifier()).map(|id| id.to_string())
+                .is_some_and(|id| matches!(id.as_str(), "com.apple.Terminal" | "com.googlecode.iterm2"));
+            terminal && target.window_title.to_lowercase().split(|c: char| !c.is_alphanumeric())
+                .any(|token| matches!(token, "mimo" | "mimocode"))
+        })
+    } else { None };
+    if !mimo_voice_target::use_desktop(!running.is_empty() || installed, cli.is_some()).map_err(mimo_error)? {
+        return cli.ok_or_else(|| mimo_error("mimo_target_unavailable"));
+    }
+    let reopen = || -> Result<(), String> {
+        check()?;
+        let status = crate::command_for_host("open").args(["-b", mimo_voice_target::DESKTOP_BUNDLE_ID]).status()
+            .map_err(|_| mimo_error("activation_failed"))?;
+        if status.success() { Ok(()) } else { Err(mimo_error("activation_failed")) }
+    };
+    let launched = running.is_empty();
+    if launched { reopen()?; }
+    let deadline = Instant::now() + AGENT_LAUNCH_WINDOW_TIMEOUT;
+    let application = loop {
+        check()?;
+        let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(&bundle);
+        if apps.len() > 1 { return Err(mimo_error("window_ambiguous")); }
+        if let Some(app) = apps.iter().next() { break app; }
+        if Instant::now() >= deadline { return Err(mimo_error("activation_failed")); }
+        thread::sleep(ACCESSIBILITY_TREE_RETRY_DELAY);
+    };
+    let pid = application.processIdentifier();
+    let app = AXUIElement::application(pid);
+    let _ = app.set_messaging_timeout(1.5);
+    // Reopen through LaunchServices so Electron restores its window after
+    // closing to the tray. Raising the running AX process alone cannot do so.
+    check()?;
+    if !launched && (!application.isActive()
+        || !matches!(app.windows(), Ok(windows) if windows.iter().next().is_some())) {
+        reopen()?;
+    }
+    if !application.isActive() {
+        let _ = application.unhide();
+        let requested = application.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows);
+        // A hardware press does not give the companion app AppKit activation
+        // authority. Request AX frontmost on the exact verified MiMo PID too.
+        let ax_requested = app.set_frontmost(CFBoolean::true_value()).is_ok();
+        if !requested && !ax_requested { return Err(mimo_error("activation_failed")); }
+    }
+    let activation_deadline = Instant::now() + AGENT_FRONTMOST_TIMEOUT;
+    while !application.isActive() {
+        check()?;
+        if Instant::now() >= activation_deadline { return Err(mimo_error("activation_failed")); }
+        thread::sleep(ACCESSIBILITY_TREE_RETRY_DELAY);
+    }
+    let _ = enable_agent_accessibility(&app);
+    let window_deadline = Instant::now() + AGENT_LAUNCH_WINDOW_TIMEOUT;
+    let windows = loop {
+        check()?;
+        if !application.isActive() { return Err(mimo_error("focus_changed")); }
+        if let Ok(windows) = app.windows() {
+            if windows.iter().next().is_some() { break windows; }
+        }
+        if Instant::now() >= window_deadline { return Err(mimo_error("window_missing")); }
+        thread::sleep(ACCESSIBILITY_TREE_RETRY_DELAY);
+    };
+    if windows.iter().any(|window| task_window_is_blocked(&window)) { return Err(mimo_error("modal_open")); }
+    let candidates = windows.iter().filter(|window| {
+        let role = ax_string_attribute(window, "AXSubrole");
+        role == "AXStandardWindow" || (matches!(role.as_str(), "" | "AXUnknown")
+            && ax_string_attribute(window, "AXTitle") == "Xiaomi MiMo")
+    }).collect::<Vec<_>>();
+    let window = match candidates.as_slice() {
+        [window] => CodexWindow { app: app.clone(), window: (*window).clone() },
+        [] => return Err(mimo_error("window_missing")),
+        _ => return Err(mimo_error("window_ambiguous")),
+    };
+    // Once active, any focus change aborts this request.
+    check()?;
+    if !application.isActive() { return Err(mimo_error("focus_changed")); }
+    let _ = window.window.set_attribute(&AXAttribute::new(&CFString::new("AXMinimized")), CFBoolean::false_value().into_CFType());
+    let _ = window.window.raise();
+    let deadline = Instant::now() + AGENT_FRONTMOST_TIMEOUT;
+    while !mimo_window_is_current(&window) {
+        check()?;
+        if Instant::now() >= deadline { return Err(mimo_error("activation_failed")); }
+        thread::sleep(ACCESSIBILITY_TREE_RETRY_DELAY);
+    }
+    let _ = enable_agent_accessibility(&app);
+    let old_focus = ax_element_attribute(&app, "AXFocusedUIElement");
+    let composer = mimo_voice_target::capture_when_ready(|| {
+        let mut candidates = mimo_composer_candidates(&window, &current)?;
+        if !mimo_window_is_current(&window) || ax_element_attribute(&app, "AXFocusedUIElement") != old_focus {
+            return Err(mimo_error("focus_changed"));
+        }
+        let index = mimo_voice_target::unique_candidate(candidates.len()).map_err(mimo_error)?;
+        Ok(candidates.remove(index))
+    }, || current() && mimo_window_is_current(&window)
+        && ax_element_attribute(&app, "AXFocusedUIElement") == old_focus,
+        || thread::sleep(ACCESSIBILITY_TREE_RETRY_DELAY))
+        .map_err(|error| if current() { error } else { mimo_error("prepare_cancelled") })?;
+    let original = current_electron_raw_value(&composer)?;
+    if !mimo_window_is_current(&window) || ax_element_attribute(&app, "AXFocusedUIElement") != old_focus {
+        return Err(mimo_error("focus_changed"));
+    }
+    check()?;
+    composer.set_attribute(&AXAttribute::focused(), CFBoolean::true_value())
+        .map_err(|_| mimo_error("caret_unconfirmed"))?;
+    let deadline = Instant::now() + CARET_READBACK_TIMEOUT;
+    loop {
+        check()?;
+        if !mimo_window_is_current(&window) { return Err(mimo_error("focus_changed")); }
+        if current_electron_raw_value(&composer)? != original { return Err(mimo_error("draft_changed")); }
+        let focused = ax_element_attribute(&app, "AXFocusedUIElement");
+        if focused.as_ref() == Some(&composer) { break; }
+        if focused != old_focus { return Err(mimo_error("focus_changed")); }
+        if Instant::now() >= deadline { return Err(mimo_error("caret_unconfirmed")); }
+        thread::sleep(ACCESSIBILITY_TREE_RETRY_DELAY);
+    }
+    check()?;
+    let mut target = capture_focused_text_target_unchecked()?;
+    if target.pid != pid || target.element_hash != unsafe { CFHash(composer.as_CFTypeRef()) } as usize {
+        return Err(mimo_error("focus_changed"));
+    }
+    target.desktop_draft = Some(original);
+    Ok(target)
+}
+
+// Preserve the old public entry point for callers; preparation now scopes the
+// target to MiMo Desktop (or an explicitly identified CLI terminal).
+pub(super) fn capture_focused_text_target() -> Result<FocusedTextTarget, String> {
+    prepare_mimo_text_target(|| true)
+}
+
+fn mimo_desktop_append(captured: &FocusedTextTarget, text: &str, original: &str) -> Result<(), String> {
+    let app = AXUIElement::application(captured.pid);
+    let assert_target = || -> Result<AXUIElement, String> {
+        let current = capture_focused_text_target_unchecked()?;
+        if !focused_text_target_matches(captured, &current) { return Err(mimo_error("focus_changed")); }
+        let composer = ax_element_attribute(&app, "AXFocusedUIElement").ok_or_else(|| mimo_error("focus_changed"))?;
+        if current_electron_raw_value(&composer)? != original { return Err(mimo_error("draft_changed")); }
+        Ok(composer)
+    };
+    let composer = assert_target()?;
+    let end = isize::try_from(original.encode_utf16().count()).map_err(|_| mimo_error("caret_unconfirmed"))?;
+    let range = CFRange::init(end, 0);
+    let ptr = unsafe { AXValueCreate(kAXValueTypeCFRange, &range as *const CFRange as *const c_void) };
+    if ptr.is_null() { return Err(mimo_error("caret_unconfirmed")); }
+    let value = unsafe { CFType::wrap_under_create_rule(ptr as _) };
+    composer.set_attribute(&AXAttribute::new(&CFString::new("AXSelectedTextRange")), value)
+        .map_err(|_| mimo_error("caret_unconfirmed"))?;
+    let deadline = Instant::now() + CARET_READBACK_TIMEOUT;
+    loop {
+        let composer = assert_target()?;
+        if mimo_voice_target::append_guard(true, original, &current_electron_raw_value(&composer)?, current_composer_selection(&composer)) { break; }
+        if Instant::now() >= deadline { return Err(mimo_error("caret_unconfirmed")); }
+        thread::sleep(ACCESSIBILITY_TREE_RETRY_DELAY);
+    }
+    let mut snapshot = PasteboardSnapshot::capture()?;
+    let result = (|| {
+        snapshot.set_text(text)?;
+        snapshot.verify_written()?;
+        let composer = assert_target()?;
+        if !mimo_voice_target::append_guard(true, original, &current_electron_raw_value(&composer)?, current_composer_selection(&composer)) {
+            return Err(mimo_error("caret_unconfirmed"));
+        }
+        // Reuse the existing private PID-addressed key primitive. Never emit
+        // a global HID paste when a Desktop target has been selected.
+        post_workbuddy_key(&app, MAC_KEYCODE_V, CGEventFlags::CGEventFlagCommand)
+            .map_err(|_| mimo_error("input_event_failed"))?;
+        let expected = format!("{original}{text}");
+        let deadline = Instant::now() + COMPOSER_READBACK_TIMEOUT;
+        loop {
+            let current = capture_focused_text_target_unchecked()?;
+            if !focused_text_target_matches(captured, &current) { return Err(mimo_error("focus_changed")); }
+            if current_electron_raw_value(&composer)? == expected { return Ok(()); }
+            if Instant::now() >= deadline { return Err(mimo_error("write_unconfirmed")); }
+            thread::sleep(ACCESSIBILITY_TREE_RETRY_DELAY); // Read-only, never replay paste.
+        }
+    })();
+    snapshot.restore();
+    result
 }
 
 pub(super) fn insert_at_focused_text_target(
@@ -650,10 +898,13 @@ pub(super) fn insert_at_focused_text_target(
     text: &str,
 ) -> Result<(), String> {
     ensure_accessibility_permission()?;
+    if let Some(original) = captured.desktop_draft.as_deref() {
+        return mimo_desktop_append(captured, text, original);
+    }
     let current = capture_focused_text_target_unchecked()?;
     if !focused_text_target_matches(captured, &current) {
         return Err(
-            "MiMoCode 录音期间前台窗口或文本光标已变化，本次语音未写入；请将光标停在输入位置后重试"
+            "MiMo Desktop / MiMoCode 录音期间前台窗口或文本光标已变化，本次语音未写入；请将光标停在 MiMo Desktop 输入框或 MiMoCode 终端输入位置后重试"
                 .to_string(),
         );
     }
@@ -668,7 +919,7 @@ pub(super) fn insert_at_focused_text_target(
     if !focused_text_target_matches(captured, &current) {
         snapshot.restore();
         return Err(
-            "MiMoCode 备份剪贴板期间前台窗口或文本光标已变化，本次语音未写入；请将光标停在输入位置后重试"
+            "MiMo Desktop / MiMoCode 备份剪贴板期间前台窗口或文本光标已变化，本次语音未写入；请将光标停在 MiMo Desktop 输入框或 MiMoCode 终端输入位置后重试"
                 .to_string(),
         );
     }
@@ -678,10 +929,10 @@ pub(super) fn insert_at_focused_text_target(
     })();
     snapshot.restore();
     result.map_err(|error| {
-        if error.starts_with("MiMoCode ") {
+        if error.starts_with("MiMo ") {
             error
         } else {
-            format!("MiMoCode 当前光标输入失败: {error}")
+            format!("MiMo Desktop / MiMoCode 当前光标输入失败: {error}")
         }
     })
 }
@@ -690,10 +941,10 @@ pub(super) fn submit_at_focused_text_target(captured: &FocusedTextTarget) -> Res
     ensure_accessibility_permission()?;
     let current = capture_focused_text_target_unchecked()?;
     if !focused_text_target_matches(captured, &current) {
-        return Err("MiMoCode 语音草稿写入后前台窗口或文本光标已变化，未执行确认键".to_string());
+        return Err("MiMo Desktop / MiMoCode 语音草稿写入后前台窗口或文本光标已变化，未执行确认键".to_string());
     }
     post_keyboard_event(KeyCode::RETURN, CGEventFlags::CGEventFlagNull)
-        .map_err(|error| format!("MiMoCode 确认键发送失败: {error}"))
+        .map_err(|error| format!("MiMo Desktop / MiMoCode 确认键发送失败: {error}"))
 }
 
 fn ax_point_attribute(element: &AXUIElement, name: &str) -> Option<CGPoint> {
@@ -3107,8 +3358,8 @@ fn prepare_existing_workbuddy_for_voice_begin(agent: MacosAgent) -> Result<(), S
             if ready || Instant::now() >= deadline {
                 crate::realtime_chat_log::record("", "workbuddy_wake",serde_json::json!({
                     "stage":"window_readiness","ok":ready,"elapsedMs":ready_started.elapsed().as_millis(),
-                    "appActive":application.isActive(),"windowCount":window_count.min(32),"windowReadOk":window_read_ok,
-                    "focusedApplication":if focused_pid==Some(pid){"matching"}else if focused_pid.is_none(){"unavailable"}else{"invalid"},
+                    "count":window_count.min(32),
+                    "reason":if ready {"ready"} else if window_read_ok {"no_windows"} else {"ax_read_failed"},
                 }));
             }
             if ready {
@@ -3170,9 +3421,50 @@ pub(super) fn begin_voice(
     })
 }
 
+// Only explicit dictation Begin may reopen the already selected app. If AX
+// had no window to pin, a fresh press must confirm the restored conversation.
+fn recover_window_after_failed_voice_begin(agent: MacosAgent) -> Option<String> {
+    if !agent.current_electron() || !unsafe { AXIsProcessTrusted() } {
+        return None;
+    }
+    let bundle = agent_bundle_identifiers(agent)[0];
+    let applications = NSRunningApplication::runningApplicationsWithBundleIdentifier(
+        &NSString::from_str(bundle),
+    );
+    let mut live = applications.iter().filter(|app| !app.isTerminated());
+    let application = live.next()?;
+    let pid = application.processIdentifier();
+    if live.next().is_some() || pid <= 0 || !application.isActive() {
+        return None;
+    }
+    let path = application.bundleURL()?.path()?.to_string();
+    let ax = AXUIElement::application(pid);
+    let _ = ax.set_messaging_timeout(1.5);
+    if !matches!(ax.windows(), Ok(windows) if windows.iter().next().is_none())
+        || application.isTerminated() || !application.isActive()
+    {
+        return None;
+    }
+    let requested = crate::command_for_host("/usr/bin/open")
+        .args(["-a", path.as_str()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    crate::realtime_chat_log::record("", "voice_window_reopen", serde_json::json!({
+        "stage": "reopen", "ok": requested,
+    }));
+    Some(if requested {
+        format!("已请求恢复 {} 窗口。确认目标对话后，请重新长按 1 键。", agent.label())
+    } else {
+        format!("{} 已激活但没有可用窗口。请打开目标对话后重新长按 1 键。", agent.label())
+    })
+}
+
 pub(super) fn begin_current_voice(agent: MacosAgent) -> Result<MacosComposerState, String> {
-    prepare_existing_workbuddy_for_voice_begin(agent)?;
-    let target = find_current_visible_target(agent)?;
+    let recover = |error| recover_window_after_failed_voice_begin(agent).unwrap_or(error);
+    prepare_existing_workbuddy_for_voice_begin(agent).map_err(recover)?;
+    let target = find_current_visible_target(agent).map_err(recover)?;
     focus_composer(&target)?;
     let identity = (agent == MacosAgent::DeepSeekHarness).then(|| task_window_identity(&target.window));
     Ok(MacosComposerState {
@@ -3352,11 +3644,27 @@ pub(super) fn update_voice(state: &mut MacosComposerState, text: &str) -> Result
     ))
 }
 
-fn send_button_label_score(labels: &[String]) -> Option<u8> {
+fn deepseek_busy_submit_kind(label: &str) -> Option<&'static str> {
+    match label.trim().to_ascii_lowercase().as_str() {
+        "queue message" | "排队发送" => Some("queue"),
+        "steer message" | "插话发送" => Some("steer"),
+        _ => None,
+    }
+}
+
+fn send_button_label_score(agent: MacosAgent, labels: &[String]) -> Option<u8> {
     let labels = labels
         .iter()
         .map(|label| label.to_lowercase())
         .collect::<Vec<_>>();
+    if agent == MacosAgent::DeepSeekHarness {
+        if labels.iter().any(|label| matches!(label.as_str(), "stop" | "stop generating" | "停止" | "停止生成")) {
+            return None;
+        }
+        if labels.iter().any(|label| deepseek_busy_submit_kind(label).is_some()) {
+            return Some(1);
+        }
+    }
     if labels
         .iter()
         .any(|label| matches!(label.as_str(), "send" | "submit" | "发送" | "提交"))
@@ -3385,8 +3693,8 @@ fn send_button_label_score(labels: &[String]) -> Option<u8> {
     None
 }
 
-fn send_button_score(element: &AXUIElement) -> Option<u8> {
-    send_button_label_score(&element_labels(element))
+fn send_button_score(agent: MacosAgent, element: &AXUIElement) -> Option<u8> {
+    send_button_label_score(agent, &element_labels(element))
 }
 
 fn send_button_bounds_match_composer(
@@ -3461,9 +3769,14 @@ fn press_unique_send_button(target: &ComposerTarget, allow_queue: bool) -> Resul
     press_unique_submission(target, allow_queue).map(|mode| mode.is_some())
 }
 
-fn submission_kind(labels: &[String]) -> &'static str {
+fn submission_kind(agent: MacosAgent, labels: &[String]) -> &'static str {
+    if agent == MacosAgent::DeepSeekHarness {
+        if let Some(kind) = labels.iter().find_map(|label| deepseek_busy_submit_kind(label)) {
+            return kind;
+        }
+    }
     if labels.iter().any(|label| matches!(label.to_lowercase().as_str(),"steer"|"引导")) { "steer" }
-    else if send_button_label_score(labels)==Some(1) { "queue" }
+    else if send_button_label_score(agent, labels)==Some(1) { "queue" }
     else { "send" }
 }
 
@@ -3504,11 +3817,11 @@ fn press_native_submission(target: &ComposerTarget, allow_queue: bool, check_val
         element_role(element) == "AXButton"
             && element_is_enabled(element)
             && element_supports_press(element)
-            && send_button_score(element).is_some()
+            && send_button_score(target.agent, element).is_some()
             && send_button_matches_composer(element, &target.composer)
     })
     .into_iter()
-    .filter_map(|button| send_button_score(&button).map(|score| (score, button)))
+    .filter_map(|button| send_button_score(target.agent, &button).map(|score| (score, button)))
     .collect::<Vec<_>>();
     buttons.sort_by_key(|(score, _)| *score);
     if !allow_queue && buttons.iter().any(|(score, _)| *score == 1) {
@@ -3522,7 +3835,7 @@ fn press_native_submission(target: &ComposerTarget, allow_queue: bool, check_val
     if best.len() == 1 {
         if check_value { assert_submission_target(target)?; }
         else { assert_submission_focus(target)?; }
-        let mode=submission_kind(&element_labels(&best[0].1));
+        let mode=submission_kind(target.agent, &element_labels(&best[0].1));
         best[0]
             .1
             .press()
@@ -3657,7 +3970,7 @@ fn observe_submit_readback(target:&ComposerTarget, submitted:&str, identity:&[St
     let characters=editor.attribute(&AXAttribute::new(&CFString::new("AXNumberOfCharacters")))
         .ok().and_then(|v:CFType|v.downcast::<CFNumber>()).and_then(|v|v.to_i64());
     let buttons=walk_elements(&window.window,|button|element_role(button)=="AXButton"
-        && send_button_score(button).is_some() && send_button_matches_composer(button,&editor));
+        && send_button_score(target.agent, button).is_some() && send_button_matches_composer(button,&editor));
     // Missing AXEnabled is not disabled; ambiguous controls prove nothing.
     let send_disabled=buttons.len()==1 && buttons[0].enabled().ok().map(bool::from)==Some(false);
     let exact_hint=raw.as_ref().is_some_and(|raw|composer_value_is_hint(raw,&element_hint_texts(&editor)));
@@ -3872,28 +4185,33 @@ fn confirm_voice_inner(state: &mut MacosComposerState, expected: Option<&str>) -
             return Err("DESKTOP_TASK_READBACK_CHANGED".into());
         }
     }
-    if state.agent == MacosAgent::Codex && expected.is_none() {
+    if matches!(state.agent, MacosAgent::Codex | MacosAgent::DeepSeekHarness) && expected.is_none() {
         // Plain dictation is keyboard input, not an Agent task. Trigger one
         // native Send/Queue/Steer action and release immediately; no local bus,
         // receipt polling, model-state gate or automatic resend.
         submit_once(
             || press_unique_submission(&target, true),
             || { assert_submission_target(&target)?; press_enter(target.agent, &target.app) },
-        ).map_err(|reason| format!("CODEX_SUBMIT_UNCONFIRMED: 提交操作未确认：{reason}；不会自动重发"))?;
+        ).map_err(|reason| {
+            if state.agent == MacosAgent::Codex {
+                format!("CODEX_SUBMIT_UNCONFIRMED: 提交操作未确认：{reason}；不会自动重发")
+            } else {
+                reason
+            }
+        })?;
+        if state.agent == MacosAgent::DeepSeekHarness {
+            clear_last_dsh_written();
+        }
         state.draft.last.clear();
         return Ok(String::new());
     }
-    let submit_identity = task_window_identity(&target.window);
-    if state.agent == MacosAgent::DeepSeekHarness {
+    if state.agent == MacosAgent::DeepSeekHarness && expected.is_some() {
         assert_submission_target(&target)?;
         let mode = press_unique_submission(&target, true)?
             .ok_or_else(|| "DESKTOP_TASK_SEND_UNAVAILABLE".to_owned())?;
-        if expected.is_some() { return Ok(mode.into()); }
-        return match wait_for_submit_readback(state, &text, SUBMIT_CONFIRM_TIMEOUT, &submit_identity, &target) {
-            Ok(SubmitReadback::Confirmed) => { state.draft.last.clear(); Ok(String::new()) },
-            _ => Err("COMPOSER_SUBMIT_UNCONFIRMED: DeepSeek Harness 提交结果未知，未自动重发".into()),
-        };
+        return Ok(mode.into());
     }
+    let submit_identity = task_window_identity(&target.window);
     if expected.is_some() {
         // Codex tasks share dictation's one-shot submit: native button first,
         // Enter only when no button was attempted. Never retry an uncertain
@@ -4236,7 +4554,7 @@ mod tests {
     #[test]
     fn plain_dictation_submit_does_not_wait_for_agent_receipts() {
         let source=include_str!("codex_composer_macos.rs");
-        let branch=source.split("if state.agent == MacosAgent::Codex && expected.is_none() {").nth(1).unwrap().split("let submit_identity").next().unwrap();
+        let branch=source.split("if matches!(state.agent, MacosAgent::Codex | MacosAgent::DeepSeekHarness) && expected.is_none() {").nth(1).unwrap().split("let submit_identity").next().unwrap();
         assert!(branch.contains("submit_once("));
         assert!(!branch.contains("Receipt::capture"));
         assert!(!branch.contains("receipt.poll"));
@@ -4655,8 +4973,21 @@ mod tests {
             window_title: "MiMoCode".to_string(),
             element_bounds: Some((10, 20, 800, 500)),
             window_bounds: Some((0, 0, 900, 600)),
+            element_hash: 1,
+            window_hash: Some(2),
+            desktop_draft: None,
         };
         assert!(focused_text_target_matches(&captured, &captured));
+        let desktop = FocusedTextTarget { desktop_draft: Some("draft".into()), ..captured.clone() };
+        assert!(focused_text_target_matches(&desktop, &FocusedTextTarget {
+            element_bounds: Some((10, 20, 800, 550)), ..desktop.clone()
+        }));
+        assert!(!focused_text_target_matches(&desktop, &FocusedTextTarget {
+            element_hash: 99, ..desktop.clone()
+        }));
+        assert!(!focused_text_target_matches(&desktop, &FocusedTextTarget {
+            window_hash: Some(99), ..desktop.clone()
+        }));
         for missing in [
             FocusedTextTarget { identifier: String::new(), ..captured.clone() },
             FocusedTextTarget { window_title: String::new(), ..captured.clone() },
@@ -4754,11 +5085,11 @@ mod tests {
 
     #[test]
     fn running_task_submit_labels_match_without_accepting_stop_controls() {
-        assert_eq!(submission_kind(&["Queue".into()]),"queue");
-        assert_eq!(submission_kind(&["加入队列".into()]),"queue");
-        assert_eq!(submission_kind(&["Steer".into()]),"steer");
-        assert_eq!(submission_kind(&["引导".into()]),"steer");
-        assert_eq!(submission_kind(&["Send".into()]),"send");
+        assert_eq!(submission_kind(MacosAgent::Codex, &["Queue".into()]),"queue");
+        assert_eq!(submission_kind(MacosAgent::Codex, &["加入队列".into()]),"queue");
+        assert_eq!(submission_kind(MacosAgent::Codex, &["Steer".into()]),"steer");
+        assert_eq!(submission_kind(MacosAgent::Codex, &["引导".into()]),"steer");
+        assert_eq!(submission_kind(MacosAgent::Codex, &["Send".into()]),"send");
         for label in [
             "Send",
             "Submit",
@@ -4771,17 +5102,34 @@ mod tests {
             "加入队列",
         ] {
             assert!(
-                send_button_label_score(&[label.to_string()]).is_some(),
+                send_button_label_score(MacosAgent::Codex, &[label.to_string()]).is_some(),
                 "expected submit label to match: {label}"
             );
         }
         for label in ["Stop", "停止", "Clear queue", "清空队列", "Resume"] {
             assert_eq!(
-                send_button_label_score(&[label.to_string()]),
+                send_button_label_score(MacosAgent::Codex, &[label.to_string()]),
                 None,
                 "unsafe non-submit control matched: {label}"
             );
         }
+    }
+
+    #[test]
+    fn deepseek_running_composer_recognizes_its_native_queue_and_steer_controls() {
+        let agent = MacosAgent::DeepSeekHarness;
+        for (label, kind) in [("Queue message", "queue"), ("排队发送", "queue"),
+            ("Steer message", "steer"), ("插话发送", "steer")] {
+            let labels = [label.into()];
+            assert_eq!(send_button_label_score(agent, &labels), Some(1));
+            assert_eq!(submission_kind(agent, &labels), kind);
+            assert_eq!(send_button_label_score(MacosAgent::Codex, &labels), None);
+        }
+        for label in ["Stop generating", "停止生成"] {
+            assert_eq!(send_button_label_score(agent, &[label.into(), "Send message".into()]), None);
+        }
+        assert_eq!(send_button_label_score(agent, &["Clear queue".into()]), None);
+        assert_eq!(send_button_label_score(agent, &["发送消息".into()]), Some(2));
     }
 
     #[test]

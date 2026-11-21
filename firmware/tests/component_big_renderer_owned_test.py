@@ -16,11 +16,10 @@ def big_renderer(tmp_path_factory):
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#define PET_P4_BIG_IMAGE 1
 #include "pet_p4_component_ext.h"
 #include "pet_p4_component_media_clients.h"
 #include "pet_p4_image.h"
-#define PET_P4_BIG_IMAGE 1
-#define PET_P4_CLIP 0
 #define EXT_RAM_BSS_ATTR
 #define PET_P4_UI_WIDTH 640
 #define PET_P4_UI_HEIGHT 480

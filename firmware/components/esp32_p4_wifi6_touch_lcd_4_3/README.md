@@ -1,22 +1,24 @@
-# ESP32-P4 WLK2802 Display BSP
+# HD28091 display adapter BSP
 
-This local Waveshare BSP adaptation drives the 480x640 WLK2802/ST7701S panel
-over one 800Mbps MIPI DSI data lane. The firmware renders a 640x480 logical
-framebuffer and rotates it onto the portrait panel.
+This branch uses the HD28091C40-V1 ST7701S panel and Rev A adapter.
+The panel is 480x640 and the runtime rotates a 640x480 logical framebuffer.
+The supplier initialization table preserves the panel voltage, Gamma and GIP settings.
 
-DSI PHY clock selection is left to the SDK (`phy_clk_src = 0`) so each
-chip family uses its supported PLL reference. The old explicit PHY default
-is invalid on P4 v3. Lane rate, rotation, RGB565 format and resolution are unchanged.
+`sdkconfig.defaults` selects two DSI data lanes at 500 Mbps per lane through
+`CONFIG_BSP_LCD_DSI_DATA_LANES` and `CONFIG_BSP_LCD_DSI_LANE_BITRATE_MBPS`.
+DSI PHY clock selection uses the SDK default for each chip revision.
+The v3 DPI clock is 20 MHz and v1 uses 25 MHz. Horizontal timing is
+480/20/4/328 and vertical timing is 640/16/4/14, giving approximately
+35.7 Hz on v3 and 44.6 Hz on v1.
 
-P4 v3 uses an exact 24MHz DPI clock (240MHz / 10). Requesting 25MHz with
-IDF 5.5.4 produces 24MHz and a horizontal timing correction of -21 pixels,
-which exceeds this panel's 10-pixel front porch and prevents normal scanout.
-The v1 build retains its existing 25MHz request and SDK timing behavior.
+LCD and touch use independent RC resets. The BSP waits for power to settle,
+uses software LCD reset and a write-only DSI command path, and keeps reset GPIOs
+unassigned. Rev A powers the backlight continuously. The runtime uses DCS
+display off/on to reveal the first rendered frame.
 
-The panel command return path is treated as write-only. Startup skips the
-optional ST7701S ID read and disables command ACK requests before sending the
-vendor initialization table. Waiting for either response can otherwise fill
-the ESP32-P4 command FIFO and block startup before the backlight is enabled.
+CST328 uses I2C address 0x1A on GPIO7/GPIO8. The default is 15 ms polling
+with INT unconnected. Wiring TP_INT to GPIO22 and defining
+`BSP_LCD_TOUCH_INT=22` enables the optional interrupt path.
 
 ## Backlight
 
@@ -32,6 +34,10 @@ bsp_display_brightness_set(100);
 | Capability | Implementation |
 |---|---|
 | Display | Local `esp_lcd_st7701` 2.0.2 override |
-| Touch | `espressif/esp_lcd_touch_gt911` |
+| Touch | Project CST328 polling driver and `espressif/esp_lcd_touch_gt911` fallback |
 | Audio | `espressif/esp_codec_dev` |
 | SD card | ESP-IDF |
+
+Display profile and runtime diagnostics are available in `diagnostics/status`.
+Source adaptation, build targets and hardware validation status are recorded in
+[the hardware adaptation guide](../../../docs/hd28091-hardware-adaptation.md).

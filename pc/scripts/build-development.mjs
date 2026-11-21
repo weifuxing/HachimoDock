@@ -12,7 +12,7 @@ const repositoryRoot=resolve(cwd,'..');
 const paths=desktopBuildPaths({repositoryRoot,target,cwd});
 // Resolve relative Cargo target directories once, at the build working dir.
 const buildEnv={...process.env,CARGO_TARGET_DIR:paths.targetDirectory};
-const version=JSON.parse(readFileSync(join(cwd,'src-tauri/tauri.conf.json'),'utf8')).version;
+const {version,productName}=JSON.parse(readFileSync(join(cwd,'src-tauri/tauri.conf.json'),'utf8'));
 function receiptPath(){return join(paths.releaseRoot,`desktop-build-artifact-${randomUUID()}.json`);}
 function receipt(identity){
   const path=receiptPath();
@@ -29,7 +29,7 @@ run(process.execPath,['scripts/check-release-csp.mjs']);
 const config=JSON.stringify({build:{beforeBuildCommand:''}});
 if(target==='macos'){
   run('./node_modules/.bin/tauri',['build',...(buildEnv.CARGO_BUILD_TARGET?['--target',buildEnv.CARGO_BUILD_TARGET]:[]),'--bundles','app','--ci','--config',config]);
-  const app=join(paths.bundleRoot,'macos/HachimiDock.app');
+  const app=join(paths.bundleRoot,'macos',`${productName}.app`);
   const unsignedProof=receipt(macAppIdentity(app,version));
   const proof=receiptPath(); // codesign changes Mach-O signature bytes; retain both identities
   run(process.execPath,['scripts/sign-macos-local-app.mjs',app,'--receipt',unsignedProof,'--output-receipt',proof]);

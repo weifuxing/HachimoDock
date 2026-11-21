@@ -1,6 +1,9 @@
 //! User-managed watchlist and Tencent quote provider. No secrets, scripts or arbitrary URLs.
 //! The native worker remains active when navigating away from Component Center.
-use crate::widget_data::{bounded_text, DataRow, DataSnapshot, MAX_ROWS, PROTOCOL};
+use crate::{
+    lan_agent::widget_data::Target,
+    widget_data::{bounded_text, DataRow, DataSnapshot, MAX_ROWS},
+};
 use chrono::{DateTime, Datelike, NaiveDateTime, NaiveTime, Utc, Weekday};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -596,43 +599,39 @@ fn data_snapshot(status: &StockStatus) -> DataSnapshot {
         rows,
     }
 }
+fn wire_snapshot(
+    snapshot: &StockStatus,
+    device_watchlist: bool,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut payload = serde_json::to_value(data_snapshot(snapshot))?;
+    if device_watchlist {
+        payload["deviceWatchlist"] = serde_json::to_value(&snapshot.settings.symbols)?;
+    }
+    Ok(payload)
+}
+
 pub fn start(usb: crate::usb_serial::UsbSerialManager) {
     tauri::async_runtime::spawn(async move {
-        let mut last_sent = 0;
-        let mut last_board = String::new();
-        let mut last_generation = u64::MAX;
+        let mut last = None;
         loop {
             let _ = refresh(true).await;
-            let status = usb.status();
-            let generation = service().lock().map(|s| s.generation).unwrap_or(0);
-            if status.connected
-                && status
-                    .capabilities
-                    .get("widgetData")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(PROTOCOL)
-                && (status.board_device_id != last_board
-                    || generation != last_generation
-                    || now_ms().saturating_sub(last_sent) >= INTERVAL_MS)
-            {
-                if let Ok(snapshot) = stock_watchlist_status() {
-                    if let Ok(payload) = serde_json::to_value(data_snapshot(&snapshot)) {
-                        let manager = usb.clone();
-                        let board = status.board_device_id.clone();
-                        let sent = tauri::async_runtime::spawn_blocking(move || {
-                            manager.send_widget_data(&board, &payload)
-                        })
-                        .await;
-                        if matches!(sent, Ok(Ok(()))) {
-                            last_sent = now_ms();
-                            last_board = status.board_device_id;
-                            last_generation = generation;
-                        }
-                    }
+            let manager = usb.clone();
+            let previous = last.take();
+            if let Ok(result) = tauri::async_runtime::spawn_blocking(move || {
+                let target = Target::current(&manager)?;
+                let generation = service().lock().ok()?.generation;
+                if previous.as_ref().is_some_and(|(route, old_generation, sent)| {
+                    *route == target.route && *old_generation == generation
+                        && now_ms().saturating_sub(*sent) < INTERVAL_MS
+                }) {
+                    return previous;
                 }
-            }
-            if !status.connected {
-                last_board.clear();
+                let snapshot = stock_watchlist_status().ok()?;
+                let payload = wire_snapshot(&snapshot, target.supports_device_watchlist()).ok()?;
+                target.publish(&manager, &payload).ok()?;
+                Some((target.route, generation, now_ms()))
+            }).await {
+                last = result;
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -642,6 +641,25 @@ pub fn start(usb: crate::usb_serial::UsbSerialManager) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wire_snapshot_preserves_watchlist_capability() {
+        let snapshot = StockStatus {
+            settings: Watchlist { symbols: vec!["hk01810".into(), "usAAPL".into()] },
+            quotes: vec![],
+            error: String::new(),
+            fetched_at_ms: 0,
+            refreshing: false,
+        };
+        let legacy = wire_snapshot(&snapshot, false).unwrap();
+        let wifi = wire_snapshot(&snapshot, true).unwrap();
+        assert!(legacy.get("deviceWatchlist").is_none());
+        assert_eq!(wifi["deviceWatchlist"], serde_json::json!(["hk01810", "usAAPL"]));
+        assert_eq!(legacy["rows"], wifi["rows"]);
+        let empty = StockStatus { settings: Watchlist { symbols: vec![] }, ..snapshot };
+        assert_eq!(wire_snapshot(&empty, true)
+            .unwrap()["deviceWatchlist"], serde_json::json!([]));
+    }
+
     #[test]
     fn two_second_refresh_keeps_bounded_error_backoff() {
         assert_eq!(INTERVAL_MS, 2_000);

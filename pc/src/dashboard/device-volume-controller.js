@@ -1,8 +1,10 @@
 export const MASTER_VOLUME_ENGINE = 'p4-master-volume-v1';
-export const EMPTY_VOLUME_STATE = Object.freeze({value:null,draft:null,known:false,busy:false,loading:false,persisted:false,error:'',available:false,reason:'请先连接设备'});
+export const EMPTY_VOLUME_STATE = Object.freeze({value:null,draft:null,known:false,busy:false,loading:false,waitingForTransfer:false,persisted:false,error:'',available:false,reason:'请先连接设备'});
+const VOLUME_QUERY_RETRY_DELAYS = [250, 500, 1000, 2000, 3000, 4000, 5000, 5000, 5000, 5000];
+const TRANSFER_BUSY = 'device transfer busy; volume not submitted';
 const percent = v => Number.isInteger(v) && v >= 0 && v <= 100;
 
-export function createDeviceVolumeController({invoke,onState=()=>{}}) {
+export function createDeviceVolumeController({invoke,onState=()=>{},wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))}) {
   let state={...EMPTY_VOLUME_STATE}, target=null, generation=0, disposed=false;
   const publish = patch => {state={...state,...patch};onState({...state});};
   const current = serial => !disposed && serial===generation;
@@ -16,7 +18,21 @@ export function createDeviceVolumeController({invoke,onState=()=>{}}) {
     const serial=generation, board=target.boardDeviceId;
     publish({busy:true,loading:!setting,error:'',...(setting?{draft:value}:{})});
     try {
-      const reply=await invoke('usb_device_volume',{expectedBoardDeviceId:board,...(setting?{volume:value}:{})});
+      const args={expectedBoardDeviceId:board,...(setting?{volume:value}:{})};
+      let reply;
+      for (let attempt=0; current(serial); attempt++) {
+        try {
+          reply=await invoke('usb_device_volume',args);
+          break;
+        } catch (error) {
+          if (!current(serial)) return false;
+          const delay=VOLUME_QUERY_RETRY_DELAYS[attempt];
+          if (setting || message(error)!==TRANSFER_BUSY) throw error;
+          if (delay===undefined) throw Error('设备仍在传输，请在传输完成后读取音量');
+          if (!state.waitingForTransfer) publish({waitingForTransfer:true});
+          await wait(delay);
+        }
+      }
       if (!current(serial)) return false;
       if (!valid(reply,board) || (setting&&reply.volume!==value)) throw Error('设备音量确认不匹配');
       publish({value:reply.volume,draft:reply.volume,known:true,persisted:reply.persisted,persistState:reply.persistState||'',savePending:reply.savePending,error:''});
@@ -27,7 +43,7 @@ export function createDeviceVolumeController({invoke,onState=()=>{}}) {
         : `读取设备音量失败：${message(error)}`});
       return false;
     } finally {
-      if (current(serial)) publish({busy:false,loading:false});
+      if (current(serial)) publish({busy:false,loading:false,waitingForTransfer:false});
     }
   }
   return {

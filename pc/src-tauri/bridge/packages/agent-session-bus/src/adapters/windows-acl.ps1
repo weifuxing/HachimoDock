@@ -49,7 +49,8 @@ try {
         $isDirectory = ($attrs -band [IO.FileAttributes]::Directory) -ne 0
         if ($isDirectory -ne $directory) { throw 'kind' }
         $script:stage = 'get-acl'
-        $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $name
+        $sections = [Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
+        $acl = if ($directory) { [IO.Directory]::GetAccessControl($name, $sections) } else { [IO.File]::GetAccessControl($name, $sections) }
         $script:stage = 'owner'
         $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
         $script:ownerMatches = $owner -eq $current.Value
@@ -79,10 +80,10 @@ try {
         }
         if (-not $seen.ContainsKey($current.Value) -or -not $seen.ContainsKey($system.Value)) { throw 'acl' }
     }
-    function New-PrivateAcl([Bool] $directory) {
+    function New-PrivateAcl([Bool] $directory, [Bool] $creating) {
         $script:stage = 'acl-build'
         $acl = if ($directory) { [Security.AccessControl.DirectorySecurity]::new() } else { [Security.AccessControl.FileSecurity]::new() }
-        $acl.SetOwner($current)
+        if ($creating) { $acl.SetOwner($current) }
         $acl.SetAccessRuleProtection($true, $false)
         $inherit = if ($directory) { [Security.AccessControl.InheritanceFlags] 3 } else { [Security.AccessControl.InheritanceFlags] 0 }
         foreach ($sid in @($current, $system)) {
@@ -98,9 +99,12 @@ try {
         # Never repair a foreign owner's entry, nor inspect any old token bytes.
         $script:stage = 'existing-owner'
         if ($old.owner -ne $current.Value) { throw 'owner' }
-        $acl = New-PrivateAcl $directory
+        $acl = New-PrivateAcl $directory $false
         $script:stage = 'set-acl'
-        Microsoft.PowerShell.Security\Set-Acl -LiteralPath $name -AclObject $acl
+        # Persist only the changed DACL. The owner was verified above; the
+        # audit ACL is outside this operation and requires a separate privilege.
+        if ($directory) { [IO.Directory]::SetAccessControl($name, $acl) }
+        else { [IO.File]::SetAccessControl($name, $acl) }
         $verified = Read-Snapshot $name $directory
         Assert-Private $verified
         return $verified
@@ -110,7 +114,7 @@ try {
         # Apply owner and protected DACL at creation, even for an elevated user.
         # Existing entries ignore this security argument and still undergo the
         # strict owner check below; this never takes ownership of an old entry.
-        $newAcl = New-PrivateAcl $true
+        $newAcl = New-PrivateAcl $true $true
         $script:stage = 'create-directory'
         [Void] [IO.Directory]::CreateDirectory($target, $newAcl)
         $directory = Protect-Entry $target $true
@@ -123,7 +127,7 @@ try {
         $directory = Read-Snapshot ([IO.Path]::GetDirectoryName($target)) $true
         Assert-Private $directory
         if ($operation -eq 'create-file') {
-            $newAcl = New-PrivateAcl $false
+            $newAcl = New-PrivateAcl $false $true
             $script:stage = 'create-file'
             # CreateNew cannot open/truncate/repair a preexisting token or file.
             $stream = [IO.FileStream]::new($target, [IO.FileMode]::CreateNew,

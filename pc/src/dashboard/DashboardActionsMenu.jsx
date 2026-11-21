@@ -56,7 +56,7 @@ export default function DashboardActionsMenu({
       </button>
       {open && (
         <div className="dashboard-actions-menu__list" role="menu">
-          <button
+          {onSendTest && <button
             type="button"
             className="dashboard-actions-menu__item"
             role="menuitem"
@@ -64,7 +64,7 @@ export default function DashboardActionsMenu({
           >
             <Send size={14} />
             发送测试消息
-          </button>
+          </button>}
           <button
             type="button"
             className="dashboard-actions-menu__item"
@@ -80,7 +80,7 @@ export default function DashboardActionsMenu({
               className="dashboard-actions-menu__item"
               role="menuitem"
               onClick={dispatch(onDeviceReturnHome)}
-              title="负一屏物理按键切不回主屏时，通过 USB 强制把设备 .screen-page 切到 main"
+              title="请求当前设备返回宠物主屏"
             >
               <ArrowUpLeft size={14} />
               ⤴ 设备返回主屏

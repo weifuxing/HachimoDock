@@ -12,21 +12,24 @@ const end = source.indexOf("\n  }, [", start);
 assert.ok(end > start);
 const body = source.slice(start + prefix.length, end);
 
-function fixture({ matches = false } = {}) {
+function fixture({ matches = false, readbackMatches = true, systemSettings = true } = {}) {
   let acknowledge, started;
   const entered = new Promise(resolve => { started = resolve; });
   const ack = new Promise(resolve => { acknowledge = resolve; });
   const events = [], writes = [];
+  let reads = 0;
   const queryToken = { current: 0 }, revision = { current: 1 }, target = { current: "board/connection/boot" };
   const bindings = {
-    usb: { connected: true, runtime: "esp-p4" }, hasKnownRuntime: true,
+    usb: { connected: true, runtime: "esp-p4", capabilities: { systemSettings } }, hasKnownRuntime: true,
+    isP4Runtime: true, SETTINGS_NOT_READY: "系统设置暂未生效",
     buttonConfigTargetBoardDeviceId: "board", buttonConfigQueryTokenRef: queryToken,
     buttonConfigRevisionRef: revision, voiceTarget: { key: target.current }, voiceTargetKeyRef: target,
-    voiceConfigRef: { current: { enabled: true } }, normalizeVoiceConfig: x => x,
+    voiceConfigRef: { current: { enabled: true, buttonActions: { p4_sw3_long: "system_settings" } } }, normalizeVoiceConfig: x => x,
+    buttonConfigForDevice: config => config,
     resolveButtonConfigForRuntime: config => ({ config, voiceButton: "sw2", voiceEnabled: true }),
     dispatchBoardButtonConfig: async input => { writes.push(input); started(); return ack; },
-    invoke: async command => { assert.equal(command, "usb_get_button_config"); return {}; },
-    boardButtonConfigMatchesClient: () => matches,
+    invoke: async command => { assert.equal(command, "usb_get_button_config"); reads++; return {}; },
+    boardButtonConfigMatchesClient: () => reads === 1 ? matches : readbackMatches,
     setVoiceConfigOtaState: x => events.push(["state", x]),
     setVoiceConfigDirty: x => events.push(["dirty", x]),
     setButtonConfigHydratedFor: x => events.push(["hydrated", x]),
@@ -68,4 +71,21 @@ test("a matching current button map is read-only and hydrates without rewriting"
   await f.run();
   assert.equal(f.writes.length, 0);
   assert.deepEqual(f.events.at(-1), ["hydrated", "board"]);
+});
+
+test("ACK without matching readback leaves the configuration pending", async () => {
+  const f = fixture({ readbackMatches: false });
+  const pending = f.run();
+  await f.entered;
+  f.acknowledge({ ok: true });
+  await pending;
+  assert.ok(f.events.some(([type, value]) => type === "state" && value.tone === "warning"));
+  assert.ok(!f.events.some(([type, value]) => type === "state" && value.tone === "success"));
+});
+
+test("matching supported bindings still show a deferred system settings action", async () => {
+  const f = fixture({ matches: true, systemSettings: false });
+  await f.run();
+  assert.equal(f.writes.length, 0);
+  assert.ok(f.events.some(([type, value]) => type === "state" && value.tone === "warning"));
 });

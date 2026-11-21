@@ -1,5 +1,7 @@
 /* Host-only fixture for extracted PRODUCTION functions; never opens a port. */
 #include <assert.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 #include "pet_p4_transport_audit.h"

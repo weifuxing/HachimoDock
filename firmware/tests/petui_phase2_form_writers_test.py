@@ -54,7 +54,8 @@ def test_actual_profile_parser_checks_else_and_tick_bodies_with_original_masks(p
 
 
 def test_production_longtext_writer_gate_rejects_form_program_host_and_duplicate_outputs(tmp_path):
-    code=(FW/'main/pet_p4_miniapp.c').read_text()
+    # Target code-size attributes do not affect the host parser assertions.
+    code=(FW/'main/pet_p4_miniapp.c').read_text().replace('__attribute__((optimize("Oz"))) ', '')
     body=r'''
 #define PET_P4_LONGTEXT 1
 #define PET_FORM_V2_ENABLED 1
@@ -96,7 +97,7 @@ int main(void){
     subprocess.run([str(exe)],check=True)
     # Production hook runs after complete program/form declarations and before
     # publication/refresh, so no first-render derived mutation can bypass it.
-    parse=code[code.index('static bool parse_runtime_impl('):code.index('static bool apply_effects(')]
+    parse=function(code,'parse_runtime_impl')
     assert parse.index('pet_component_program_parse(root,')<parse.index('if(!longtext_writers_valid(parsed))')<parse.index('parsed->active = true;')
 
 

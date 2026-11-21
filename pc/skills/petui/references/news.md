@@ -1,5 +1,19 @@
 # 有来源的每日一期资讯（PC 宿主能力）
 
+## WiFi6 科技头条
+
+在报告 `widgetWifiData=p4-wifi-data-v1` 的固件上，组件可选用
+`vars["petui.wifi_data"]={"type":"string","init":"news.hn"}`。
+此声明需要普通 v4 PC 宿主 surface、`p4-variable-bindings-v1`、`p4-input-v1`
+及现有的 `host.refresh/host.previous/host.next` 动作。仅组件可见时拉取公开 Hacker News
+科技头条，最多显示五条。显示标题、HN 条目编号、发布时间 UTC、缓存年龄与过期标记。
+左右切换条目，主操作请求刷新。设备直连视图是文字头条，语音、三类九条与完整正文
+继续由现有 PC 宿主提供。设备缓存过期后，收到的 PC 宿主快照可以接替。
+
+新组件包沿用 `daily-news` ID。此前已安装的完整包需要用新版 Pet Manager 在组件中心
+更新同一组件后，才可启用设备头条。旧固件使用原有 PC 服务。
+详情见 [设备 HTTPS 数据服务](wifi-data.md)。
+
 ## 0.1.156 每日期次与预热
 
 客户端启动后检查本机已启用资讯组件，并独立检查北京时间跨天；不依赖USB连接。

@@ -55,3 +55,13 @@ test("current catalog favorites remain visible without rewriting storage", () =>
   assert.deepEqual(readFavorites(storage).map(item=>item.id),["city-radio"]);
   assert.equal(writes,0);
 });
+
+test("official community versions can replace bundled copies at the same version", () => {
+  const work = { id: "city-radio", version: "1.4.1", official: true, contentHash: "a".repeat(64) };
+  const bundled = { version: "1.4.1", versionHash: "b".repeat(16), isBundledCopy: true };
+  assert.equal(versionState(work, bundled).updateAvailable, true);
+  assert.equal(versionState(work, bundled).contentConflict, false);
+  assert.equal(versionState(work, { ...bundled, isBundledCopy: false }).contentConflict, true);
+  assert.equal(versionState({ ...work, official: false }, bundled).contentConflict, true);
+  assert.equal(versionState(work, { ...bundled, version: "1.4.2" }).localNewer, true);
+});

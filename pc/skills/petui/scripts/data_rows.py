@@ -5,12 +5,24 @@ FIELDS=('label','value','detail','meta','tone')
 BIND_FIELDS=('label','value','detail','meta')
 PAGE=5
 REFRESH='data.refresh'
+
+def valid_wifi_feed_http(http):
+    return isinstance(http, dict) and bool(http) and all(
+        (key == 'accept' and value in ('application/json', 'application/geo+json',
+                                      'application/hal+json', 'application/vnd.api+json'))
+        or (key == 'revalidate' and value is True)
+        or (key == 'cache' and value == 'last-good')
+        for key, value in http.items()
+    )
+
 def _name(v):return isinstance(v,str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,31}',v) is not None
 def config(data,runtime=None):
     """Strict data extension; raises ValueError. Returns the normalized config."""
     def need(q):
         if not q:raise ValueError('Invalid data rows declaration')
-    need(isinstance(data,dict) and {'source','page_var'}<=set(data)<={'source','page_var','select_var','filters','refresh_action'})
+    need(isinstance(data,dict) and {'source','page_var'}<=set(data)<={'source','page_var','select_var','filters','refresh_action','url','response_map','http','connection'})
+    if 'http' in data:
+        need(data['source'] == 'wifi.feed' and valid_wifi_feed_http(data['http']))
     out={'select_var':data.get('select_var'),'filters':[],'refresh_action':data.get('refresh_action')}
     variables=runtime.get('vars',{}) if runtime else None
     def int_var(name):

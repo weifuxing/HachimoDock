@@ -32,7 +32,7 @@ int main(void){
 
 def test_main_loop_instrumentation_is_flag_gated_and_env_adds_nothing_else(tmp_path):
     main=(ROOT/'main/pet_p4_main.c').read_text();renderer=(ROOT/'main/pet_p4_renderer.c').read_text()
-    loop=main[main.index('  while (true) {\n    bool render_frame = false;'):main.index('pet_p4_renderer_note_loop(')]
+    loop=main[main.rindex('  while (true) {', 0, main.index('    bool render_frame = false;')):main.index('pet_p4_renderer_note_loop(')]
     assert loop.count('xSemaphoreTake(g_state_mutex, portMAX_DELAY);')==1 and loop.count('xSemaphoreGive(g_state_mutex);')==1
     assert loop.index('loop_wait_started_us = pet_p4_gap_clock_us();')<loop.index('xSemaphoreTake(g_state_mutex, portMAX_DELAY);')<loop.index('loop_held_started_us = pet_p4_gap_clock_us();')
     assert loop.index('loop_miniapp_started_us = pet_p4_gap_clock_us();')<loop.index('pet_p4_miniapp_process(now_ms')<loop.index('loop_miniapp_us = (uint32_t)')

@@ -32,6 +32,12 @@
 #define PET_CEXT_BIG_MAX_H 960u
 #define PET_CEXT_BIG_BUDGET_BYTES (1024u * 1024u)
 #define PET_CEXT_BIG_TILE_MAX_BYTES (64u * 1024u)
+#define PET_CEXT_SPEECH_PATH "runtime/speech.hab"
+#define PET_CEXT_SPEECH_MAX_BYTES (512u * 1024u)
+#define PET_CEXT_SPEECH_MAX_CUES 64u
+#define PET_CEXT_SPEECH_BLOCK_BYTES 166u
+#define PET_CEXT_SPEECH_CUE_BYTES (400u * PET_CEXT_SPEECH_BLOCK_BYTES)
+#define PET_CEXT_SPEECH_HEADER 8u
 #define PET_CEXT_SAMPLE_HEADER 8u  /* "P4A1" + u32 frames */
 #define PET_CEXT_CLIP_HEADER 16u   /* "P4V1" w u16 h u16 fps u8 pad u8 frames u16 bytes u32 */
 #define PET_CEXT_BIG_HEADER 20    /* "P4T1" cols u8 rows u8 tile_w u16 tile_h u16 w u16 h u16 count u8 pad u8 reserved u32; then count x {offset u32, bytes u32} */
@@ -41,6 +47,9 @@ typedef struct { char id[PET_CEXT_ID_MAX]; uint16_t w, h, frames; uint8_t fps; u
 typedef struct { char id[PET_CEXT_ID_MAX]; uint16_t w, h, tile_w, tile_h; uint8_t cols, rows; uint32_t bytes; } pet_cext_big_t;
 typedef struct {
   uint32_t media_generation; /* bound by publication, copied with the runtime/view snapshot */
+#if defined(PET_P4_WASM_AUDIO) && PET_P4_WASM_AUDIO
+  char speech_sha256[65];
+#endif
   bool sequence, samples, events, clip, big;
   pet_seq_program_t program;
   uint8_t sequence_volume;
@@ -81,6 +90,10 @@ typedef struct { uint32_t generation; bool enabled, sequence_active; uint8_t seq
 void pet_cext_audio_take(pet_cext_runtime_t *r, bool audible, pet_cext_audio_t *out);
 /* ---- media containers ---- */
 pet_cext_media_kind_t pet_cext_media_path_kind(const char *path, char id[PET_CEXT_ID_MAX]);
+/* HAB1 table entries use absolute offsets and exact IMA-block lengths. */
+bool pet_cext_speech_bank_valid(const uint8_t *data, size_t size);
+bool pet_cext_speech_cue(const uint8_t *data, size_t size, unsigned index,
+                         uint32_t *offset, uint32_t *bytes);
 bool pet_cext_sample_header(const uint8_t *data, size_t size, pet_cext_sample_t *out);
 bool pet_cext_clip_header(const uint8_t *data, size_t size, pet_cext_clip_t *out);
 /* Exact bounded P4I1 edge-tile validation; no decoding allocation. */

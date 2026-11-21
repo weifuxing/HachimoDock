@@ -18,7 +18,9 @@ def test_cached_video_keeps_worker_lifetime_and_audio_startup_protection(tmp_pat
     harness=(ROOT/'tests/p4_main_frame_adapter_test.c').read_text()
     harness=harness.replace('static bool pet_p4_audio_conversation_active(void){return false;}',
        'static bool conversation_ready;\nstatic bool pet_p4_audio_conversation_active(void){return conversation_ready;}\n'
-       'static bool pet_p4_audio_conversation_video_ready(void){return conversation_ready;}')
+       'static bool pet_p4_audio_conversation_video_ready(void){return conversation_ready;}\n'
+       'static bool ptt_ready;\n'
+       'static bool pet_p4_audio_ptt_video_ready(void){return ptt_ready;}')
     scenario=r"""
  /* A continuous initialized conversation may advance actual decoded frames;
   * another audio initialization revokes it without releasing physical work. */
@@ -45,6 +47,29 @@ def test_cached_video_keeps_worker_lifetime_and_audio_startup_protection(tmp_pat
  assert(harness_frame(&asset,"conversation2",&g_asset_cache[0],300));
  assert(pet_resources_realtime_finish(&broker,voice));
  conversation_ready=false;playback_busy=false;
+ /* PTT does not start background decoding while capture initializes. A ready
+  * ticket admits only cached video and offers at most one frame per 125 ms. */
+ fresh_source();
+ pet_resource_realtime_t ptt={0};
+ assert(pet_resources_realtime_begin(&broker,&ptt)==PET_RESOURCE_OK);
+ playback_busy=true;
+ now_us=1000000;
+ assert(!h264_prefetch_offer(&g_asset_cache[0],"ptt",16,16,true,0));
+ ptt_ready=true;
+ assert(pet_resources_realtime_video_ready(&broker,ptt,true));
+ assert(!harness_frame(&asset,"ptt",&g_asset_cache[0],300));
+ assert(h264_prefetch_worker());
+ assert(harness_frame(&asset,"ptt",&g_asset_cache[0],300));
+ assert(g_h264_presented_frame==0 && g_h264_prefetch_lifetime.phase==PET_PREFETCH_EMPTY);
+ now_us=1124999;
+ assert(!h264_prefetch_offer(&g_asset_cache[0],"ptt",16,16,false,1));
+ now_us=1125000;
+ assert(h264_prefetch_offer(&g_asset_cache[0],"ptt",16,16,false,1));
+ assert(h264_prefetch_worker());
+ assert(harness_frame(&asset,"ptt",&g_asset_cache[0],300));
+ assert(g_h264_presented_frame==1);
+ assert(pet_resources_realtime_finish(&broker,ptt));
+ ptt_ready=false;playback_busy=false;
  fresh_source();asset_cache_release(&g_asset_cache[0]);
  pet_resources_usage(&broker,&usage);
  assert(!usage.live_owners&&!usage.revoked_owners&&!usage.leases[PET_RESOURCE_CACHED_VIDEO]);

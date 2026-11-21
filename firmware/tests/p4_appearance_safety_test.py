@@ -280,6 +280,10 @@ def test_native_mount_callbacks_only_publish_bounded_work_not_block_usb_task(tmp
 typedef struct{uint8_t kind;uint32_t seq,payload_len;uint8_t*payload;}pet_p4_native_rx_frame_t;
 typedef struct{char board_device_id[64];bool mounted;}state_t;
 static state_t state={"review-board",false},*g_state=&state;
+static uint64_t g_keyboard_release_at;
+static atomic_uint g_voice_key_pending;
+static atomic_bool g_keyboard_online;
+#define VOICE_KEY_NONE 0
 static int g_state_mutex=1,g_rx_queue=1;static _Atomic int g_mount_pending;static _Atomic uint32_t g_observation_epoch,g_connection_generation;
 static bool in_callback,queue_full;static unsigned sends,locks,wakes;
 #define portMAX_DELAY 100000

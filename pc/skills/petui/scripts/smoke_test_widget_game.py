@@ -852,9 +852,11 @@ def smoke_test_game(widget_dir: Path) -> dict[str, Any]:
 def run_smoke_test(
     widget_dir: Path,
     capabilities: dict[str, Any] | None = None,
+    *,
+    community_publication: bool = False,
 ) -> dict[str, Any]:
     widget_dir = widget_dir.expanduser().resolve()
-    validation_errors = validate_widget(widget_dir, capabilities)
+    validation_errors = validate_widget(widget_dir, capabilities, community_publication=community_publication)
     if validation_errors:
         return {"ok": False, "path": str(widget_dir), "errors": validation_errors}
     try:
@@ -869,8 +871,10 @@ def main() -> int:
     parser.add_argument("widget_dir", type=Path)
     parser.add_argument("--capabilities", type=Path)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--community-publication", action="store_true")
     args = parser.parse_args()
-    result = run_smoke_test(args.widget_dir, load_capabilities(args.capabilities))
+    result = run_smoke_test(args.widget_dir, load_capabilities(args.capabilities),
+                            community_publication=args.community_publication)
     if args.json:
         print(json.dumps(result, ensure_ascii=False))
     elif result.get("ok") and result.get("mode") == "host-application-contract":

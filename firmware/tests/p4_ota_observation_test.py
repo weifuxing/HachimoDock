@@ -172,7 +172,7 @@ def test_ota_cache_is_default_off_not_a_validation_or_flash_authority():
     getter=_c_function(text,'pet_p4_ota_observed_image_state')
     for forbidden in ('esp_ota_get_','esp_partition_','mmap','malloc(','cJSON','xSemaphore','g_pending_verify','g_runtime_ready'):
         assert forbidden not in getter
-    commit=_c_function(text,'handle_commit')
+    commit=_c_function(text,'commit_transfer')
     assert commit.index('esp_ota_end(')<commit.index('esp_ota_get_partition_description(')<commit.index('esp_ota_set_boot_partition(')<commit.index('observe_boot_result(')
     assert '#define PET_P4_OTA_METADATA_CACHED 0' in (ROOT/'main/pet_p4_ota.h').read_text()
     assert (ROOT/'platformio.ini').read_text().count('-DPET_P4_OTA_METADATA_CACHED=1')==1

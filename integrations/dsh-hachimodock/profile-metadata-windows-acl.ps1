@@ -69,13 +69,13 @@ try {
     }
     $chainBefore = Read-Chain
     $before = Read-AclSnapshot $target
-    if ($before.snapshot.ownerSid -ne $current.Value -or $before.snapshot.directory -ne ($operation -eq 'verify-directory')) { throw 'owner-kind' }
+    if ($before.snapshot.ownerSid -notin $trusted -or $before.snapshot.directory -ne ($operation -eq 'verify-directory')) { throw 'owner-kind' }
     foreach ($ace in $before.snapshot.aces) {
         if ($ace.type -eq 0 -and $ace.sid -notin $trusted -and ($ace.mask -band (-bnot $readOnlyMask)) -ne 0) { throw 'foreign-write' }
     }
     $after = Read-AclSnapshot $target
     $chainAfter = Read-Chain
-    if ($after.snapshot.ownerSid -ne $current.Value -or $before.signature -cne $after.signature -or
+    if ($after.snapshot.ownerSid -ne $before.snapshot.ownerSid -or $before.signature -cne $after.signature -or
         $after.snapshot.directory -ne ($operation -eq 'verify-directory') -or $chainAfter.Count -ne $chainBefore.Count) { throw 'changed' }
     for ($i = 0; $i -lt $chainBefore.Count; $i++) {
         if ($chainBefore[$i].creation -ne $chainAfter[$i].creation -or $chainBefore[$i].written -ne $chainAfter[$i].written -or

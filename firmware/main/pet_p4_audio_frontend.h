@@ -16,6 +16,7 @@ const char *pet_p4_afe_failure(void);
 typedef struct {
   uint32_t frames, last_us, max_us, aec_us, ns_us, vad_us;
   uint32_t reference_samples;
+  uint32_t p95_us, p99_us, window_samples, over_20ms_frames;
 } pet_p4_afe_metrics_t;
 pet_p4_afe_metrics_t pet_p4_afe_metrics(void);
 void pet_p4_afe_reset_stream(void);

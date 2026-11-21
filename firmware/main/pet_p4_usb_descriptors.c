@@ -9,25 +9,27 @@
 
 enum {
   ITF_NUM_VENDOR = 0,
+  ITF_NUM_KEYBOARD,
   ITF_NUM_TOTAL,
 };
 
 enum {
   EPNUM_VENDOR_OUT = 0x01,
   EPNUM_VENDOR_IN = 0x81,
+  EPNUM_KEYBOARD_IN = 0x82,
 };
 
 static tusb_desc_device_t const desc_device = {
   .bLength = sizeof(tusb_desc_device_t),
   .bDescriptorType = TUSB_DESC_DEVICE,
   .bcdUSB = 0x0210,
-  .bDeviceClass = TUSB_CLASS_VENDOR_SPECIFIC,
+  .bDeviceClass = 0,  /* Composite classes are described by their interfaces. */
   .bDeviceSubClass = 0,
   .bDeviceProtocol = 0,
   .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,
   .idVendor = PET_P4_USB_VID,
   .idProduct = PET_P4_USB_PID,
-  .bcdDevice = 0x0100,
+  .bcdDevice = 0x0101,
   .iManufacturer = 0x01,
   .iProduct = 0x02,
   .iSerialNumber = 0x03,
@@ -38,11 +40,19 @@ uint8_t const *tud_descriptor_device_cb(void) {
   return (uint8_t const *) &desc_device;
 }
 
-#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_VENDOR_DESC_LEN)
+static uint8_t const desc_keyboard_report[] = { TUD_HID_REPORT_DESC_KEYBOARD() };
+
+uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance) {
+  return instance == 0 ? desc_keyboard_report : NULL;
+}
+
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_VENDOR_DESC_LEN + TUD_HID_DESC_LEN)
 
 static uint8_t const desc_configuration[] = {
   TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 250),
   TUD_VENDOR_DESCRIPTOR(ITF_NUM_VENDOR, 0x04, EPNUM_VENDOR_OUT, EPNUM_VENDOR_IN, CFG_TUD_VENDOR_EPSIZE),
+  TUD_HID_DESCRIPTOR(ITF_NUM_KEYBOARD, 0x05, HID_ITF_PROTOCOL_KEYBOARD,
+    sizeof(desc_keyboard_report), EPNUM_KEYBOARD_IN, sizeof(hid_keyboard_report_t), 8),
 };
 
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
@@ -115,6 +125,7 @@ static char const *const string_desc_arr[] = {
   "OpenClaw P4 Native USB",
   "p4-native-001",
   "P4 vendor bulk",
+  "HachimoDock Keyboard",
 };
 
 static uint16_t desc_str[64];

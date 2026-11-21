@@ -21,7 +21,7 @@ def fn(t,n):
  a,b=bounds(t,n);return t[a:b]
 
 def build_upload_binary(B):
- code=(S/'pet_p4_protocol.c').read_text();native=(S/'pet_p4_usb_native.c').read_text();header=(S/'pet_p4_protocol.h').read_text()
+ code=(S/'pet_p4_protocol.c').read_text().replace('__attribute__((optimize("Os"))) ', '');native=(S/'pet_p4_usb_native.c').read_text();header=(S/'pet_p4_protocol.h').read_text()
  fixture=(FIXTURES/'appearance_upload_prefix.inc').read_text()
  # Actual private production struct/API definitions.
  a=header.index('typedef struct {\n  pet_resource_owner_t owner;');b=header.index('bool pet_p4_appearance_phase_begin',a);fixture+=header[a:b]
@@ -139,7 +139,7 @@ def test_actual_phase_extractor_skips_helper_forward_declaration():
  assert fn(source,'asset_phase_send_current').strip()==_c_function(source,'asset_phase_send_current').strip()
 
 def test_cue_gate_precedes_actual_standalone_storage_admission():
- code=(S/'pet_p4_protocol.c').read_text()
+ code=(S/'pet_p4_protocol.c').read_text().replace('__attribute__((optimize("Os"))) ', '')
  for name in ['send_asset_slot_query_ack','handle_asset_activate']:
   actual=fn(code,name)
   assert actual.index('pet_p4_audio_status_cues_defer(true)')<actual.index('pet_resources_device_owner_open')

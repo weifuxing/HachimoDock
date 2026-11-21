@@ -11,14 +11,37 @@ const MAX_BYTES:u64=65536;
 pub(super) struct Pending {board:String,generation:u64,attempt:String,phase:String,state:String,transfer_id:String}
 #[derive(Clone,Serialize,Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
-struct RawQuarantine {board:String,generation:u64,attempt:String,port:String,#[serde(default)] identity:Option<UsbIdentity>}
-#[derive(Clone,Serialize,Deserialize)]
+#[derive(PartialEq, Eq)]
+pub(super) struct RawQuarantine {
+    pub(super) board: String,
+    generation: u64,
+    attempt: String,
+    port: String,
+    #[serde(default)]
+    identity: Option<UsbIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) boot_id: Option<String>,
+}
+#[derive(Clone,PartialEq,Eq,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct UsbIdentity {vid:u16,pid:u16,serial:String}
 fn port_key(port:&str)->String{
     if let Some(tail)=port.strip_prefix("/dev/tty."){return format!("/dev/cu.{tail}");}
     #[cfg(windows)] {return port.trim_start_matches(r"\\.\").to_ascii_uppercase();}
     #[cfg(not(windows))] port.to_owned()
+}
+impl RawQuarantine {
+    fn matches_candidate(&self, device: &UsbDeviceInfo) -> bool {
+        let same_port = port_key(&self.port) == port_key(&device.port_name);
+        match &self.identity {
+            None => same_port,
+            Some(id) if id.vid != device.vid || id.pid != device.pid => false,
+            Some(id) if !id.serial.is_empty() => id.serial == device.serial_number,
+            // A single matching USB model is safe to listen to after a COM
+            // rename. The board identity, not this adapter, authorizes writes.
+            Some(_) => true,
+        }
+    }
 }
 fn legacy_schema()->u32{1}
 #[derive(Clone,Serialize,Deserialize)]
@@ -39,6 +62,10 @@ impl Default for Disk{fn default()->Self{Self{schema_version:2,pending:vec![],qu
 struct State {disk:Disk,blocked:bool}
 pub(super) struct Journal {path:Option<PathBuf>,_lock:Option<File>,state:Mutex<State>}
 static JOURNAL:OnceLock<Arc<Journal>>=OnceLock::new();
+pub(super) const RAW_QUARANTINED: &str = "appearance_raw_stream_quarantined_no_probe";
+pub(super) fn valid_boot_id(value: &str) -> bool {
+    value.len() == 16 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
 fn valid_board(s:&str)->bool{!s.is_empty()&&s.len()<=128&&!s.chars().any(char::is_control)}
 fn save(path:&Path,disk:&Disk)->Result<(),String>{
     let bytes=serde_json::to_vec(disk).map_err(|_|ERROR)?;
@@ -71,6 +98,7 @@ impl Journal {
         let mut boards=HashSet::new();
         if !matches!(disk.schema_version,1|2|3)||disk.quarantines.len()>64||disk.quarantines.iter().any(|q|
             !valid_board(&q.board)||q.generation==0||q.port.is_empty()||q.port.len()>512||q.port.chars().any(char::is_control)
+            ||q.boot_id.as_deref().is_some_and(|id| !valid_boot_id(id))
             ||q.identity.as_ref().is_some_and(|i|i.serial.len()>128||i.serial.chars().any(char::is_control))
             ||!disk.pending.iter().any(|p|p.attempt==q.attempt&&p.board==q.board&&p.generation==q.generation))
             ||disk.pending.len()>64||disk.pending.iter().any(|p|!valid_board(&p.board)||p.generation==0
@@ -103,14 +131,14 @@ impl Journal {
         let pending=state.disk.pending.iter().any(|p|p.board==board);
         if state.disk.quarantines.iter().any(|q|q.board==board)
             ||(state.disk.schema_version==1&&pending){
-            return Err("appearance_raw_stream_quarantined_no_probe".into());
+            return Err(RAW_QUARANTINED.into());
         }
         Ok(pending)
     }
     pub(super) fn pending_for_recovery(&self,board:&str,intent:&str)->Result<Pending,String>{
         let state=self.state.lock().map_err(|_|ERROR)?;
         if state.blocked||state.disk.schema_version==1{return Err(ERROR.into());}
-        if state.disk.quarantines.iter().any(|q|q.board==board){return Err("appearance_raw_stream_quarantined_no_probe".into());}
+        if state.disk.quarantines.iter().any(|q|q.board==board){return Err(RAW_QUARANTINED.into());}
         if state.disk.archives.iter().any(|a|a.user_intent_id==intent){return Err("appearance_recovery_fresh_intent_required".into());}
         let pending=state.disk.pending.iter().find(|p|p.board==board).cloned().ok_or("appearance_recovery_no_pending")?;
         if pending.attempt==intent{return Err("appearance_recovery_fresh_intent_required".into());}
@@ -153,7 +181,7 @@ impl Journal {
         if state.blocked{return Err(ERROR.into());}
         if (state.disk.schema_version==1&&!state.disk.pending.is_empty())||state.disk.quarantines.iter().any(|q|
             port_key(&q.port)==port_key(port)||board==Some(q.board.as_str())){
-            return Err("appearance_raw_stream_quarantined_no_probe".into());
+            return Err(RAW_QUARANTINED.into());
         }
         Ok(())
     }
@@ -165,12 +193,52 @@ impl Journal {
                 (Some(old),Some(new)) if old.vid!=new.vid||old.pid!=new.pid
                     ||(!old.serial.is_empty()&&!new.serial_number.is_empty()&&old.serial!=new.serial_number)=>{},
                 // Missing identity is NOT proof that a renamed node is safe.
-                _=>return Err("appearance raw port identity unresolved; probe blocked".into()),
+                _=>return Err(RAW_QUARANTINED.into()),
             }
         }
         Ok(())
     }
-    fn raw_intent(&self,attempt:&Attempt,port:&str,identity:Option<UsbIdentity>)->Result<(),String>{
+    pub(super) fn reset_required(&self, board: &str) -> Result<bool, String> {
+        let state = self.state.lock().map_err(|_| ERROR)?;
+        if state.blocked { return Err(ERROR.into()); }
+        Ok(state.disk.quarantines.iter().any(|q| q.board == board)
+            || (state.disk.schema_version == 1 && state.disk.pending.iter().any(|p| p.board == board)))
+    }
+
+    pub(super) fn raw_recovery_target(&self, board: &str, devices: &[UsbDeviceInfo])
+        -> Result<(RawQuarantine, String), String>
+    {
+        let state = self.state.lock().map_err(|_| ERROR)?;
+        if state.blocked { return Err(ERROR.into()); }
+        if state.disk.schema_version == 1 { return Err("appearance_reset_metadata_missing".into()); }
+        let target = state.disk.quarantines.iter().find(|q| q.board == board)
+            .ok_or("appearance_reset_no_quarantine")?;
+        let mut candidates = devices.iter().filter(|device| target.matches_candidate(device));
+        let device = candidates.next().ok_or("appearance_reset_usb_missing")?;
+        if candidates.next().is_some() || state.disk.quarantines.iter().any(|other|
+            other != target && (other.identity.is_none() || other.matches_candidate(device)
+                || port_key(&other.port) == port_key(&device.port_name)))
+        {
+            return Err("appearance_reset_usb_ambiguous".into());
+        }
+        Ok((target.clone(), device.port_name.clone()))
+    }
+
+    pub(super) fn release_raw_after_reset(&self, target: &RawQuarantine) -> Result<(), String> {
+        let mut state = self.state.lock().map_err(|_| ERROR)?;
+        if state.blocked || !state.disk.quarantines.contains(target) { return Err(ERROR.into()); }
+        let mut next = state.disk.clone();
+        next.quarantines.retain(|q| q != target);
+        // The original mutation is still unknown. Only the physical scan gate
+        // is released; a later explicit appearance intent still needs observation.
+        if let Some(path) = &self.path {
+            if save(path, &next).is_err() { state.blocked = true; return Err(ERROR.into()); }
+        }
+        state.disk = next;
+        Ok(())
+    }
+
+    fn raw_intent(&self,attempt:&Attempt,port:&str,identity:Option<UsbIdentity>,boot_id:Option<&str>)->Result<(),String>{
         if port.is_empty()||port.len()>512||port.chars().any(char::is_control){return Err(ERROR.into());}
         let mut state=self.state.lock().map_err(|_|ERROR)?;
         if state.blocked||!state.disk.pending.iter().any(|p|p.attempt==attempt.id){return Err(ERROR.into());}
@@ -180,7 +248,7 @@ impl Journal {
                 (Some(a),Some(b))=>a.vid==b.vid&&a.pid==b.pid&&(a.serial.is_empty()||b.serial.is_empty()||a.serial==b.serial),
                 _=>false,
             }){return Err("appearance raw stream identity already quarantined".into());}
-        state.disk.quarantines.push(RawQuarantine{board:attempt.board.clone(),generation:attempt.generation,attempt:attempt.id.clone(),port:port.into(),identity});
+        state.disk.quarantines.push(RawQuarantine{board:attempt.board.clone(),generation:attempt.generation,attempt:attempt.id.clone(),port:port.into(),identity,boot_id:boot_id.filter(|id| valid_boot_id(id)).map(str::to_owned)});
         self.persist(&mut state)
     }
     fn raw_confirmed(&self,attempt:&Attempt)->Result<(),String>{
@@ -218,7 +286,7 @@ impl Attempt {
         if !valid_transfer_id(transfer_id){return Err("invalid appearance transferId".into());}
         self.journal.begin(self,phase,transfer_id)?;self.submitted.store(true,Ordering::Release);Ok(())
     }
-    pub(super) fn raw_intent(&self,port:&str,identity:Option<UsbIdentity>)->Result<(),String>{self.journal.raw_intent(self,port,identity)}
+    pub(super) fn raw_intent(&self,port:&str,identity:Option<UsbIdentity>,boot_id:Option<&str>)->Result<(),String>{self.journal.raw_intent(self,port,identity,boot_id)}
     pub(super) fn raw_confirmed(&self)->Result<(),String>{self.journal.raw_confirmed(self)}
     pub(super) fn uncertain(&self){if self.submitted.load(Ordering::Acquire){self.unknown.store(true,Ordering::Release);}}
 }
@@ -280,6 +348,12 @@ impl UsbSerialManager {
     }
     pub(super) fn activation_update(&self,update:impl FnOnce(&mut super::appearance_activation_evidence::Evidence)) {
         if let Ok(Some(a))=self.active_appearance_attempt(){if let Ok(mut trace)=a.activation.lock(){if let Some(t)=trace.as_mut(){update(t);}}}
+    }
+    pub(super) fn reset_recovery_journal(&self) -> Result<&Journal, String> {
+        #[cfg(test)]
+        { Ok(&self.appearance_journal) }
+        #[cfg(not(test))]
+        { JOURNAL.get().map(Arc::as_ref).ok_or_else(|| ERROR.into()) }
     }
     pub(super) fn ensure_wire_available(&self,port:&str,board:Option<&str>)->Result<(),String>{
         #[cfg(test)] let journal=&self.appearance_journal;

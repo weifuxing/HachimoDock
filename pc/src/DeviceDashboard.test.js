@@ -232,9 +232,9 @@ test("dashboard keeps the client button map authoritative across reconnect and f
   const p4Protocol = readRepoFile("..", "firmware", "main", "pet_p4_protocol.c");
 
   assert.match(dashboard, /invoke\("usb_get_button_config"/);
-  assert.match(dashboard, /boardButtonConfigMatchesClient\(clientConfig, boardConfig, usb\.runtime\)/);
+  assert.match(dashboard, /boardButtonConfigMatchesClient\(clientConfig, boardConfig, usb\.runtime, usb\.capabilities/);
   assert.match(dashboard, /await syncClientConfig\(\)/);
-  assert.match(dashboard, /已使用客户端按钮配置覆盖设备/);
+  assert.match(dashboard, /已同步并核对设备按钮配置/);
   const queryFailure=dashboard.slice(dashboard.indexOf("} catch (error) {",dashboard.indexOf("const refreshButtonConfigFromBoard")),dashboard.indexOf("}, [",dashboard.indexOf("const refreshButtonConfigFromBoard")));
   assert.match(queryFailure, /已停止自动写入/);
   assert.doesNotMatch(queryFailure, /await syncClientConfig/);
@@ -282,7 +282,7 @@ test("ESP32-P4 exposes button presses plus all four joystick directions", () => 
   assert.match(dashboard, /p4_sw2_short:\s*"component_center"/);
   assert.match(dashboard.match(/export const DEFAULT_BUTTON_ACTIONS = \{([\s\S]*?)\};/)[1], /p4_sw2_long:\s*"realtime_chat"/);
   assert.match(dashboard, /export const DEFAULT_BUTTON_ACTIONS = \{[\s\S]*?p4_sw3_short:\s*"page_back"/);
-  assert.match(dashboard, /p4_sw3_long:\s*"disabled"/);
+  assert.match(dashboard, /p4_sw3_long:\s*"system_settings"/);
   assert.match(dashboard, /p4_encoder_press:\s*"page_enter"/);
   assert.match(dashboard, /p4_encoder_long:\s*"disabled"/);
   assert.match(dashboard, /p4_encoder_cw:\s*"session_next"/);
@@ -442,9 +442,10 @@ test("board audio enable starts local runtimes and targets the active board", ()
   assert.match(source, /const targetBoardDeviceId = onlineBoardDeviceId \|\| usb\.boardDeviceId \|\| binding\.boardDeviceId;/);
   assert.match(source, /if \(action === "start"\) \{[\s\S]*ensureBridgeRuntime\(\)/);
   assert.match(source, /ensure_device_voice_runtime/);
-  assert.match(source, /isP4Runtime \? "ensure_device_voice_runtime" : "ensure_voice_runtime"/);
+  assert.match(source, /p4VoiceRuntime \? "ensure_device_voice_runtime" : "ensure_voice_runtime"/);
   assert.match(source, /boardDeviceId: targetBoardDeviceId/);
-  assert.match(source, /\[voiceTarget\.key, activeVoiceTriggerId, binding\.boardDeviceId, isP4Runtime, onlineBoardDeviceId, sendAudioBridgeSignal, usb\.boardDeviceId, usb\.connectionId\]/);
+  assert.match(source, /wifiTarget\?\.boardDeviceId \|\| usb\.boardDeviceId/);
+  assert.match(source, /wifiDeviceControl\(invoke, wifiTarget, input\.action === "start" \? "enableMicrophone" : "disableMicrophone"\)/);
   assert.match(rust, /fn ensure_device_voice_runtime\s*\(/);
   assert.match(rust, /pc_audio::built_in_stt_status\(\)/);
   assert.match(rust, /pc_microphone_enabled = action == "start" && !p4_usb_connected/);
@@ -453,7 +454,7 @@ test("board audio enable starts local runtimes and targets the active board", ()
 
   const panelSource = readSource("dashboard/VoiceAssistantPanel.jsx");
   assert.match(panelSource, /audioBlockingReason/);
-  assert.match(panelSource, /使用设备麦克风录音并通过 USB 转发/);
+  assert.match(panelSource, /使用设备麦克风录音并通过 \$\{voiceTransport\} 转发/);
   assert.match(panelSource, /disabled=\{[\s\S]*?audioBridgePending[\s\S]*?audioBlockingReason[\s\S]*?voiceConfig\.enabled/);
   assert.doesNotMatch(panelSource, /disabled=\{state\.audioBridgePending \|\| !!blockingReason\}/);
 });
@@ -465,7 +466,7 @@ test("voice enablement binds a real hardware PTT action and applies it immediate
   assert.match(source, /export function applyVoiceEnabledForRuntime/);
   assert.match(source, /next\.buttonActions\[selectedRow\.id\]|\? "voice_ptt"/);
   assert.match(source, /P4_DEFAULT_VOICE_TRIGGER = "sw1\.hold"/);
-  assert.match(source, /resolveButtonConfigForRuntime\(requestedConfigInput, usb\.runtime\)/);
+  assert.match(source, /resolveButtonConfigForRuntime\(buttonConfigForDevice\(requestedConfig,[\s\S]*?usb\.capabilities\?\.nativeUsbHid === "p4-hid-keyboard-v1",\s*usb\.capabilities\?\.bluetoothShortcutKeys === "hid-usage-v1"\), usb\.runtime\)/);
   assert.match(source, /const requestedRuntimeVoiceEnabled = requested\.voiceEnabled/);
   assert.match(source, /const updateVoiceEnabled = useCallback/);
   assert.match(source, /await applyVoiceConfigOverUsb\(next\)/);
@@ -483,7 +484,7 @@ test("board voice action injection status is surfaced in the voice panel", () =>
   assert.match(dashboardSource, /useDeviceVoiceRouter/);
   assert.match(source, /postMockButtonInject/);
   assert.match(source, /\/mock-button-inject/);
-  assert.match(source, /http_request_text/);
+  assert.match(source, /invoke\("local_bridge_request", \{ route: "\/mock-button-inject", body: payload \}\)/);
   assert.match(source, /listen\("usb-message"/);
   assert.match(source, /listen\("usb-input-action-result"/);
   assert.match(source, /listen\("voice-transcript"/);
@@ -497,7 +498,7 @@ test("board voice action injection status is surfaced in the voice panel", () =>
   assert.match(source, /\["visible", "focused-input"\]\.includes\(action\.composerMode\)[\s\S]*?composerError/);
   assert.match(source, /composerMode === "focused-input"[\s\S]*?MiMoCode 当前光标/);
   assert.match(rust, /context\.target\.agent_id == "mimocode"/);
-  assert.match(rust, /capture_focused_text_target/);
+  assert.match(rust, /prepare_mimo_text_target/);
   assert.match(rust, /insert_at_focused_text_target/);
   assert.match(rust, /submit_at_focused_text_target/);
   assert.match(rust, /"composerMode": "focused-input"/);
@@ -545,16 +546,16 @@ test("P4 reconnect automatically rearms device microphone relay without PC captu
   const source = readSource("DeviceDashboard.jsx");
 
   assert.match(source, /const rearmDeviceVoice = async \(\) =>/);
-  assert.match(source, /const bridgeRuntime = await ensureBridgeRuntime\(\);\s*if \(cancelled\) return;/);
+  assert.match(source, /const bridgeRuntime = await ensureBridgeRuntime\(\);\s*if \(!current\(\)\) return;/);
   assert.match(source, /invoke\("ensure_device_voice_runtime"\)/);
-  assert.match(source, /input: \{ interactive: false \},\s*\}\);\s*if \(cancelled\) return;/);
+  assert.match(source, /input: \{ interactive: false \},\s*\}\);\s*if \(!current\(\)\) return;/);
   assert.match(source, /input: \{ interactive: false \}/);
   assert.match(source, /if \(voiceRuntime\?\.deferred\)/);
   assert.match(source, /subscribeAsrCredentialUpdates\(window, resumeDeviceVoiceAfterCredentialAccess\)/);
   assert.match(source, /message: "设备麦克风已自动恢复"/);
   assert.match(source, /voiceButton: activeVoiceTriggerId/);
   assert.match(source, /buttonConfigHydratedFor !== p4TargetBoardDeviceId/);
-  assert.match(source, /\|\| !runtimeVoiceEnabled/);
+  assert.match(source, /if \(\s*!runtimeVoiceEnabled/);
 });
 
 test("Button-selected conversations are temporary and bound to status and input routing", () => {
@@ -823,7 +824,8 @@ test("voice action injection avoids stale legacy bridge runtimes", () => {
   const source = readSource("DeviceDashboard.jsx");
   const rust = readRepoFile("src-tauri", "src", "lib.rs");
 
-  assert.match(source, /ports\.push\(BRIDGE_HTTP_PRIMARY_PORT\)/);
+  assert.match(source, /invoke\("local_bridge_request"/);
+  assert.doesNotMatch(source, /ports\.push\(BRIDGE_HTTP_PRIMARY_PORT\)/);
   assert.doesNotMatch(source, /BRIDGE_HTTP_LEGACY_PORT/);
   assert.doesNotMatch(source, /ports\.push\(BRIDGE_HTTP_PRIMARY_PORT,\s*BRIDGE_HTTP_LEGACY_PORT\)/);
 
@@ -832,7 +834,8 @@ test("voice action injection avoids stale legacy bridge runtimes", () => {
   assert.match(rust, /stop_bridge_launch_agent\(&runtime_paths\);/);
   assert.match(rust, /stop_legacy_bridge_runtime\(\);/);
   assert.match(rust, /launchctl/);
-  assert.match(rust, /DEFAULT_BRIDGE_PORT\r?\n\s*\);/);
+  assert.match(rust, /bridge_capability::load\("control"\)/);
+  assert.match(rust, /client\.post\(&url\)\.bearer_auth\(&cap\.token\)/);
   assert.match(rust, /error\.is_connect\(\) && attempt < 8/);
   assert.match(rust, /"requestId": request_id\.clone\(\)/);
   assert.doesNotMatch(rust, /let ports = \[DEFAULT_BRIDGE_PORT,\s*LEGACY_BRIDGE_PORT\];/);
@@ -876,7 +879,7 @@ test("board button config sends twelve visible gestures as sixteen internal bind
   // helper, reused by both the manual OTA button and the component-center install.
   assert.match(source, /export async function dispatchBoardButtonConfig/);
   assert.match(source, /invoke\("button_config_signal"/);
-  assert.match(source, /bindings: buildBoardButtonConfigBindings\(buttonActions, buttonValues, runtime, voiceEnabled\)/);
+  assert.match(source, /const bindings = buildBoardButtonConfigBindings\(buttonActions, buttonValues, runtime, voiceEnabled\)/);
   assert.match(source, /const ack = await dispatchBoardButtonConfig\(/);
   assert.match(source, /voiceEnabled: requestedRuntimeVoiceEnabled/);
   assert.match(source, /按钮配置已写入，正在准备设备麦克风识别通道/);
@@ -899,7 +902,7 @@ test("board button config sends twelve visible gestures as sixteen internal bind
 
   const panelSource = readSource("dashboard/BoardButtonPanel.jsx");
   assert.match(panelSource, /个手势/);
-  assert.match(panelSource, /12 GESTURES/);
+  assert.match(panelSource, /gestureCount=\{controlRows.length\}/);
   assert.match(panelSource, /已同步/);
   assert.match(panelSource, /同步到设备/);
 
@@ -932,7 +935,9 @@ test("voice bus polling self-heals the managed bridge after a local port failure
 
   assert.match(source, /let inFlight = false;/);
   assert.match(client, /AGENT_BUS_REQUEST_TIMEOUT_MS = 3000/);
-  assert.match(client, /setTimeout\(\(\) => ctl\.abort\(\), AGENT_BUS_REQUEST_TIMEOUT_MS\)/);
+  assert.match(client, /setTimeout\(abortFromCaller, AGENT_BUS_REQUEST_TIMEOUT_MS\)/);
+  assert.match(client, /Promise\.race/);
+  assert.match(client, /invoke\("local_bridge_request"/);
   assert.match(source, /const runtime = await ensureBridgeRuntime\(\)/);
   assert.match(source, /if \(cancelled \|\| ctl\.signal\.aborted\) return;/);
   assert.match(source, /if \(!runtime\?\.running\)/);
@@ -942,20 +947,21 @@ test("voice bus polling self-heals the managed bridge after a local port failure
   );
   assert.match(
     rust,
-    /pid\.filter\(\|candidate\| process_exists\(\*candidate\)\)[\s\S]*wait_for_bridge_ready\(DEFAULT_BRIDGE_PORT, 6, 250\)/,
+    /pid\.filter\(\|candidate\| process_exists\(\*candidate\)\)[\s\S]*wait_for_bridge_ready\(DEFAULT_BRIDGE_PORT, existing_pid, 6, 250\)/,
   );
   assert.match(
     rust,
     /managed bridge \{existing_pid\} is alive but unresponsive; replacing it[\s\S]*stop_managed_bridge/,
   );
   assert.match(rust, /probe_agent_bus_running\(DEFAULT_AGENT_BUS_PORT\)/);
+  assert.match(rust, /fn wait_for_bridge_ready[\s\S]*?if !managed_runtime::is_live\(pid\) \{\s*return false;/);
   assert.match(rust, /GET \/agent\/health HTTP\/1\.1/);
 });
 
 test("P4 voice polling waits for identity and delegates to the target-bound poller", () => {
   const source = readSource("DeviceDashboard.jsx");
   const helper = readSource("dashboard/voice-runtime-target.js");
-  assert.match(source, /voiceRuntimeTarget\(usb, selectedAgentId\)/);
+  assert.match(source, /voiceRuntimeTarget\(usb, selectedAgentId, wifi\)/);
   assert.match(source, /voiceTargetKeyRef\.current = voiceTarget\.key/);
   assert.match(source, /createVoiceRuntimePoller/);
   assert.match(source, /isCurrent:.*voiceTargetKeyRef\.current===voiceTarget\.key/);
@@ -1049,31 +1055,12 @@ test("manual P4 appearance recovery carries the exact board identity", () => {
 
 // ---- NEW: 4-section IA tests (added in Step 1) ----
 
-test("dashboard places Agent and appearance before button configuration", () => {
+test("button configuration only renders on the keyboard page", () => {
   const source = readSource("DeviceDashboard.jsx");
-
-  // Imports shell + dashboard children.
-  assert.match(source, /from\s+"\.\/shell\/DeviceContext\.jsx"/);
-  assert.match(source, /from\s+"\.\/shell\/ToastStack\.jsx"/);
-  assert.match(source, /PageShell/);
-  assert.match(source, /Card/);
-  assert.match(source, /Card\.Collapsible/);
-  assert.match(source, /DeviceStatusBar/);
-  assert.match(source, /ChannelMatrixCard/);
-  assert.match(source, /BoardButtonPanel/);
-  assert.match(source, /VoiceAssistantPanel/);
-  assert.match(source, /DashboardActionsMenu/);
-
-  // Agent/appearance comes directly after device status, followed by physical
-  // button configuration, while voice remains the final collapsible region.
-  const idxStatusBar = source.indexOf("<DeviceStatusBar");
-  const idxCurrent = source.indexOf("<ChannelMatrixCard");
-  const idxButtons = source.indexOf("<BoardButtonPanel");
-  const idxVoice = source.indexOf("<VoiceAssistantPanel");
-  assert.ok(idxStatusBar !== -1 && idxCurrent !== -1 && idxButtons !== -1 && idxVoice !== -1);
-  assert.ok(idxStatusBar < idxCurrent, "device status before Agent/appearance");
-  assert.ok(idxCurrent < idxButtons, "Agent/appearance before button config");
-  assert.ok(idxButtons < idxVoice, "button config before voice");
+  const home = source.slice(source.indexOf("{active && <PageShell"));
+  assert.match(source, /\{keyboardActive && <KeyboardConfiguration[\s\S]*<BoardButtonPanel[\s\S]*<\/KeyboardConfiguration>/);
+  assert.doesNotMatch(home, /<BoardButtonPanel/);
+  assert.match(home, /<DeviceStatusBar[\s\S]*<ChannelMatrixCard[\s\S]*<VoiceAssistantPanel/);
 });
 
 test("dashboard pulls device state from useDeviceContext (no local polling)", () => {
@@ -1097,9 +1084,11 @@ test("dashboard freezes the P4 target board when diagnostics or firmware modal o
   assert.ok(firmwareModal, "expected FirmwareUpdateModal");
   assert.ok(diagnosticsModal, "expected DeviceDiagnosticsModal");
   assert.match(source, /setFirmwareTargetBoardDeviceId\(usb\.boardDeviceId \|\| ""\)/);
-  assert.match(source, /setDiagnosticsTargetBoardDeviceId\(usb\.boardDeviceId \|\| ""\)/);
+  assert.match(source, /setDiagnosticsTargetBoardDeviceId\(wifiControlReady \? wifi\.boardDeviceId : usb\.boardDeviceId \|\| ""\)/);
+  assert.match(diagnosticsModal[0], /wifiTarget=\{diagnosticsWifiTarget\}/);
   assert.match(firmwareModal[0], /expectedBoardDeviceId=\{firmwareTargetBoardDeviceId\}/);
   assert.match(diagnosticsModal[0], /expectedBoardDeviceId=\{diagnosticsTargetBoardDeviceId\}/);
+  assert.match(diagnosticsModal[0], /usb\.boardDeviceId === diagnosticsTargetBoardDeviceId\s*\? usb\.capabilities : null/);
 });
 
 test("dashboard deletes the old runtime/Bridge card and inline panels", () => {

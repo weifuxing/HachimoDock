@@ -11,9 +11,8 @@ test("public builds use per-computer networking, never embedded proxy or credent
   assert.match(network, /use_native_tls\(\)/);
   assert.match(network, /ProxyMode::Direct => builder.no_proxy\(\)/);
   assert.match(network, /Policy::none\(\)/);
-  assert.match(network, /const BUNDLED_CA: &str = ""/);
-  assert.doesNotMatch(network, /approved-internal-ca|include_str!.*OUT_DIR/);
-  assert.match(network, /certificates\(BUNDLED_CA\)/);
+  assert.doesNotMatch(network, /BUNDLED_CA|approved-internal-ca|include_str!.*OUT_DIR/);
+  assert.match(network, /certificates\(&settings\.ca_pem\)/);
 });
 test("API settings exposes saved-config probes and private per-machine certificate import", () => {
   const ui = read("./LlmNetworkSettings.jsx");
@@ -41,7 +40,7 @@ test("all product cloud routes share trust while LAN stays direct", () => {
   const lan = lib.slice(lib.indexOf("fn lan_http_client("), lib.indexOf("fn resolve_usb_inject_agent_id("));
   assert.match(lan, /\.no_proxy\(\)/);
   assert.doesNotMatch(lan, /llm_network/);
-  assert.match(read("../src-tauri/src/codex_import.rs"), /command.env\("NODE_EXTRA_CA_CERTS", file.path\(\)\)/);
+  assert.match(read("../src-tauri/src/codex_import.rs"), /command.env\("NODE_EXTRA_CA_CERTS", file\)/);
 });
 
 test("cloud UI and diagnostics describe shared networking without signed URL logs", () => {

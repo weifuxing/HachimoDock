@@ -5,7 +5,8 @@ import * as path from 'node:path';
 import {tmpdir} from 'node:os';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import vm from 'node:vm';
-import {randomUUID} from 'node:crypto';
+import {randomUUID,createHash} from 'node:crypto';
+import {spawnSync as nativeSpawnSync} from 'node:child_process';
 import {desktopBuildPaths,macAppIdentity,peProductVersion,windowsExeIdentity,verifyBuildReceipt,readBuildReceipt,receiptArgument} from './desktop-build-artifact.mjs';
 const scripts=path.dirname(fileURLToPath(import.meta.url));
 const version='0.1.173';
@@ -39,7 +40,14 @@ function runTemplate(name,root,{env={},args=[],spawn=()=>({status:0}),extra={}}=
   const source=fs.readFileSync(path.join(scripts,name),'utf8').replace(/^import[\s\S]*?from\s+['"][^'"]+['"];\s*/gm,'').replaceAll('import.meta.url',JSON.stringify(url));
   const processStub={platform:'darwin',arch:'arm64',argv:['node',filename,...args],execPath:'node',env,cwd:()=>cwd,exit:code=>{throw Error(`exit ${code}`);}};
   const context={...fs,...path,Buffer,URL,JSON,console:{log(){},error(){}},process:processStub,tmpdir:()=>root,
-    fileURLToPath,randomUUID,spawnSync:spawn,verifyVoiceBundle:()=>({enabled:false}),
+    fileURLToPath,randomUUID,createHash,spawnSync:(command,args,options)=>{
+      if(command==='python3' && args[1]?.endsWith('/scripts/build/local_config.py')) {
+        const resolver=path.resolve(scripts,'../../scripts/build/local_config.py');
+        const cleanEnv={...process.env};delete cleanEnv.HACHIMI_WORKSPACE_ROOT;delete cleanEnv.HACHIMI_LOCAL_CONFIG;
+        return nativeSpawnSync(command,['-B',resolver,...args.slice(2)],{...options,env:{...cleanEnv,...env}});
+      }
+      return spawn(command,args,options);
+    },verifyVoiceBundle:()=>({enabled:false}),
     desktopBuildPaths:o=>desktopBuildPaths({...o,env,cwd}),macAppIdentity:macIdentity,windowsExeIdentity,
     verifyBuildReceipt,readBuildReceipt,receiptArgument:a=>{const i=a.indexOf('--receipt');return i>=0?receiptArgument(a):env.PET_MANAGER_BUILD_RECEIPT||null;},...extra};
   vm.runInNewContext(source,context,{filename:name,timeout:2000});return {repo,cwd};
@@ -103,10 +111,17 @@ test('actual signer retains unsigned receipt and emits a new signed SHA after co
   const root=fixture(t),shared=path.join(root,'shared'),app=path.join(shared,'release/bundle/macos/HachimiDock.app');macApp(app);
   const before=macIdentity(app,version),unsigned=path.join(root,'unsigned.json'),signed=path.join(root,'signed.json');fs.writeFileSync(unsigned,JSON.stringify(before));
   const original=fs.readFileSync(unsigned);let signedCalls=0;
-  runTemplate('sign-macos-local-app.mjs',root,{env:{CARGO_TARGET_DIR:shared},args:[app,'--receipt',unsigned,'--output-receipt',signed],spawn(_command,args){
+  const signer = signingFixture(root);
+  runTemplate('sign-macos-local-app.mjs',root,{env:{CARGO_TARGET_DIR:shared,...signer.env},args:[app,'--receipt',unsigned,'--output-receipt',signed],spawn(command,args){
     if(args.includes('--force')){signedCalls++;fs.appendFileSync(path.join(app,'Contents/MacOS/pet-manager-tauri'),'-signature');}
-    return {status:0,stdout:'designated => identifier "com.petmanager.desktop"',stderr:''};
+    return signer.spawn(command,args);
   }});
+  const sign = signer.calls.find(c=>c.args.includes('--force'));
+  assert.equal(sign.command, '/usr/bin/codesign');
+  assert.equal(sign.args[sign.args.indexOf('--sign')+1], signer.pin);
+  assert.ok(sign.args.includes('--timestamp=none'));
+  assert.ok(!sign.args.includes('--requirements') && !sign.args.includes('-r'));
+  assert.ok(!signer.calls.some(c=>/notary|stapler/.test(c.command)));
   assert.equal(signedCalls,1);assert.deepEqual(fs.readFileSync(unsigned),original);
   const after=readBuildReceipt(signed);assert.notEqual(after.sha256,before.sha256);verifyBuildReceipt(macIdentity(app,version),after);
 });
@@ -151,4 +166,104 @@ test('existing signed output receipt is never overwritten and rejects before sig
 test('relocation cannot turn an incomplete receipt into build evidence',t=>{
   const root=fixture(t),app=path.join(root,'app');macApp(app);const identity=macIdentity(app,version),receipt={...identity};delete receipt.path;
   assert.throws(()=>verifyBuildReceipt(identity,receipt,{relocated:true}),/receipt/);
+});
+
+// Execute the real signer with mock native commands and real disposable files.
+function signingFixture(root, overrides={}) {
+  const leaf=Buffer.from('fixture DER leaf'), pin=createHash('sha1').update(leaf).digest('hex').toUpperCase();
+  const config=path.join(root,'toolchains.local.json');
+  fs.writeFileSync(config,JSON.stringify({macos:{signingIdentity:pin}}));
+  const calls=[];
+  return {pin,env:{HACHIMI_LOCAL_CONFIG:config},calls,spawn(command,args){
+    calls.push({command,args});
+    if(overrides.failAt && args.includes(overrides.failAt))return {status:1,stderr:'mock failure'};
+    let stdout='';
+    if(command==='/usr/bin/security')stdout=overrides.noIdentity?'0 valid identities found':`1) ${pin} "Developer ID Application: Fixture (TEAM)"`;
+    else if(command==='/usr/bin/plutil')stdout=overrides.bundleId||'com.petmanager.desktop';
+    else if(args.includes('--verbose=4'))stdout=overrides.inspection||'Identifier=com.petmanager.desktop\ndesignated => identifier "com.petmanager.desktop" and anchor apple generic and certificate leaf[subject.OU] = "TEAM"';
+    else if(args.some(a=>a.startsWith('--extract-certificates='))) {
+      const prefix=args.find(a=>a.startsWith('--extract-certificates=')).split('=').slice(1).join('=');
+      fs.writeFileSync(prefix+'0',overrides.wrongLeaf?Buffer.from('different cert'):leaf);
+    } else if(args.includes('--verify')) {
+      assert.ok(args.includes('--deep') && args.includes('--strict'));
+      const requirement=args[args.indexOf('-R')+1];
+      assert.ok(requirement.startsWith('='), 'codesign treats a requirement without = as a filename');
+      assert.ok(requirement.includes(`certificate leaf = H"${pin}"`));
+      assert.ok(requirement.includes('anchor apple generic') && requirement.includes('1.2.840.113635.100.6.1.13'));
+    }
+    return {status:0,stdout,stderr:''};
+  }};
+}
+function signerApp(t) {
+  const root=fixture(t),app=path.join(root,'Fixture.app');macApp(app);
+  return {root,app};
+}
+test('verify-only checks fixed certificate, plist and signed identifier without signing',t=>{
+  const {root,app}=signerApp(t),f=signingFixture(root);
+  runTemplate('sign-macos-local-app.mjs',root,{env:f.env,args:[app,'--verify-only'],spawn:f.spawn});
+  assert.ok(!f.calls.some(c=>c.args.includes('--sign')));
+  assert.ok(f.calls.some(c=>c.args.some(a=>a.startsWith('--extract-certificates='))));
+});
+for(const [label,overrides,message] of [
+  ['invalid keychain identity',{noIdentity:true},/uniquely valid/],
+  ['wrong plist BundleID',{bundleId:'com.other.app'},/BundleID/],
+  ['ad-hoc signature',{inspection:'Identifier=com.petmanager.desktop\nSignature=adhoc'},/certificate-bound/],
+  ['identifier-only DR',{inspection:'Identifier=com.petmanager.desktop\ndesignated => identifier "com.petmanager.desktop"'},/certificate-bound/],
+  ['wrong signature identifier',{inspection:'Identifier=com.other.app\ndesignated => anchor apple generic and certificate leaf'},/identifier/],
+  ['wrong extracted certificate',{wrongLeaf:true},/leaf certificate/],
+  ['native verification failure',{failAt:'--verify'},/command failed/],
+])test(`verify-only rejects ${label}`,t=>{
+  const {root,app}=signerApp(t),f=signingFixture(root,overrides);
+  assert.throws(()=>runTemplate('sign-macos-local-app.mjs',root,{env:f.env,args:[app,'--verify-only'],spawn:f.spawn}),message);
+  assert.ok(!f.calls.some(c=>c.args.includes('--sign')));
+});
+test('fixed config is mandatory and env cannot switch certificates',t=>{
+  const {root,app}=signerApp(t),f=signingFixture(root);
+  assert.throws(()=>runTemplate('sign-macos-local-app.mjs',root,{env:{...f.env,HACHIMI_MAC_SIGNING_IDENTITY:'B'.repeat(40)},args:[app],spawn:f.spawn}),/differs/);
+  assert.equal(f.calls.length,0);
+  fs.writeFileSync(f.env.HACHIMI_LOCAL_CONFIG,JSON.stringify({macos:{signingIdentity:'-'}}));
+  assert.throws(()=>runTemplate('sign-macos-local-app.mjs',root,{env:f.env,args:[app],spawn:f.spawn}),/fixed Developer ID/);
+  assert.equal(f.calls.length,0);
+});
+test('failed sign produces no receipt and never falls back to ad-hoc',t=>{
+  const {root,app}=signerApp(t),f=signingFixture(root,{failAt:'--force'}),receipt=path.join(root,'signed.json');
+  assert.throws(()=>runTemplate('sign-macos-local-app.mjs',root,{env:f.env,args:[app,'--output-receipt',receipt],spawn:f.spawn}),/command failed/);
+  assert.equal(fs.existsSync(receipt),false);
+  assert.equal(f.calls.filter(c=>c.args.includes('--sign')).length,1);
+});
+for(const [entry,args,flag] of [
+  ['desktop-local.py',['bundle','--unsigned'],'--unsigned'],
+  ['release-local.py',['--unsigned-mac'],'--unsigned-mac'],
+])test(`${entry} rejects ${flag} before any build command or directory creation`,()=>{
+  const directory=path.resolve(scripts,'../../scripts/build');
+  const program=`import sys,runpy,subprocess,pathlib\nfrom unittest.mock import patch\nsys.path.insert(0,${JSON.stringify(directory)})\nsys.argv=${JSON.stringify([entry,...args])}\nwith patch.object(subprocess,'run',side_effect=AssertionError('unexpected build')), patch.object(subprocess,'check_output',side_effect=AssertionError('unexpected command')), patch.object(pathlib.Path,'mkdir',side_effect=AssertionError('unexpected output')):\n runpy.run_path(${JSON.stringify(path.join(directory,entry))},run_name='__main__')\n`;
+  const result=nativeSpawnSync('python3',['-c',program],{encoding:'utf8',env:{...process.env,PYTHONDONTWRITEBYTECODE:'1'}});
+  assert.equal(result.status,2,result.stderr);assert.ok(result.stderr.includes(`${flag} is disabled`));
+});
+test('signer discovers workspace config and accepts only matching explicit SHA1',t=>{
+  const base=fixture(t),root=path.join(base,'worktrees'),app=path.join(base,'Fixture.app');macApp(app);
+  const f=signingFixture(base);
+  runTemplate('sign-macos-local-app.mjs',root,{env:{HACHIMI_MAC_SIGNING_IDENTITY:f.pin.toLowerCase()},args:[app,'--verify-only'],spawn:f.spawn});
+  assert.ok(f.calls.some(c=>c.command==='/usr/bin/security'));
+});
+test('verify-only retains receipt protection after native verification',t=>{
+  const {root,app}=signerApp(t),f=signingFixture(root),receipt=path.join(root,'signed.json');
+  fs.writeFileSync(receipt,JSON.stringify(macIdentity(app,version)));
+  assert.throws(()=>runTemplate('sign-macos-local-app.mjs',root,{env:f.env,args:[app,'--verify-only','--receipt',receipt],spawn(command,args){
+    const result=f.spawn(command,args);
+    if(args.includes('--verify'))fs.appendFileSync(path.join(app,'Contents/MacOS/pet-manager-tauri'),'tampered');
+    return result;
+  }}),/receipt/);
+});
+
+test('signer rejects conflicting workspace/config before native signing tools',t=>{
+  const {root,app}=signerApp(t),f=signingFixture(root),other=path.join(root,'unrelated');
+  fs.mkdirSync(other);
+  assert.throws(()=>runTemplate('sign-macos-local-app.mjs',root,{env:{...f.env,HACHIMI_WORKSPACE_ROOT:other},args:[app],spawn:f.spawn}),/workspace\/config/);
+  assert.equal(f.calls.length,0);
+});
+test('signer uses explicit workspace root with its config',t=>{
+  const {root,app}=signerApp(t),f=signingFixture(root);
+  runTemplate('sign-macos-local-app.mjs',root,{env:{HACHIMI_WORKSPACE_ROOT:root},args:[app,'--verify-only'],spawn:f.spawn});
+  assert.ok(f.calls.some(c=>c.command==='/usr/bin/security'));
 });

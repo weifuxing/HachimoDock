@@ -30,13 +30,13 @@ test("fast generation profile keeps Volcano reference frames above Ark minimum h
   assert.equal(resolved.providerConfig.resolution, "480p");
 });
 
-test("fast generation profile keeps Kling on standard short clips", () => {
+test("fast generation profile keeps Kling on short 720p clips", () => {
   const resolved = resolveGenerationSpeedConfig({
     provider: "kling",
-    model: "kling-v1-5",
+    model: "kling-4.0-flash",
   });
 
-  assert.equal(resolved.providerConfig.mode, "standard");
+  assert.equal(resolved.providerConfig.resolution, "720p");
   assert.equal(resolved.providerConfig.duration, 5);
 });
 

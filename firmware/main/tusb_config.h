@@ -33,7 +33,7 @@ extern "C" {
 
 #define CFG_TUD_CDC 0
 #define CFG_TUD_MSC 0
-#define CFG_TUD_HID 0
+#define CFG_TUD_HID 1
 #define CFG_TUD_MIDI 0
 #define CFG_TUD_VENDOR 1
 #define CFG_TUD_VENDOR_EPSIZE 512

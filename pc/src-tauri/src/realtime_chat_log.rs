@@ -56,7 +56,7 @@ pub fn error_kind(error: &str) -> &'static str {
 fn audio_chunk_failure_metadata(details: &Value) -> Value {
     let mut out = serde_json::Map::new();
     let Some(kind) = details["errorKind"].as_str().filter(|v| matches!(*v,
-        "audio_bytes_missing" | "audio_bytes_invalid" | "audio_byte_count_mismatch")) else {
+        "audio_bytes_missing" | "audio_bytes_invalid" | "audio_byte_count_mismatch" | "audio_base64_invalid" | "audio_sequence_mismatch")) else {
         return Value::Object(out);
     };
     out.insert("stage".into(), json!("usb_audio_chunk_rejected"));
@@ -173,6 +173,11 @@ mod tests {
             "dataFieldType":"missing", "dataFieldPresent":false, "base64CharCount":0,
             "priorChunks":3, "priorBytes":1920}));
         assert!(!safe.to_string().contains("PRIVATE_"));
+        assert_eq!(metadata(json!({"stage":"usb_audio_chunk_rejected",
+            "errorKind":"audio_base64_invalid", "seq":4, "base64CharCount":853,
+            "data":"PRIVATE_BASE64"})), json!({"stage":"usb_audio_chunk_rejected",
+            "errorKind":"audio_base64_invalid", "seq":4, "base64CharCount":853,
+            "declaredBytes":null}));
         let bad = metadata(json!({"stage":"usb_audio_chunk_rejected",
             "errorKind":"audio_bytes_invalid", "bytesFieldType":"PRIVATE_TYPE",
             "dataFieldType":"PRIVATE_TYPE", "dataFieldPresent":"PRIVATE_VALUE",

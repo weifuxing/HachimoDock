@@ -192,6 +192,10 @@ function createStateContract({ limit = 256 } = {}) {
         active(entry)
         break
       }
+      case 'assistant/message':
+        // A late message from the previous turn cannot populate this turn's body.
+        if (!sameTurn || entry.turn === null || entry.uncertain) accepted = false
+        break
       case 'step/start':
         if (!ordinal(data.turn)) { invalidate(entry); break }
         if (sameTurn) active(entry)

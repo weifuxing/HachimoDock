@@ -8,7 +8,8 @@ SCRIPT=ROOT/'scripts/platformio_add_p4_toolchain.py'
 
 class Env(dict):
     def __init__(self,root,family):
-        super().__init__({'ENV':{}});self.root=str(root);self.family=family;self.post=[]
+        super().__init__({'ENV': {}, 'PIOENV': f'esp32_p4_pico_{family}'})
+        self.root=str(root);self.family=family;self.post=[]
     def subst(self,value):
         assert value in ('$PROJECT_DIR','$BUILD_DIR');return self.root if value=='$PROJECT_DIR' else str(Path(self.root)/'.pio/build/test')
     def Replace(self,**values):self.update(values)

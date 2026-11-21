@@ -6,6 +6,7 @@
  */
 
 #pragma once
+#include "pet_p4_component_metadata.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -21,6 +22,7 @@
 #include "pet_p4_side_scene_json.h"
 #include "pet_p4_storage_lane.h"
 #include "pet_p4_catalog_profile.h"
+#include "pet_p4_center_layout.h"
 #if PET_P4_CELLS_V1
 #include "pet_p4_cells.h"
 #endif
@@ -120,6 +122,7 @@ typedef struct {
 typedef struct {
   uint8_t count;
   uint32_t data_length;
+  uint32_t wasm_size; /* Bytes stored after the visible image data. */
   pet_p4_miniapp_sprite_t items[PET_P4_MINIAPP_SPRITE_MAX];
   uint8_t pixels[PET_P4_MINIAPP_SPRITE_PIXEL_BYTES_MAX];
 } pet_p4_miniapp_sprite_pack_t;
@@ -173,6 +176,7 @@ typedef struct {
   char media_source[48];
   char confirmation_prompt[121];
   uint32_t image_revision;
+  uint32_t wasm_revision; /* zero when the captured view does not use WASM */
   uint32_t media_generation; /* captured with view under the same runtime lock */
   bool surface_active,side_active,images_changed,confirmation_active;
 #if PET_P4_CELLS_V1
@@ -186,8 +190,12 @@ typedef struct {
 typedef struct {
   char widget_id[PET_P4_MINIAPP_WIDGET_ID_MAX];
   char title[64];
+  pet_p4_component_metadata_t package_metadata;
   bool active;
   uint8_t resource_state;
+  uint32_t center_title_checksum;
+  uint8_t center_title_slot;
+  uint8_t center_title_generation;
   uint8_t image_count;
 } pet_p4_miniapp_catalog_entry_t;
 
@@ -232,8 +240,12 @@ bool pet_p4_miniapp_render_snapshot(pet_p4_miniapp_render_snapshot_t *out,
   pet_p4_miniapp_sprite_pack_t *images,uint32_t *cached_image_revision);
 bool pet_p4_miniapp_side_snapshot(pet_side_scene_t *scene,pet_side_art_t *art);
 bool pet_p4_miniapp_side_axis(int horizontal);
-void pet_p4_miniapp_host_process(uint64_t now_ms,bool visible);
+void pet_p4_miniapp_host_process(uint64_t now_ms,bool visible,bool pc_connected);
 bool pet_p4_miniapp_host_source(const char *source);
+#if PET_P4_SYSTEM_WIFI
+#include "pet_p4_private_feed.h"
+bool pet_p4_miniapp_private_feed(pet_private_feed_t *feed, pet_wifi_endpoint_t *endpoint);
+#endif
 bool pet_p4_miniapp_get_surface_images(pet_p4_miniapp_sprite_pack_t *out, uint32_t *revision);
 bool pet_p4_miniapp_get_sprites(pet_p4_miniapp_sprite_pack_t *out);
 bool pet_p4_miniapp_installed_id(char *out, size_t out_size);
@@ -243,6 +255,14 @@ bool pet_p4_miniapp_catalog_recovery_blocked(void);
 bool pet_p4_miniapp_resource_repair_active(void);
 size_t pet_p4_miniapp_catalog_selected(void);
 bool pet_p4_miniapp_catalog_get(size_t index, pet_p4_miniapp_catalog_entry_t *out);
+pet_center_filter_t pet_p4_miniapp_center_filter(void);
+bool pet_p4_miniapp_center_set_filter(pet_center_filter_t filter);
+size_t pet_p4_miniapp_center_count(void);
+size_t pet_p4_miniapp_center_selected(void);
+size_t pet_p4_miniapp_center_read_title(const pet_p4_miniapp_catalog_entry_t *entry,
+    uint8_t *data, size_t capacity);
+bool pet_p4_miniapp_center_get(size_t index, pet_p4_miniapp_catalog_entry_t *out);
+bool pet_p4_miniapp_center_select(size_t index);
 void pet_p4_miniapp_catalog_focus_active(void);
 bool pet_p4_miniapp_catalog_move(int delta);
 /* Full physical metadata, including hidden records. No resource/save reads.
@@ -308,10 +328,31 @@ bool pet_p4_miniapp_dispatch_input(
   size_t action_size
 );
 
+#define PET_P4_WIDGET_TRANSFER_PROTOCOL "p4-widget-files-v2"
+#define PET_P4_WIDGET_CHUNK_BYTES 4096
+bool pet_p4_miniapp_transfer_begin(const cJSON *payload, char *error, size_t error_size);
+bool pet_p4_miniapp_transfer_chunk(const cJSON *payload, char *error, size_t error_size);
+#define PET_P4_WIDGET_COMMIT_STORAGE_DEFERRED "component storage is busy; commit has not started; staged package preserved"
+#define PET_P4_WIDGET_COMMIT_AUDIO_BUSY "device audio is busy; catalog not committed; staged package preserved"
+#define PET_P4_WIDGET_COMMIT_STORAGE_INTERRUPTED "component storage interrupted; catalog not committed; staged package preserved"
+bool pet_p4_miniapp_transfer_commit(const cJSON *payload, char *error, size_t error_size);
+#if PET_P4_SYSTEM_WIFI
+bool pet_p4_miniapp_lan_install_idle(void);
+void pet_p4_miniapp_lan_bundle_revoke(void);
+bool pet_p4_miniapp_lan_bundle_begin(const cJSON *payload, char *error, size_t error_size);
+bool pet_p4_miniapp_lan_bundle_chunk(const cJSON *payload, char *error, size_t error_size);
+bool pet_p4_miniapp_lan_new_id(const char *id);
+void pet_p4_miniapp_lan_abort(const cJSON *payload);
+bool pet_p4_miniapp_lan_commit(const cJSON *payload, bool (*live)(void *), void *context,
+                                char *error, size_t error_size);
+#endif
+void pet_p4_miniapp_install_status(const cJSON *request, cJSON *response);
 bool pet_p4_miniapp_install_begin(const cJSON *payload, char *error, size_t error_size);
 #if PET_P4_STORAGE_PRESERVE_UNCHANGED
 bool pet_p4_miniapp_install_unchanged(void);
 #endif
+bool pet_p4_miniapp_clock_snapshot(uint64_t now_ms, uint64_t *utc_ms,
+                                  int32_t *offset, uint32_t *age_ms);
 bool pet_p4_miniapp_clock_sync(const cJSON *payload, uint64_t now_ms);
 bool pet_p4_miniapp_install_chunk(const cJSON *payload, char *error, size_t error_size);
 bool pet_p4_miniapp_install_commit(const cJSON *payload, char *error, size_t error_size);

@@ -33,22 +33,31 @@ function installStorage(initial = {}) {
   return values;
 }
 
-test("the six fixed Agents put ChatGPT（Codex） first and use it as the first-run default", () => {
-  assert.equal(DEFAULT_AGENT_ID, "codex");
+test("the fixed Agent order starts with WorkBuddy and ends with Devin", () => {
+  assert.equal(DEFAULT_AGENT_ID, "workbuddy");
   assert.deepEqual(
     FIXED_AGENT_OPTIONS.map((agent) => agent.id),
     [
+      "workbuddy",
       "codex",
+      "deepseek-harness",
+      "mimocode",
       "claude-code",
       "openclaw",
-      "mimocode",
-      "deepseek-harness",
-      "workbuddy",
+      "hermes",
+      "devin",
     ],
   );
   assert.deepEqual(
-    FIXED_AGENT_OPTIONS.slice(0, 2).map((agent) => agent.label),
-    ["ChatGPT（Codex）", "Claude"],
+    FIXED_AGENT_OPTIONS.map((agent) => agent.label),
+    [
+      "WorkBuddy", "ChatGPT（Codex）", "DeepSeek Harness", "MiMo Desktop / MiMoCode",
+      "Claude", "OpenClaw", "Hermes Agent", "Devin",
+    ],
+  );
+  assert.equal(
+    FIXED_AGENT_OPTIONS.find((agent) => agent.id === "devin").detail,
+    "Devin 云端会话状态与气泡；向 Devin Desktop 当前对话追加语音草稿",
   );
 });
 
@@ -133,12 +142,14 @@ test("loadEnabledAgents keeps legacy values to a single active channel", () => {
   assert.deepEqual([...loadEnabledAgents()], ["claude-code"]);
 });
 
-test("normalizeDetectedAgents marks unavailable channels as not bindable", () => {
+test("normalizeDetectedAgents keeps display order across scans and marks unavailable channels", () => {
   const agents = normalizeDetectedAgents([
-    { id: "codex", label: "Codex", detected: true, detail: "installed" },
+    { id: "devin", detected: false },
     { id: "claude-code", label: "Claude Code", detected: true, detail: "installed" },
+    { id: "codex", label: "Codex", detected: true, detail: "installed" },
   ]);
 
+  assert.deepEqual(agents.map((agent) => agent.id), FIXED_AGENT_OPTIONS.map((agent) => agent.id));
   assert.equal(agents.find((agent) => agent.id === "codex")?.detected, true);
   assert.equal(agents.find((agent) => agent.id === "codex")?.label, "ChatGPT（Codex）");
   assert.equal(agents.find((agent) => agent.id === "claude-code")?.label, "Claude");

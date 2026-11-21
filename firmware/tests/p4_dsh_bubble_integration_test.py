@@ -25,14 +25,17 @@ def compile_run(tmp_path, source, *extra):
 
 def test_approval_uses_local_text_without_host_bubble_pin(tmp_path):
     source = (ROOT / "main/pet_p4_renderer.c").read_text()
-    # Use the actual six-argument prototype, rather than duplicating the old
-    # signature in a stub (which would conceal the automatic-merge error).
+    # Use the shared production prototype; approval must pass no host view.
     signature = function(source, "draw_card_body_lines").split("{")[0]
+    overlay = function(source, "draw_approval_overlay")
+    assert "pet_bubble_pixels_" not in overlay
+    assert "renderer_bubble_" not in overlay
     prelude = r'''
 #include <assert.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include "pet_p4_protocol.h"
 #include "pet_p4_bubble_pixels.h"
 #define PET_P4_UI_WIDTH 640
@@ -53,7 +56,10 @@ static int text_y_in_box(const char *t,int s,int y,int h) {(void)t;(void)s;(void
 '''
     spy = signature + r'''{
   (void)x;(void)first_line_y;(void)max_px;(void)color;
-  assert(body && body[0]); assert(host_pixels == NULL); draws++;
+  assert(host_pixels == NULL); /* Shared helper must stay local for approval. */
+  assert(body && body[0]);
+  assert(strcmp(body, draws == 0 ? "无说明" : "local approval") == 0);
+  draws++;
 }
 '''
     main = r'''
@@ -70,7 +76,7 @@ int main(void) {
     constants = "\n".join(line for line in source.splitlines()
                           if line.startswith("#define PET_P4_APPROVAL_CARD_")) + "\n"
     compile_run(tmp_path, prelude + constants + spy + function(source, "draw_approval_button")
-                + function(source, "draw_approval_overlay") + main)
+                + overlay + main)
 
 
 def test_stopped_cue_only_after_admission_and_once_per_revision(tmp_path):

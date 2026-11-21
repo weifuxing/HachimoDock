@@ -19,6 +19,7 @@ const {
   syncMiMoCodePlugin,
 } = require("../hooks/mimocode-install");
 
+const capabilityApi = require("../packages/agent-session-bus/src/local-capability");
 const PLUGIN_SOURCE = path.join(__dirname, "..", "hooks", "mimocode-pet-manager-plugin.js");
 
 test("MiMoCode plugin sync is idempotent and preserves user plugins", () => {
@@ -45,24 +46,35 @@ test("MiMoCode plugin sync is idempotent and preserves user plugins", () => {
   }
 });
 
-test("MiMoCode official lifecycle events publish working, waiting, and done states", async () => {
+test("MiMoCode official lifecycle events publish working, waiting, and done states", async (t) => {
   const received = [];
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on("data", (chunk) => chunks.push(chunk));
     req.on("end", () => {
+      assert.equal(capability.authorize(req, ["hook"]), true);
       received.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end('{"ok":true}');
     });
   });
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
+  const capRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mimo-capability-"));
+  const capDir = path.join(capRoot, "capability");
+  const oldCapDir = process.env.HACHIMODOCK_BRIDGE_CAPABILITY_DIR;
+  process.env.HACHIMODOCK_BRIDGE_CAPABILITY_DIR = capDir;
+  const capability = capabilityApi.createCapability();
   const previousPort = process.env.PET_MANAGER_BRIDGE_PORT;
   process.env.PET_MANAGER_BRIDGE_PORT = String(address.port);
 
   try {
-    const source = fs.readFileSync(PLUGIN_SOURCE, "utf8");
+    capability.publish({ hookPort: address.port });
+    const source = fs.readFileSync(PLUGIN_SOURCE, "utf8").replace(JSON.stringify("__HACHIMO_CAPABILITY_MODULE__"), JSON.stringify(require.resolve("../packages/agent-session-bus/src/local-capability")));
     const dataUrl = `data:text/javascript;base64,${Buffer.from(
       `${source}\n// test-${Date.now()}`,
       "utf8",
@@ -123,9 +135,11 @@ test("MiMoCode official lifecycle events publish working, waiting, and done stat
     assert.ok(received.every((item) => item.session_id === sessionID));
     assert.equal(received[2].display_content, "MiMoCode 状态桥接完成。");
   } finally {
+    capability.clear();
+    if (oldCapDir === undefined) delete process.env.HACHIMODOCK_BRIDGE_CAPABILITY_DIR; else process.env.HACHIMODOCK_BRIDGE_CAPABILITY_DIR = oldCapDir;
+    fs.rmSync(capRoot, { recursive: true, force: true });
     if (previousPort === undefined) delete process.env.PET_MANAGER_BRIDGE_PORT;
     else process.env.PET_MANAGER_BRIDGE_PORT = previousPort;
-    await new Promise((resolve) => server.close(resolve));
   }
 });
 

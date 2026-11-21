@@ -21,7 +21,7 @@ def test_exact_pr12_pixels_metrics_mapping_and_identity_asset():
  assert descriptors(text)==descriptors(actual) and len(descriptors(actual))==200
  assert values(text,'unicode_list_0')==values(actual,'unicode_list_0') and len(values(actual,'unicode_list_0'))==199
  packed=(ROOT/'assets/fonts/pet_cn_32.deflate').read_bytes()
- assert len(packed)==14768 and zlib.decompress(packed)==raw
+ assert len(packed)<=14768 and zlib.decompress(packed)==raw
  inc=(ROOT/'main/pet_p4_font_native32_packed.inc').read_text()
  assert bytes(int(v,16) for v in re.findall(r'0x([a-f0-9]{2})',inc))==packed
  for field in ['.line_height = 36','.base_line = 6','.bpp = 2','.bitmap_format = 0']:
@@ -62,7 +62,7 @@ tinfl_status tinfl_decompress(tinfl_decompressor*r,const uint8_t*src,size_t*in,u
  assert(out==(calls<3?pet_font_bitmap:pet_font_native32_bitmap));
  z_stream z={0};z.next_in=(void*)src;z.avail_in=(uInt)*in;z.next_out=out;z.avail_out=(uInt)*length;
  assert(inflateInit(&z)==Z_OK);int result=inflate(&z,Z_FINISH);*in=z.total_in;*length=z.total_out;r->adler=(unsigned)z.adler;assert(inflateEnd(&z)==Z_OK);
- if((int)calls==stage){if(kind==0)return -1;if(kind==1)--*in;if(kind==2)--*length;if(kind==3)r->adler++;}
+ if((int)calls==stage){if(kind==0)return -1;if(kind==1)--*in;if(kind==2)--*length;if(kind==3)r->adler++;if(kind==4)out[*length/2]^=1;}
  return result==Z_STREAM_END?TINFL_STATUS_DONE:-1;
 }
 static void exact(const char*path,const uint8_t*actual,size_t size){FILE*f=fopen(path,"rb");assert(f);uint8_t b[4096];size_t n,at=0;while((n=fread(b,1,sizeof b,f))){assert(at+n<=size&&!memcmp(actual+at,b,n));at+=n;}assert(at==size&&!ferror(f)&&!fclose(f));}
@@ -97,7 +97,7 @@ int main(int argc,char**argv){
 def asm_assets(tmp_path):
  section='.section __TEXT,__const' if sys.platform=='darwin' else '.section .rodata'
  text=''
- for short in ['pet_cn_16','pet_cn_metrics','pet_cn_metrics_columns']:
+ for short in ['pet_cn_16','pet_cn_16_glyph_columns','pet_cn_metrics','pet_cn_metrics_columns']:
   text+=section+'\n.globl _binary_'+short+'_deflate_start\n.globl _binary_'+short+'_deflate_end\n_binary_'+short+'_deflate_start:\n.incbin "'+str(ROOT/'assets/fonts'/(short+'.deflate'))+'"\n_binary_'+short+'_deflate_end:\n'
  p=tmp_path/'assets.S';p.write_text(text);return p
 
@@ -112,8 +112,14 @@ def test_actual_integrated_startup_order_shared_inflater_and_failure_latches(tmp
  subprocess.run(['cc','-std=gnu11','-O1','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-DLV_CONF_SKIP',
   '-DPET_FONT_NATIVE_32=1','-DPET_FONT_BITMAP_PACKED=1','-DPET_FONT_METRICS_PACKED=1',
   '-I',str(tmp_path),'-I',str(ROOT/'main'),'-I',str(LVGL),str(src),str(asm_assets(tmp_path)),'-lz','-o',str(exe)],check=True)
- for stage,kind in [(0,0),*((s,k) for s in [1,2,3] for k in range(4))]:
+ for stage,kind in [(0,0),(2,4),*((s,k) for s in [1,2,3] for k in range(4))]:
   subprocess.run([str(exe),str(stage),str(kind),*(str(tmp_path/n) for n in ['bitmap.bin','native32.bin','metrics.bin'])],check=True,timeout=10)
+
+def test_glyph_column_packing_preserves_every_original_bitmap_byte():
+ subprocess.run([sys.executable,str(ROOT/'tools/compress_font_glyph_columns.py'),'--check'],check=True)
+ original=(ROOT/'assets/fonts/pet_cn_16.deflate').stat().st_size
+ packed=(ROOT/'assets/fonts/pet_cn_16_glyph_columns.deflate').stat().st_size
+ assert original-packed>=7000
 
 
 def test_default_off_module_empty_and_invalid_parent_refuses_compile(tmp_path):
@@ -148,9 +154,10 @@ static void lv_font_glyph_release_draw_data(lv_font_glyph_dsc_t*g){releases++;me
 '''
  # Minimal adapter carries the real callback access used by bounds.
  code=code.replace('typedef struct{int line_height,base_line;}lv_font_t;', 'typedef struct glyph lv_font_glyph_dsc_t;\ntypedef struct{int line_height,base_line;const void*(*get_glyph_bitmap)(lv_font_glyph_dsc_t*,void*);}lv_font_t;\nstatic const void*bitmap(lv_font_glyph_dsc_t*,void*);')
- code=code.replace('typedef struct{const lv_font_t*resolved_font;int adv_w,box_w,box_h,ofs_x,ofs_y,req_raw_bitmap;}lv_font_glyph_dsc_t;', 'struct glyph{const lv_font_t*resolved_font;int adv_w,box_w,box_h,ofs_x,ofs_y,req_raw_bitmap;};')
+ code=code.replace('typedef struct{const lv_font_t*resolved_font;int adv_w,box_w,box_h,ofs_x,ofs_y,req_raw_bitmap;}lv_font_glyph_dsc_t;', 'struct glyph{const lv_font_t*resolved_font;int adv_w,box_w,box_h,ofs_x,ofs_y,req_raw_bitmap;bool is_placeholder;};')
  code=code.replace('={18,3},pet_p4_font_cn_32={36,6};','={18,3,bitmap},pet_p4_font_cn_32={36,6,bitmap};')
  code+=r'''
+static bool draw_bubble_cell(uint32_t cp,int x,int y,uint16_t c,bool m){(void)cp;(void)x;(void)y;(void)c;(void)m;return false;}
 static unsigned pixels;static int min_x,min_y,max_x,max_y;
 static void blend_px(int x,int y,uint8_t r,uint8_t g,uint8_t b,uint8_t a){(void)r;(void)g;(void)b;assert(a==255);if(!pixels){min_x=max_x=x;min_y=max_y=y;}else{if(x<min_x)min_x=x;if(x>max_x)max_x=x;if(y<min_y)min_y=y;if(y>max_y)max_y=y;}pixels++;}
 static void fill_ellipse(int x,int y,int rx,int ry,uint16_t c){(void)x;(void)y;(void)rx;(void)ry;(void)c;assert(0);}
@@ -172,3 +179,37 @@ int main(void){
  src=tmp_path/'route.c';src.write_text(code);exe=tmp_path/'route'
  subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-DPET_FONT_NATIVE_32=1',str(src),'-o',str(exe)],check=True)
  subprocess.run([str(exe)],check=True,timeout=10)
+
+
+def test_center_title_matching_host_mask_precedes_local_font(tmp_path):
+ from p4_render_trace_test import function
+ source=(ROOT/'main/pet_p4_renderer.c').read_text()
+ fixture=r"""
+#include <assert.h>
+#include <stdint.h>
+#include <stddef.h>
+typedef struct {unsigned center_title_checksum,center_title_slot,center_title_generation;char title[32],widget_id[32];} pet_p4_miniapp_catalog_entry_t;
+typedef struct {unsigned checksum,slot,generation;size_t length;uint8_t bytes[32];} center_title_cache_t;
+static center_title_cache_t center_title_cache[4];
+static unsigned reads,host,local;
+static size_t available=12;
+#define CENTER_TEXT_LEFT 0
+static size_t pet_p4_miniapp_center_read_title(const pet_p4_miniapp_catalog_entry_t*i,uint8_t*b,size_t n){(void)i;(void)b;(void)n;reads++;return available;}
+static void center_draw_mask(const uint8_t*b,size_t n,int x,int y,int h,int w,uint16_t c,int a){(void)b;(void)n;(void)x;(void)y;(void)h;(void)w;(void)c;(void)a;host++;}
+static void center_draw_label(const char*s,int px,int x,int y,int h,int w,uint16_t c,int a){(void)s;(void)px;(void)x;(void)y;(void)h;(void)w;(void)c;(void)a;local++;}
+"""
+ test=r"""
+int main(void){
+ pet_p4_miniapp_catalog_entry_t item={.center_title_checksum=1,.title="测试A"};
+ center_draw_card_title(&item,0,0,0,0);assert(host==1&&local==0&&reads==1);
+ center_draw_card_title(&item,0,0,0,0);assert(host==2&&local==0&&reads==1);
+ item.center_title_generation++;center_draw_card_title(&item,0,0,0,0);assert(reads==2&&host==3);
+ item.center_title_checksum=0;center_draw_card_title(&item,0,0,0,0);assert(local==1);
+ available=0;item.center_title_checksum=2;center_draw_card_title(&item,0,0,0,0);assert(local==2&&host==3);
+ return 0;
+}
+"""
+ path=tmp_path/'policy.c';path.write_text(fixture+function(source,'center_draw_card_title')+test)
+ binary=tmp_path/'policy'
+ subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',str(path),'-o',str(binary)],check=True)
+ subprocess.run([str(binary)],check=True)

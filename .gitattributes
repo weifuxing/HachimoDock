@@ -13,3 +13,4 @@ licenses/** -text -whitespace
 **/NOTICE* -text -whitespace
 **/THIRD_PARTY_NOTICES* -text -whitespace
 integrations/**/vendor/** -text -whitespace
+pc/scripts/petui-llvm-LICENSE.txt -text -whitespace
