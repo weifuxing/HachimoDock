@@ -7,7 +7,7 @@ capture the line with the usual device tooling first.
 
 Stages follow `pet_p4_touch_init()` in `pet_p4_touch.c`:
   not_started -> power_on_wait -> i2c_init -> probe
-  -> identify_cst328 / identify_register_touch -> panel_io -> controller
+  -> identify_cst328 / identify_cst3530 / identify_register_touch -> panel_io -> controller
   -> queue -> task -> interrupt -> ready
 
 Usage:
@@ -53,7 +53,7 @@ def classify(health: dict[str, Any]) -> dict[str, Any]:
     """
     stage = str(health.get("stage", ""))
     error = str(health.get("error", ""))
-    probes = {key: str(health.get(key, "")) for key in ("primaryProbe", "backupProbe", "probe0x1a", "probe0x15", "probe0x38", "probe0x10", "probe0x18")}
+    probes = {key: str(health.get(key, "")) for key in ("primaryProbe", "backupProbe", "probe0x1a", "probe0x15", "probe0x38", "probe0x58", "probe0x10", "probe0x18")}
     interrupt_gpio = health.get("interruptGpio", -1)
     interrupt_mode = type(interrupt_gpio) is int and interrupt_gpio >= 0
     evidence = {"stage": stage, "error": error, **probes, "controller": health.get("controller"), "chipId": health.get("chipId"), "address": health.get("address"), "interruptGpio": interrupt_gpio}
@@ -71,21 +71,24 @@ def classify(health: dict[str, Any]) -> dict[str, Any]:
         return result("bus", f"共享 I2C 总线初始化失败（{error}）；音频编解码器也走这条总线",
                       "检查 I2C 上拉与 SDA/SCL 是否被拉死；确认音频 I2C 是否同样报错（pet_p4_audio.c 的 bsp_i2c_init）")
     if stage == "probe":
-        if TIMEOUT in (probes["primaryProbe"], probes["backupProbe"], probes["probe0x1a"], error):
+        if TIMEOUT in (probes["primaryProbe"], probes["backupProbe"], probes["probe0x1a"], probes["probe0x58"], error):
             return result("bus", "触控地址探测超时，可能存在 SDA/SCL 被拉住或总线时钟异常",
                           "断开触控排线后重试探测；若仍超时是总线/其他器件问题，不是触控面板")
         codec_alive = OK in (probes["probe0x10"], probes["probe0x18"])
-        if OK not in (probes["probe0x1a"], probes["probe0x15"], probes["probe0x38"]):
+        if OK not in (probes["probe0x1a"], probes["probe0x15"], probes["probe0x38"], probes["probe0x58"]):
             if codec_alive:
-                return result("hardware", "音频地址 0x10/0x18 有应答，触控地址 0x1A/0x5D/0x14/0x15/0x38 的探测结果均为无应答",
+                return result("hardware", "音频地址 0x10/0x18 有应答，已探测的触控地址均无应答",
                               "检查触控排线是否插反/未插、面板是否带触控层、触控供电；固件无需改动")
             return result("hardware", "所有探测地址都无应答，且音频编解码地址也无应答：整条总线上没有设备应答",
                           "优先怀疑总线供电或排线；确认音频是否同样不可用后再归类为触控硬件问题")
-        return result("driver", "0x1A/0x15/0x38 中存在应答地址，初始化停在 probe 阶段",
+        return result("driver", "触控地址存在应答，初始化停在 probe 阶段",
                       "少见；对照 pet_p4_touch_init() 的 probe 分支与 g_touch_io 创建错误")
     if stage == "identify_cst328":
         return result("driver", f"CST328 协议或分辨率校验失败（{error}）",
                       "核对启动日志中的 0xCACA 标识、480×640 分辨率及 I²C 读写结果")
+    if stage == "identify_cst3530":
+        return result("driver", f"0x58 有应答，CST3530 试读未完成（{error}）",
+                      "核对 32 位读帧命令、坐标范围及 I²C 读写结果")
     if stage == "identify_register_touch":
         if error == NOT_SUPPORTED:
             return result("driver", f"地址 0x{int(health.get('address') or 0):02x} 应答，但芯片 ID 0x{int(health.get('chipId') or 0):02x} 既不是 CST826(0x11) 也不是 FT6336U(0x64)",

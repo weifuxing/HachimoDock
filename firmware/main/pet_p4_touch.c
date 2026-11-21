@@ -32,10 +32,13 @@
 #define PET_P4_TOUCH_QUEUE_LENGTH 32
 #define PET_P4_TOUCH_REACTION_MIN_MS 1200ULL
 #define PET_P4_CST328_ADDRESS 0x1a
+#define PET_P4_CST3530_ADDRESS 0x58
+#define PET_P4_CST3530_TIMEOUT_MS 20
 
 static const char *TAG = "pet-p4-touch";
 static esp_lcd_touch_handle_t g_touch;
 static esp_lcd_panel_io_handle_t g_touch_io;
+static i2c_master_dev_handle_t g_cst3530_i2c;
 static QueueHandle_t g_touch_queue;
 static TaskHandle_t g_touch_task;
 static bool g_touch_interrupt_mode;
@@ -47,6 +50,7 @@ static const char *g_init_stage = "not_started";
 static esp_err_t g_init_error, g_primary_error, g_backup_error;
 static esp_err_t g_probe_15 = ESP_ERR_INVALID_STATE, g_probe_38 = ESP_ERR_INVALID_STATE, g_probe_10 = ESP_ERR_INVALID_STATE,
                  g_probe_18 = ESP_ERR_INVALID_STATE, g_probe_1a = ESP_ERR_INVALID_STATE;
+static esp_err_t g_probe_58 = ESP_ERR_INVALID_STATE;
 static int g_address;
 static bool g_ft6336;
 static bool g_cst826;
@@ -54,7 +58,8 @@ static bool g_cst328;
 static uint16_t g_chip_id;
 static uint8_t g_vendor_id;
 const char *pet_p4_touch_controller(void) {
-  return g_cst328 ? "CST328" : g_cst826 ? "CST826" : g_ft6336 ? "FT6336U" : g_touch ? "GT911" : "unidentified";
+  return g_cst328 ? "CST328" : g_cst3530_i2c ? "CST3530" :
+         g_cst826 ? "CST826" : g_ft6336 ? "FT6336U" : g_touch ? "GT911" : "unidentified";
 }
 static atomic_uint g_samples, g_contacts, g_poll_errors, g_consecutive_errors;
 static atomic_int g_panel_x, g_panel_y, g_ui_x, g_ui_y;
@@ -79,7 +84,7 @@ void pet_p4_touch_health(pet_p4_touch_health_t *out) {
     .stage = g_init_stage, .error = g_init_error, .address = g_address,
     .primary_error = g_primary_error, .backup_error = g_backup_error,
     .probe_15 = g_probe_15, .probe_38 = g_probe_38, .probe_10 = g_probe_10, .probe_18 = g_probe_18,
-    .probe_1a = g_probe_1a,
+    .probe_1a = g_probe_1a, .probe_58 = g_probe_58,
     .interrupt_gpio = g_touch_interrupt_mode ? BSP_LCD_TOUCH_INT : GPIO_NUM_NC,
     .chip_id = g_chip_id, .vendor_id = g_vendor_id,
     .samples = atomic_load(&g_samples), .contacts = atomic_load(&g_contacts),
@@ -162,15 +167,15 @@ static bool wait_for_touch_interrupt(pet_p4_touch_decoder_t *decoder,
   return false;
 }
 
-/* CST328 uses 16-bit registers and a 27-byte report, unlike CST826.
- * Register layout follows Hynitron CST328 datasheet v2.2, section 12.
- * Clear/sync sequence follows the Waveshare and ESPHome CST328 drivers. */
 typedef struct {
   bool has_report;
   unsigned count;
   int x, y, track_id;
-} cst328_frame_t;
+} cst_touch_frame_t;
 
+/* CST328 uses 16-bit registers and a 27-byte report, unlike CST826.
+ * Register layout follows Hynitron CST328 datasheet v2.2, section 12.
+ * Clear/sync sequence follows the Waveshare and ESPHome CST328 drivers. */
 static esp_err_t cst328_ack_report(void) {
   const uint8_t clear = 0, sync = 0xab;
   esp_err_t err = esp_lcd_panel_io_tx_param(g_touch_io, 0xd005, &clear, 1);
@@ -178,7 +183,7 @@ static esp_err_t cst328_ack_report(void) {
   return err != ESP_OK ? err : sync_err;
 }
 
-static esp_err_t read_cst328_touch(cst328_frame_t *frame) {
+static esp_err_t read_cst328_touch(cst_touch_frame_t *frame) {
   uint8_t raw[27];
   memset(frame, 0, sizeof(*frame));
   esp_err_t err = esp_lcd_panel_io_rx_param(g_touch_io, 0xd000, raw, sizeof(raw));
@@ -237,6 +242,58 @@ static esp_err_t identify_cst328_touch(void) {
   return ESP_OK;
 }
 
+/* CST3530 transaction and point format follow Waveshare's ESP-IDF driver.
+ * Only the first point is needed because multiple contacts cancel the stroke. */
+static esp_err_t read_cst3530_touch(cst_touch_frame_t *frame) {
+  const uint8_t report_command[] = {0xd0, 0x07, 0x00, 0x00};
+  const uint8_t report_done[] = {0xd0, 0x00, 0x02, 0xab};
+  uint8_t raw[9];
+  memset(frame, 0, sizeof(*frame));
+  esp_err_t err = i2c_master_transmit(g_cst3530_i2c, report_command,
+                                     sizeof(report_command), PET_P4_CST3530_TIMEOUT_MS);
+  if (err != ESP_OK) return err;
+  err = i2c_master_receive(g_cst3530_i2c, raw, sizeof(raw), PET_P4_CST3530_TIMEOUT_MS);
+  if (err != ESP_OK) return err;
+
+  unsigned count = raw[3] & 0x0f;
+  unsigned event = raw[8] >> 4;
+  if (count > 10 || (count && event > 2)) return ESP_ERR_INVALID_RESPONSE;
+  if (count == 1 && event != 0) {
+    frame->x = raw[4] | ((raw[7] & 0x0f) << 8);
+    frame->y = raw[5] | ((raw[7] & 0xf0) << 4);
+    if (frame->x >= PET_P4_CST3530_RAW_WIDTH || frame->y >= PET_P4_CST3530_RAW_HEIGHT)
+      return ESP_ERR_INVALID_RESPONSE;
+    frame->track_id = raw[8] & 0x0f;
+  }
+  err = i2c_master_transmit(g_cst3530_i2c, report_done,
+                           sizeof(report_done), PET_P4_CST3530_TIMEOUT_MS);
+  if (err != ESP_OK) return err;
+  frame->has_report = true;
+  frame->count = event == 0 ? 0 : count;
+  return ESP_OK;
+}
+
+static void close_cst3530(void) {
+  if (g_cst3530_i2c) {
+    i2c_master_bus_rm_device(g_cst3530_i2c);
+    g_cst3530_i2c = NULL;
+  }
+}
+
+static esp_err_t init_cst3530(i2c_master_bus_handle_t bus) {
+  const i2c_device_config_t config = {
+    .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+    .device_address = PET_P4_CST3530_ADDRESS,
+    .scl_speed_hz = 400000,
+  };
+  esp_err_t err = i2c_master_bus_add_device(bus, &config, &g_cst3530_i2c);
+  if (err != ESP_OK) return err;
+  cst_touch_frame_t frame;
+  err = read_cst3530_touch(&frame);
+  if (err != ESP_OK) close_cst3530();
+  return err;
+}
+
 static void touch_task(void *arg) {
   (void) arg;
   pet_p4_touch_decoder_t decoder;
@@ -263,9 +320,9 @@ static void touch_task(void *arg) {
     bool contact_ambiguous = false;
     int ui_x = decoder.current_x;
     int ui_y = decoder.current_y;
-    if (g_cst328) {
-      cst328_frame_t frame;
-      err = read_cst328_touch(&frame);
+    if (g_cst328 || g_cst3530_i2c) {
+      cst_touch_frame_t frame;
+      err = g_cst328 ? read_cst328_touch(&frame) : read_cst3530_touch(&frame);
       if (err == ESP_OK && !frame.has_report) {
         if (!g_touch_interrupt_mode) {
           consecutive_errors = 0;
@@ -289,7 +346,8 @@ static void touch_task(void *arg) {
         if (pressed) {
           contact_ambiguous = pointer.down && track_id != frame.track_id;
           track_id = frame.track_id;
-          pet_p4_touch_panel_to_ui(frame.x, frame.y, &ui_x, &ui_y);
+          if (g_cst3530_i2c) pet_p4_touch_cst3530_to_ui(frame.x, frame.y, &ui_x, &ui_y);
+          else pet_p4_touch_panel_to_ui(frame.x, frame.y, &ui_x, &ui_y);
           atomic_store(&g_panel_x, frame.x); atomic_store(&g_panel_y, frame.y);
         }
       }
@@ -420,6 +478,7 @@ esp_err_t pet_p4_touch_init(void) {
   g_cst328 = g_cst826 = g_ft6336 = false;
   g_touch_interrupt_mode = false;
   g_chip_id = g_vendor_id = 0;
+  g_probe_58 = ESP_ERR_INVALID_STATE;
   g_init_stage = "power_on_wait";
   /* The adapter uses RC resets. Also allow direct touch-only initialization. */
   uint64_t uptime_ms = monotonic_ms();
@@ -476,7 +535,7 @@ esp_err_t pet_p4_touch_init(void) {
       ? ESP_ERR_TIMEOUT : ESP_ERR_NOT_FOUND;
     ESP_LOGW(TAG, "GT911 probe failed SDA=%d SCL=%d 0x5d=%s 0x14=%s; reset not driven",
       BSP_I2C_SDA, BSP_I2C_SCL, esp_err_to_name(g_primary_error), esp_err_to_name(g_backup_error));
-    if (g_probe_38 != ESP_OK && g_probe_15 != ESP_OK) return g_init_error;
+    g_probe_58 = i2c_master_probe(i2c_bus, PET_P4_CST3530_ADDRESS, 50);
     io_config = (esp_lcd_panel_io_i2c_config_t){
       .dev_addr = 0x38, .scl_speed_hz = 100000, .control_phase_bytes = 1,
       .lcd_cmd_bits = 8, .flags.disable_control_phase = 1,
@@ -492,12 +551,20 @@ esp_err_t pet_p4_touch_init(void) {
       if (g_touch_io) esp_lcd_panel_io_del(g_touch_io);
       g_touch_io = NULL;
     }
-    if (!g_touch_io) { g_init_error = err; return err; }
+    if (!g_touch_io && g_probe_58 == ESP_OK) {
+      g_address = PET_P4_CST3530_ADDRESS;
+      g_init_stage = "identify_cst3530";
+      err = init_cst3530(i2c_bus);
+      if (err != ESP_OK) { g_init_error = err; return err; }
+    } else if (!g_touch_io) {
+      if (g_probe_15 == ESP_OK || g_probe_38 == ESP_OK) g_init_error = err;
+      return g_init_error;
+    }
   }
   io_config.dev_addr = g_address;
   g_init_stage = "panel_io";
   io_config.scl_speed_hz = (g_cst328 || g_ft6336 || g_cst826) ? 100000 : CONFIG_BSP_I2C_CLK_SPEED_HZ;
-  if (!g_touch_io) err = esp_lcd_new_panel_io_i2c(i2c_bus, &io_config, &g_touch_io);
+  if (!g_touch_io && !g_cst3530_i2c) err = esp_lcd_new_panel_io_i2c(i2c_bus, &io_config, &g_touch_io);
   if (err != ESP_OK) { g_init_error = err; return err; }
 
   const esp_lcd_touch_config_t touch_config = {
@@ -516,7 +583,8 @@ esp_err_t pet_p4_touch_init(void) {
     },
   };
   g_init_stage = "controller";
-  if (!g_cst328 && !g_ft6336 && !g_cst826) err = esp_lcd_touch_new_i2c_gt911(g_touch_io, &touch_config, &g_touch);
+  if (!g_cst328 && !g_cst3530_i2c && !g_ft6336 && !g_cst826)
+    err = esp_lcd_touch_new_i2c_gt911(g_touch_io, &touch_config, &g_touch);
   if (err != ESP_OK) {
     esp_lcd_panel_io_del(g_touch_io);
     g_touch_io = NULL;
@@ -552,7 +620,9 @@ task_fail:
   g_touch_interrupt_mode = false;
   if (g_touch) esp_lcd_touch_del(g_touch);
   g_touch = NULL; g_cst328 = g_cst826 = g_ft6336 = false;
-  esp_lcd_panel_io_del(g_touch_io); g_touch_io = NULL;
+  if (g_touch_io) esp_lcd_panel_io_del(g_touch_io);
+  g_touch_io = NULL;
+  close_cst3530();
   g_init_error = err;
   return g_init_error;
 }

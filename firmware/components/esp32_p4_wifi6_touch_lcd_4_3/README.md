@@ -16,9 +16,11 @@ uses software LCD reset and a write-only DSI command path, and keeps reset GPIOs
 unassigned. Rev A powers the backlight continuously. The runtime uses DCS
 display off/on to reveal the first rendered frame.
 
-CST328 uses I2C address 0x1A on GPIO7/GPIO8. The default is 15 ms polling
-with INT unconnected. Wiring TP_INT to GPIO22 and defining
-`BSP_LCD_TOUCH_INT=22` enables the optional interrupt path.
+CST328 uses I2C address 0x1A and CST3530 uses 0x58 on GPIO7/GPIO8.
+The default is 15 ms polling with INT unconnected. The HD28091 CST3530
+module's 240x320 coordinate range is scaled and rotated into the 640x480
+interface. Wiring TP_INT to GPIO22 and defining `BSP_LCD_TOUCH_INT=22`
+enables the optional CST328 interrupt path.
 
 ## Backlight
 
@@ -34,7 +36,7 @@ bsp_display_brightness_set(100);
 | Capability | Implementation |
 |---|---|
 | Display | Local `esp_lcd_st7701` 2.0.2 override |
-| Touch | Project CST328 polling driver and `espressif/esp_lcd_touch_gt911` fallback |
+| Touch | Project CST328 and CST3530 polling drivers and `espressif/esp_lcd_touch_gt911` fallback |
 | Audio | `espressif/esp_codec_dev` |
 | SD card | ESP-IDF |
 

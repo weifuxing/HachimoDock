@@ -750,6 +750,7 @@ static char *prepare_status(
     cJSON_AddStringToObject(touch, "probe0x10", esp_err_to_name(touch_health.probe_10));
     cJSON_AddStringToObject(touch, "probe0x18", esp_err_to_name(touch_health.probe_18));
     cJSON_AddStringToObject(touch, "probe0x1a", esp_err_to_name(touch_health.probe_1a));
+    cJSON_AddStringToObject(touch, "probe0x58", esp_err_to_name(touch_health.probe_58));
     cJSON_AddNumberToObject(touch, "interruptGpio", touch_health.interrupt_gpio);
     cJSON_AddNumberToObject(touch, "samples", touch_health.samples);
     cJSON_AddNumberToObject(touch, "contacts", touch_health.contacts);

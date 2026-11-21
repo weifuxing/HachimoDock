@@ -9,8 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_cst328_register_protocol(tmp_path):
     source = (ROOT / "main/pet_p4_touch.c").read_text(encoding="utf-8")
-    helpers = source.split("/* CST328 uses 16-bit registers", 1)[1]
-    helpers = "/* CST328 uses 16-bit registers" + helpers.split("static void touch_task", 1)[0]
+    start = source.index("typedef struct {\n  bool has_report;")
+    helpers = source[start:source.index("/* CST3530 transaction", start)]
     idle_branch = source.split("      if (err == ESP_OK && !frame.has_report) {", 1)[1]
     idle_branch = "if (err == ESP_OK && !frame.has_report) {" + idle_branch.split("      if (err == ESP_OK) {", 1)[0]
     harness = r'''
@@ -84,7 +84,7 @@ static int esp_lcd_panel_io_tx_param(void *io, int reg, const void *data, size_t
 static void idle_poll(pet_p4_pointer_decoder_t *out_pointer, pet_p4_touch_decoder_t *out_decoder) {
   pet_p4_pointer_decoder_t pointer = *out_pointer;
   pet_p4_touch_decoder_t decoder = *out_decoder;
-  cst328_frame_t frame = {0};
+  cst_touch_frame_t frame = {0};
   esp_err_t err = ESP_OK;
   unsigned consecutive_errors = 99;
   int ui_x = decoder.current_x, ui_y = decoder.current_y, last_wake = 0;
@@ -109,7 +109,7 @@ static void assert_ack(void) {
   assert(write_count == 2 && written[0] == 0xd005 && written[1] == 0xd000);
 }
 int main(void) {
-  cst328_frame_t frame;
+  cst_touch_frame_t frame;
   reset(); assert(identify_cst328_touch() == ESP_OK);
   assert(g_cst328 && g_chip_id == 0x0328);
   assert(write_count == 4 && written[0] == 0xd101 && written[1] == 0xd109);

@@ -29,17 +29,19 @@ def patch(source, output, ar, nm, objcopy):
     members = subprocess.check_output([ar, 't', str(source)], text=True).splitlines()
     if len(set(members)) != len(members):
         raise ValueError('Duplicate tinyH264 archive members')
+    if any(member in ('', '.', '..') or Path(member).name != member for member in members):
+        raise ValueError('Unexpected archive member path')
     with tempfile.TemporaryDirectory(dir=output.parent) as temporary:
         tmp = Path(temporary)
         patched = tmp / 'libtinyh264_simd.a'
         shutil.copyfile(source, patched)
+        objects = tmp / 'objects'
+        objects.mkdir()
+        # Some Windows ar builds write CRLF through stdout in print mode.
+        subprocess.run([ar, 'x', str(source)], cwd=objects, check=True)
         found = set()
         for member in members:
-            if Path(member).name != member:
-                raise ValueError('Unexpected archive member path')
-            original = subprocess.check_output([ar, 'p', str(source), member])
-            obj = tmp / member
-            obj.write_bytes(original)
+            obj = objects / member
             undefined = {line.split()[-1] for line in subprocess.check_output(
                 [nm, '-u', str(obj)], text=True).splitlines() if line.split()}
             names = sorted(undefined & RENAMES.keys())

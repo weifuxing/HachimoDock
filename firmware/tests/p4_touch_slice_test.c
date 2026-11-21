@@ -44,6 +44,12 @@ static void decoder_tests(void) {
   assert(!pet_p4_touch_decoder_update(&d, false, 50, 50, 702, &g));
   int x,y; pet_p4_touch_panel_to_ui(0,0,&x,&y); assert(x==0 && y==479);
   pet_p4_touch_panel_to_ui(479,639,&x,&y); assert(x==639 && y==0);
+  pet_p4_touch_cst3530_to_ui(239,0,&x,&y); assert(x==0 && y==0);
+  pet_p4_touch_cst3530_to_ui(239,319,&x,&y); assert(x==639 && y==0);
+  pet_p4_touch_cst3530_to_ui(0,0,&x,&y); assert(x==0 && y==479);
+  pet_p4_touch_cst3530_to_ui(0,319,&x,&y); assert(x==639 && y==479);
+  pet_p4_touch_cst3530_to_ui(227,14,&x,&y); assert(x==28 && y==24);
+  pet_p4_touch_cst3530_to_ui(219,306,&x,&y); assert(x==613 && y==40);
   pet_p4_touch_cst826_to_ui(0,639,&x,&y); assert(x==0 && y==0);
   pet_p4_touch_cst826_to_ui(479,639,&x,&y); assert(x==0 && y==479);
   pet_p4_touch_cst826_to_ui(0,0,&x,&y); assert(x==639 && y==0);

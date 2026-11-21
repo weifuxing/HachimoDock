@@ -25,6 +25,9 @@ typedef int esp_err_t, BaseType_t;
 typedef uint32_t TickType_t;
 typedef void *TaskHandle_t, *QueueHandle_t, *esp_lcd_touch_handle_t;
 typedef void *esp_lcd_panel_io_handle_t, *i2c_master_bus_handle_t;
+typedef void *i2c_master_dev_handle_t;
+enum { I2C_ADDR_BIT_LEN_7 };
+typedef struct { int dev_addr_length, device_address, scl_speed_hz; } i2c_device_config_t;
 #define ESP_OK 0
 #define ESP_ERR_INVALID_STATE 1
 #define ESP_ERR_INVALID_RESPONSE 2
@@ -97,8 +100,34 @@ static int esp_lcd_touch_get_data(void *touch, esp_lcd_touch_point_data_t *point
 }
 static int bsp_i2c_init(void) { return ESP_OK; }
 static void *bsp_i2c_get_handle(void) { return (void *)1; }
+static int detected_address = 0x1a;
+static uint8_t cst3530_report[9];
+static unsigned cst3530_acknowledgements, cst3530_removals;
+static int i2c_master_bus_add_device(void *bus, const i2c_device_config_t *config, void **device) {
+  assert(bus && config->device_address == 0x58 && config->scl_speed_hz == 400000);
+  *device = (void *)5;
+  return ESP_OK;
+}
+static int i2c_master_bus_rm_device(void *device) {
+  assert(device == (void *)5);
+  cst3530_removals++;
+  return ESP_OK;
+}
+static int i2c_master_transmit(void *device, const uint8_t *data, size_t size, int timeout) {
+  assert(device == (void *)5 && size == 4 && timeout == 20);
+  if (memcmp(data, (uint8_t[]){0xd0, 0x07, 0, 0}, 4) != 0) {
+    assert(memcmp(data, (uint8_t[]){0xd0, 0, 2, 0xab}, 4) == 0);
+    cst3530_acknowledgements++;
+  }
+  return ESP_OK;
+}
+static int i2c_master_receive(void *device, uint8_t *data, size_t size, int timeout) {
+  assert(device == (void *)5 && size == sizeof(cst3530_report) && timeout == 20);
+  memcpy(data, cst3530_report, size);
+  return ESP_OK;
+}
 static int i2c_master_probe(void *bus, int addr, int timeout) {
-  (void)bus; (void)timeout; return addr == 0x1a ? ESP_OK : ESP_ERR_NOT_FOUND;
+  (void)bus; (void)timeout; return addr == detected_address ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 static int esp_lcd_new_panel_io_i2c(void *bus, const esp_lcd_panel_io_i2c_config_t *config, void **io) {
   (void)bus; assert(config->dev_addr == 0x1a && config->lcd_cmd_bits == 16); *io=(void *)2; return ESP_OK;
@@ -287,6 +316,28 @@ int main(void) {
   assert(pet_p4_touch_init() == ESP_OK && g_ready && g_touch_interrupt_mode && notifications == 1);
   reset(); g_touch_io=g_touch_task=g_touch_queue=NULL; clock_ms=1000; fake_interrupt_gpio=GPIO_NUM_NC;
   assert(pet_p4_touch_init() == ESP_OK && g_ready && !g_touch_interrupt_mode && !registered_handler && !notifications);
+
+  reset(); g_touch_io=g_touch_task=g_touch_queue=NULL; clock_ms=1000;
+  detected_address=0x58;
+  assert(pet_p4_touch_init() == ESP_OK && pet_p4_touch_ready() && !g_touch_interrupt_mode);
+  assert(g_address == 0x58 && g_probe_58 == ESP_OK && !g_cst328 && !g_touch_io);
+  assert(cst3530_acknowledgements == 1 && strcmp(pet_p4_touch_controller(), "CST3530") == 0);
+  const uint8_t press[9] = {0, 0, 0, 1, 0xef, 0x3f, 30, 0x10, 0x14};
+  memcpy(cst3530_report, press, sizeof(press));
+  cst_touch_frame_t frame;
+  assert(read_cst3530_touch(&frame) == ESP_OK && frame.has_report && frame.count == 1);
+  assert(frame.x == 239 && frame.y == 319 && frame.track_id == 4);
+  cst3530_report[8] = 4;
+  assert(read_cst3530_touch(&frame) == ESP_OK && frame.count == 0);
+  cst3530_report[3] = 2; cst3530_report[8] = 0x24;
+  assert(read_cst3530_touch(&frame) == ESP_OK && frame.count == 2);
+  cst3530_report[3] = 1; cst3530_report[4] = 0xf0;
+  assert(read_cst3530_touch(&frame) == ESP_ERR_INVALID_RESPONSE && !frame.has_report);
+  assert(cst3530_acknowledgements == 4);
+  close_cst3530();
+  reset(); g_touch_io=g_touch_task=g_touch_queue=NULL; clock_ms=1000;
+  assert(pet_p4_touch_init() == ESP_ERR_INVALID_RESPONSE && !g_cst3530_i2c && !g_ready);
+  assert(cst3530_removals == 2);
 }
 '''
     path = tmp_path / "cst328_interrupt.c"

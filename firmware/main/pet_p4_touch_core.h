@@ -4,6 +4,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#define PET_P4_CST3530_RAW_WIDTH 240
+#define PET_P4_CST3530_RAW_HEIGHT 320
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -79,6 +82,7 @@ bool pet_p4_touch_decoder_update(
   pet_p4_touch_event_t *event
 );
 void pet_p4_touch_panel_to_ui(int panel_x, int panel_y, int *ui_x, int *ui_y);
+void pet_p4_touch_cst3530_to_ui(int raw_x, int raw_y, int *ui_x, int *ui_y);
 /* Installed CST826 panel's sensor axes are 180 degrees from LCD native axes. */
 void pet_p4_touch_cst826_to_ui(int panel_x, int panel_y, int *ui_x, int *ui_y);
 const char *pet_p4_touch_gesture_name(pet_p4_touch_gesture_t gesture);

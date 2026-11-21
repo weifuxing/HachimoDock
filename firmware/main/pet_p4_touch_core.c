@@ -119,6 +119,15 @@ void pet_p4_touch_panel_to_ui(int panel_x, int panel_y, int *ui_x, int *ui_y) {
   if (ui_y) *ui_y = PET_P4_PANEL_WIDTH - 1 - panel_x;
 }
 
+void pet_p4_touch_cst3530_to_ui(int raw_x, int raw_y, int *ui_x, int *ui_y) {
+  // The HD28091 touch module reports 240x320 while the LCD is 480x640.
+  const int max_x = PET_P4_CST3530_RAW_WIDTH - 1;
+  const int max_y = PET_P4_CST3530_RAW_HEIGHT - 1;
+  int panel_x = (clamp_int(raw_x, 0, max_x) * (PET_P4_PANEL_WIDTH - 1) + max_x / 2) / max_x;
+  int panel_y = (clamp_int(raw_y, 0, max_y) * (PET_P4_PANEL_HEIGHT - 1) + max_y / 2) / max_y;
+  pet_p4_touch_panel_to_ui(panel_x, panel_y, ui_x, ui_y);
+}
+
 const char *pet_p4_touch_gesture_name(pet_p4_touch_gesture_t gesture) {
   switch (gesture) {
     case PET_P4_TOUCH_TAP: return "tap";
